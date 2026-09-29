@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeshCore Vanity Key Generator</title>
+    <script src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+        }
+        h1 { color: #58a6ff; margin-bottom: 8px; font-size: 24px; }
+        .subtitle { color: #8b949e; margin-bottom: 32px; font-size: 14px; }
+        .form { margin-bottom: 24px; }
+        .field { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 6px; font-size: 14px; }
+        input[type="text"] {
+            width: 100%;
+            padding: 10px 14px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            font-size: 16px;
+            font-family: 'SFMono-Regular', Consolas, monospace;
+        }
+        input[type="text"]:focus { outline: none; border-color: #58a6ff; }
+        input[type="text"].error { border-color: #f85149; }
+        input[type="text"]:disabled { opacity: 0.5; }
+        .error-msg { color: #f85149; font-size: 12px; margin-top: 4px; display: none; }
+        .checkbox-field { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
+        .checkbox-field input[type="checkbox"] { width: 18px; height: 18px; accent-color: #58a6ff; }
+        .checkbox-field input[type="checkbox"]:disabled { opacity: 0.5; }
+        .checkbox-field label { margin-bottom: 0; cursor: pointer; }
+        .buttons { display: flex; gap: 12px; }
+        button {
+            padding: 10px 24px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        #start-btn { background: #238636; color: white; }
+        #start-btn:hover:not(:disabled) { background: #2ea043; }
+        #start-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+        #stop-btn { background: #da3633; color: white; }
+        #stop-btn:hover:not(:disabled) { background: #f85149; }
+        #stop-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+        .estimate { font-size: 12px; color: #8b949e; margin-top: 12px; }
+        #progress { margin-top: 24px; }
+        #progress-text { font-size: 14px; color: #8b949e; font-family: 'SFMono-Regular', Consolas, monospace; }
+        #result { margin-top: 24px; padding: 20px; background: #0d1117; border: 1px solid #238636; border-radius: 8px; }
+        #result h2 { color: #3fb950; font-size: 18px; margin-bottom: 16px; }
+        .result-field { margin-bottom: 16px; }
+        .result-field label { font-size: 12px; color: #8b949e; margin-bottom: 4px; }
+        .result-field code {
+            display: block;
+            padding: 10px;
+            background: #161b22;
+            border-radius: 4px;
+            font-size: 12px;
+            word-break: break-all;
+            margin-bottom: 8px;
+        }
+        .copy-btn { padding: 6px 12px; font-size: 12px; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+        .copy-btn:hover { background: #30363d; }
+        #result-stats { font-size: 13px; color: #8b949e; margin-top: 12px; }
+        .hidden { display: none; }
+        .info { margin-top: 20px; padding: 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; font-size: 12px; color: #8b949e; }
+        .info a { color: #58a6ff; text-decoration: none; }
+        .info a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>MeshCore Vanity Key Generator</h1>
+        <p class="subtitle">Generate Ed25519 keys with custom hex prefix/suffix patterns using your browser's computational power.</p>
+
+        <div class="form">
+            <div class="field">
+                <label for="prefix">Prefix (hex)</label>
+                <input type="text" id="prefix" placeholder="e.g., ab" maxlength="64" oninput="validateHex(this); updateEstimate()">
+                <span class="error-msg" id="prefix-error"></span>
+            </div>
+
+            <div class="field">
+                <label for="suffix">Suffix (hex)</label>
+                <input type="text" id="suffix" placeholder="e.g., cd" maxlength="64" oninput="validateHex(this); updateEstimate()">
+                <span class="error-msg" id="suffix-error"></span>
+            </div>
+
+            <div class="checkbox-field">
+                <input type="checkbox" id="match-both" checked onchange="updateEstimate()">
+                <label for="match-both">Match both prefix AND suffix</label>
+            </div>
+
+            <div class="buttons">
+                <button id="start-btn" onclick="startMining()">Start Mining</button>
+                <button id="stop-btn" onclick="stopMining()" disabled>Stop</button>
+            </div>
+
+            <p id="estimate" class="estimate"></p>
+        </div>
+
+        <div id="progress" class="hidden">
+            <p id="progress-text">Attempts: 0 | Rate: 0/s</p>
+        </div>
+
+        <div id="result" class="hidden">
+            <h2>Key Found!</h2>
+            <div class="result-field">
+                <label>Public Key (hex)</label>
+                <code id="result-public"></code>
+                <button class="copy-btn" onclick="copyToClipboard('result-public', this)">Copy</button>
+            </div>
+            <div class="result-field">
+                <label>Private Key (hex)</label>
+                <code id="result-private"></code>
+                <button class="copy-btn" onclick="copyToClipboard('result-private', this)">Copy</button>
+            </div>
+            <p id="result-stats"></p>
+            <button onclick="resetForm()">New Search</button>
+        </div>
+
+        <div class="info">
+            <p><strong>How it works:</strong> This page uses Web Workers to search for Ed25519 keys in the background using a scalar-walk optimization.</p>
+            <p style="margin-top: 8px;"><strong>Tip:</strong> Shorter patterns are found faster. A 2-char prefix takes seconds; a 6-char pattern may take hours.</p>
+            <p style="margin-top: 8px;">Inspired by <a href="https://meshcore.co.uk/">MeshCore</a>.</p>
+        </div>
+    </div>
+
+    <script>
+        let worker = null;
+        let mining = false;
+
+        function validateHex(input) {
+            const errorEl = document.getElementById(input.id + '-error');
+            const value = input.value;
+            if (value && !/^[0-9a-fA-F]*$/.test(value)) {
+                input.classList.add('error');
+                errorEl.textContent = 'Invalid hex characters';
+                errorEl.style.display = 'block';
+                return false;
+            } else {
+                input.classList.remove('error');
+                errorEl.style.display = 'none';
+                return true;
+            }
+        }
+
+        function validateForm() {
+            const prefixInput = document.getElementById('prefix');
+            const suffixInput = document.getElementById('suffix');
+            const prefixValid = validateHex(prefixInput);
+            const suffixValid = validateHex(suffixInput);
+
+            if (!prefixValid || !suffixValid) return false;
+            if (!prefixInput.value && !suffixInput.value) {
+                alert('Please enter at least a prefix or suffix.');
+                return false;
+            }
+            return true;
+        }
+
+        function updateEstimate() {
+            const prefix = document.getElementById('prefix').value;
+            const suffix = document.getElementById('suffix').value;
+            const matchBoth = document.getElementById('match-both').checked;
+            const estimateEl = document.getElementById('estimate');
+
+            if (!prefix && !suffix) {
+                estimateEl.textContent = '';
+                return;
+            }
+
+            let expected;
+            if (matchBoth) {
+                expected = Math.pow(16, prefix.length + suffix.length);
+            } else {
+                expected = Math.pow(16, Math.max(prefix.length, suffix.length));
+            }
+
+            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString();
+        }
+
+        function setFormDisabled(disabled) {
+            document.getElementById('prefix').disabled = disabled;
+            document.getElementById('suffix').disabled = disabled;
+            document.getElementById('match-both').disabled = disabled;
+        }
+
+        function startMining() {
+            if (mining) return;
+            if (typeof Worker === 'undefined') {
+                alert('Your browser does not support Web Workers. Please use a modern browser.');
+                return;
+            }
+            if (!validateForm()) return;
+
+            const prefix = document.getElementById('prefix').value.toLowerCase();
+            const suffix = document.getElementById('suffix').value.toLowerCase();
+            const matchBoth = document.getElementById('match-both').checked;
+
+            const workerCode = `
+                importScripts('https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js');
+
+                self.onmessage = function(e) {
+                    if (typeof nacl === 'undefined') {
+                        self.postMessage({ type: 'error', message: 'Failed to load cryptographic library. Please check your internet connection and refresh.' });
+                        return;
+                    }
+
+                    const { prefix, suffix, matchBoth } = e.data;
+                    const prefixLower = prefix.toLowerCase();
+                    const suffixLower = suffix.toLowerCase();
+
+                    let attempts = 0;
+                    const startTime = Date.now();
+
+                    let seed = new Uint8Array(32);
+                    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+                        crypto.getRandomValues(seed);
+                    } else {
+                        for (let i = 0; i < 32; i++) {
+                            seed[i] = Math.floor(Math.random() * 256);
+                        }
+                    }
+                    let scalar = BigInt('0x' + Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join(''));
+
+                    while (true) {
+                        scalar = (scalar + 1n) & ((1n << 256n) - 1n);
+                        const seedHex = scalar.toString(16).padStart(64, '0');
+                        const seedBytes = new Uint8Array(32);
+                        for (let i = 0; i < 32; i++) {
+                            seedBytes[i] = parseInt(seedHex.substr(i * 2, 2), 16);
+                        }
+
+                        const keyPair = nacl.sign.keyPair.fromSeed(seedBytes);
+                        const publicKeyHex = Array.from(keyPair.publicKey).map(b => b.toString(16).padStart(2, '0')).join('');
+
+                        let match = false;
+                        if (matchBoth) {
+                            match = publicKeyHex.startsWith(prefixLower) && publicKeyHex.endsWith(suffixLower);
+                        } else {
+                            match = publicKeyHex.startsWith(prefixLower) || publicKeyHex.endsWith(suffixLower);
+                        }
+
+                        if (match) {
+                            self.postMessage({
+                                type: 'found',
+                                publicKey: publicKeyHex,
+                                privateKey: seedHex,
+                                attempts: attempts,
+                                elapsed: (Date.now() - startTime) / 1000
+                            });
+                            return;
+                        }
+
+                        attempts++;
+
+                        if (attempts % 1000 === 0) {
+                            const elapsed = (Date.now() - startTime) / 1000;
+                            const rate = attempts / elapsed;
+                            self.postMessage({
+                                type: 'progress',
+                                attempts: attempts,
+                                rate: rate
+                            });
+                        }
+                    }
+                };
+            `;
+
+            const blob = new Blob([workerCode], { type: 'application/javascript' });
+            worker = new Worker(URL.createObjectURL(blob));
+
+            worker.onmessage = function(e) {
+                if (e.data.type === 'progress') {
+                    document.getElementById('progress-text').textContent =
+                        'Attempts: ' + e.data.attempts.toLocaleString() + ' | Rate: ' + Math.round(e.data.rate).toLocaleString() + '/s';
+                } else if (e.data.type === 'found') {
+                    mining = false;
+                    setFormDisabled(false);
+                    document.getElementById('start-btn').disabled = false;
+                    document.getElementById('stop-btn').disabled = true;
+                    document.getElementById('progress').classList.add('hidden');
+                    document.getElementById('result').classList.remove('hidden');
+                    document.getElementById('result-public').textContent = e.data.publicKey;
+                    document.getElementById('result-private').textContent = e.data.privateKey;
+                    document.getElementById('result-stats').textContent =
+                        'Found in ' + e.data.attempts.toLocaleString() + ' attempts (' + e.data.elapsed.toFixed(2) + 's)';
+                    worker.terminate();
+                    worker = null;
+                } else if (e.data.type === 'error') {
+                    mining = false;
+                    setFormDisabled(false);
+                    document.getElementById('start-btn').disabled = false;
+                    document.getElementById('stop-btn').disabled = true;
+                    document.getElementById('progress').classList.add('hidden');
+                    alert(e.data.message);
+                    worker.terminate();
+                    worker = null;
+                }
+            };
+
+            worker.postMessage({ prefix, suffix, matchBoth });
+
+            mining = true;
+            setFormDisabled(true);
+            document.getElementById('start-btn').disabled = true;
+            document.getElementById('stop-btn').disabled = false;
+            document.getElementById('progress').classList.remove('hidden');
+            document.getElementById('result').classList.add('hidden');
+        }
+
+        function stopMining() {
+            if (worker) {
+                worker.terminate();
+                worker = null;
+            }
+            mining = false;
+            setFormDisabled(false);
+            document.getElementById('start-btn').disabled = false;
+            document.getElementById('stop-btn').disabled = true;
+            document.getElementById('progress').classList.add('hidden');
+        }
+
+        function copyToClipboard(elementId, btn) {
+            const text = document.getElementById(elementId).textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                const original = btn.textContent;
+                btn.textContent = 'Copied!';
+                setTimeout(() => btn.textContent = original, 2000);
+            });
+        }
+
+        function resetForm() {
+            document.getElementById('result').classList.add('hidden');
+            document.getElementById('prefix').value = '';
+            document.getElementById('suffix').value = '';
+            document.getElementById('estimate').textContent = '';
+        }
+
+        window.addEventListener('beforeunload', function() {
+            if (worker) {
+                worker.terminate();
+            }
+        });
+    </script>
+</body>
+</html>
