@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Tests for meshcore_vanity.py"""
+
+import base64
+import pytest
+
+from meshcore_vanity import (
+    encode_public_key,
+    generate_vanity_key,
+    _base58_encode,
+    _bech32_encode,
+    _validate_prefix,
+    _validate_seed,
+    _validate_hrp,
+    meshcore_expanded_private_key,
+    serialize_private_key,
+    serialize_public_key,
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
+
+
+def test_encode_base64():
+    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    pub = priv.public_key()
+    encoded = encode_public_key(pub, "base64")
+    assert isinstance(encoded, str)
+    decoded = base64.b64decode(encoded)
+    assert decoded == pub.public_bytes_raw()
+
+
+def test_encode_base64url():
+    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    pub = priv.public_key()
+    encoded = encode_public_key(pub, "base64url")
+    assert isinstance(encoded, str)
+    assert "=" not in encoded
+    assert "+" not in encoded
+    assert "/" not in encoded
+    padded = encoded + "=" * ((4 - len(encoded) % 4) % 4)
+    decoded = base64.urlsafe_b64decode(padded)
+    assert decoded == pub.public_bytes_raw()
+
+
+def test_encode_hex():
+    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    pub = priv.public_key()
+    encoded = encode_public_key(pub, "hex")
+    assert isinstance(encoded, str)
+    assert len(encoded) == 64
+    assert all(c in "0123456789abcdef" for c in encoded)
+    assert bytes.fromhex(encoded) == pub.public_bytes_raw()
+
+
+def test_encode_base58():
+    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    pub = priv.public_key()
+    encoded = encode_public_key(pub, "base58")
+    assert isinstance(encoded, str)
+    assert len(encoded) > 0
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    assert all(c in alphabet for c in encoded)
+
+
+def test_encode_bech32():
+    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    pub = priv.public_key()
+    encoded = encode_public_key(pub, "bech32", hrp="mc")
+    assert isinstance(encoded, str)
+    assert encoded.startswith("mc1")
+    assert len(encoded) > 10
+
+
+def test_base58_encode_known():
+    assert _base58_encode(b"") == ""
+    assert _base58_encode(b"\x00") == "1"
+    assert _base58_encode(b"\x00\x00") == "11"
+    assert _base58_encode(b"\x61") == "2g"
+    assert _base58_encode(b"\x62\x62\x62") == "a3gV"
+    assert _base58_encode(b"\x63\x63\x63\x63") == "3YMA8z"
+
+
+def test_bech32_encode_known():
+    # BIP-0173 test vectors
+    assert _bech32_encode("a", b"") == "a12uel5l"
+    assert _bech32_encode("abcdef", b"") == "abcdef1hu3qdg"
+    # 32 bytes of data with hrp='mc' should produce 61-char string
+    data = bytes(range(32))
+    result = _bech32_encode("mc", data)
+    assert len(result) == 61
+    assert result.startswith("mc1")
+
+
+def test_generate_vanity_key_short_prefix():
+    result = generate_vanity_key("ab", encoding="hex", max_attempts=100000)
+    assert result.encoded.startswith("ab")
+    assert result.attempts >= 0
+    assert result.elapsed > 0
+    assert isinstance(result.private_key, Ed25519PrivateKey)
+    assert isinstance(result.public_key, Ed25519PublicKey)
+
+
+def test_serialize_private_key():
+    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    serialized = serialize_private_key(priv)
+    assert isinstance(serialized, bytes)
+    assert len(serialized) == 32
+    restored = Ed25519PrivateKey.from_private_bytes(serialized)
+    assert restored.private_bytes_raw() == priv.private_bytes_raw()
+
+
+def test_serialize_public_key():
+    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    pub = priv.public_key()
+    serialized = serialize_public_key(pub)
+    assert isinstance(serialized, bytes)
+    assert len(serialized) == 32
+    restored = Ed25519PublicKey.from_public_bytes(serialized)
+    assert restored.public_bytes_raw() == pub.public_bytes_raw()
+
+
+def test_validate_prefix_valid():
+    _validate_prefix("abc", "hex")  # valid hex
+    _validate_prefix("ABC", "base64")  # valid base64
+    _validate_prefix("123", "base58")  # valid base58
+    _validate_prefix("mc1q", "bech32")  # valid bech32 with '1'
+
+
+def test_validate_prefix_case_insensitive_hex_bech32():
+    # Uppercase is accepted when matching case-insensitively.
+    _validate_prefix("AB", "hex", case_insensitive=True)
+    _validate_prefix("NE", "bech32", case_insensitive=True)
+    with pytest.raises(ValueError, match="invalid characters"):
+        _validate_prefix("AB", "hex", case_insensitive=False)
+    with pytest.raises(ValueError, match="invalid characters"):
+        _validate_prefix("NEO", "bech32", case_insensitive=False)
+
+
+def test_validate_prefix_invalid():
+    with pytest.raises(ValueError, match="invalid characters"):
+        _validate_prefix("xyz", "hex")  # invalid hex
+    with pytest.raises(ValueError, match="invalid characters"):
+        _validate_prefix("abc!", "base64")  # invalid base64
+    with pytest.raises(ValueError, match="invalid characters"):
+        _validate_prefix("0", "base58")  # '0' not in base58
+    with pytest.raises(ValueError, match="cannot be empty"):
+        _validate_prefix("", "hex")
+
+
+def test_validate_seed():
+    assert _validate_seed(None) is not None
+    assert len(_validate_seed(None)) == 32
+    seed = bytes(range(32))
+    assert _validate_seed(seed) == seed
+    with pytest.raises(ValueError, match="32 bytes"):
+        _validate_seed(b"short")
+    with pytest.raises(ValueError, match="32 bytes"):
+        _validate_seed(b"x" * 33)
+
+
+def test_validate_hrp():
+    _validate_hrp("mc")
+    _validate_hrp("meshcore")
+    _validate_hrp("a" * 83)
+    with pytest.raises(ValueError, match="length must be 1-83"):
+        _validate_hrp("")
+    with pytest.raises(ValueError, match="length must be 1-83"):
+        _validate_hrp("a" * 84)
+    with pytest.raises(ValueError, match="printable ASCII"):
+        _validate_hrp("bad hrp")  # space not allowed
+    with pytest.raises(ValueError, match="printable ASCII"):
+        _validate_hrp("bad\thrp")  # tab not allowed
+
+
+def test_generate_vanity_key_with_seed():
+    """Test deterministic generation with seed."""
+    result1 = generate_vanity_key("ab", encoding="hex", max_attempts=100000, seed=bytes(32))
+    result2 = generate_vanity_key("ab", encoding="hex", max_attempts=100000, seed=bytes(32))
+    assert result1.encoded == result2.encoded
+    assert result1.attempts == result2.attempts
+
+
+def test_generate_vanity_key_max_attempts():
+    with pytest.raises(RuntimeError, match="exceeded max_attempts"):
+        generate_vanity_key("deadbeefcafe", encoding="hex", max_attempts=10)
+
+
+def test_generate_vanity_key_progress_interval():
+    with pytest.raises(ValueError, match="positive"):
+        generate_vanity_key("ab", encoding="hex", progress_interval=0)
+    with pytest.raises(ValueError, match="positive"):
+        generate_vanity_key("ab", encoding="hex", progress_interval=-1)
+
+
+def test_generate_vanity_key_max_attempts_zero():
+    with pytest.raises(ValueError, match="positive"):
+        generate_vanity_key("ab", encoding="hex", max_attempts=0)
+    with pytest.raises(ValueError, match="positive"):
+        generate_vanity_key("ab", encoding="hex", max_attempts=-1)
+
+
+def test_generate_vanity_key_bech32_impossible_prefix():
+    with pytest.raises(ValueError, match="impossible with hrp"):
+        generate_vanity_key("ne", encoding="bech32", hrp="mc", max_attempts=10)
+    # Compatible prefixes pass validation (may or may not match in 1 attempt).
+    try:
+        generate_vanity_key("mc1qqqqqqqqqq", encoding="bech32", hrp="mc", max_attempts=1)
+    except RuntimeError:
+        pass
+
+
+def test_meshcore_expanded_private_key():
+    import hashlib
+
+    seed = bytes(range(32))
+    expanded = meshcore_expanded_private_key(seed)
+    assert len(expanded) == 64
+    h = hashlib.sha512(seed).digest()
+    # Clamping bits per RFC 8032.
+    assert expanded[0] == h[0] & 0xF8
+    assert expanded[31] == ((h[31] & 0x7F) | 0x40)
+    # Nonce half passes through untouched.
+    assert expanded[32:] == h[32:]
+    with pytest.raises(ValueError, match="32 bytes"):
+        meshcore_expanded_private_key(b"short")
+
+
+def test_generate_vanity_key_carries_private_seed():
+    result = generate_vanity_key("ab", encoding="hex", max_attempts=100000, seed=bytes(32))
+    assert len(result.private_seed) == 32
+    assert serialize_private_key(result.private_key) == result.private_seed
+    # Expanded form round-trips through the helper.
+    assert len(meshcore_expanded_private_key(result.private_seed)) == 64
+
+
+def test_main_smoke(monkeypatch, capsys):
+    import sys
+    import meshcore_vanity as mv
+
+    monkeypatch.setattr(
+        sys, "argv", ["meshcore_vanity.py", "ab", "--encoding", "hex", "--max-attempts", "100000"]
+    )
+    assert mv.main() == 0
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("ab")
+
+    # Impossible bech32 prefix exits 2, not an infinite search.
+    monkeypatch.setattr(
+        sys, "argv", ["meshcore_vanity.py", "ne", "--encoding", "bech32", "--max-attempts", "10"]
+    )
+    assert mv.main() == 2
+
+    # Strict seed parsing rejects whitespace-embedded hex.
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["meshcore_vanity.py", "ab", "--encoding", "hex", "--seed", "00 " * 32],
+    )
+    assert mv.main() == 2
+
+
+def test_generate_vanity_key_empty_prefix():
+    with pytest.raises(ValueError, match="cannot be empty"):
+        generate_vanity_key("", encoding="hex")
+
+
+def test_generate_vanity_key_long_prefix():
+    # Prefixes longer than the encoding can ever produce fail fast.
+    with pytest.raises(ValueError, match="too long"):
+        generate_vanity_key("a" * 100, encoding="hex", max_attempts=10)
+    with pytest.raises(ValueError, match="too long"):
+        generate_vanity_key("a" * 45, encoding="base64", max_attempts=10)
+    with pytest.raises(ValueError, match="too long"):
+        generate_vanity_key("a" * 44, encoding="base64url", max_attempts=10)
+    # Boundary lengths are still accepted (may just not match).
+    try:
+        generate_vanity_key("a" * 64, encoding="hex", max_attempts=1)
+    except RuntimeError:
+        pass
+
+
+def test_generate_vanity_key_both_mode():
+    # Both mode: pattern must match at both start and end
+    # Use single char "a" for high probability (1/16^2 = 1/256)
+    result = generate_vanity_key("a", encoding="hex", both=True, max_attempts=50000)
+    assert result.encoded.startswith("a")
+    assert result.encoded.endswith("a")
+    assert result.attempts >= 0
+    
+    # Case sensitive
+    result = generate_vanity_key("a", encoding="hex", both=True, max_attempts=50000, case_insensitive=False)
+    assert result.encoded.startswith("a")
+    assert result.encoded.endswith("a")
+
+
+def test_generate_vanity_key_both_mutually_exclusive():
+    with pytest.raises(ValueError, match="cannot use --both with --suffix"):
+        generate_vanity_key("ab", encoding="hex", suffix=True, both=True, max_attempts=10)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
