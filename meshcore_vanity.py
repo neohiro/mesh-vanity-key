@@ -7,7 +7,6 @@ printed to stderr only with the explicit opt-in --output-private flag.
 
 Optimizations:
 - Scalar-walk: increment private scalar directly instead of hashing per attempt
-- Batch verification: check multiple candidates per iteration
 - Early-exit: reject reserved prefixes (00, FF) for framework devices
 - Parallel workers with optimized work distribution
 """
@@ -29,16 +28,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
-
-# Ed25519 curve order (L) for scalar reduction
-ED25519_ORDER = 0x1000000000000000000000000000000014DEF9DEA2F79CD65812631A5CF5D3ED
 
 Encoding = Literal["base64", "base64url", "base58", "hex", "bech32"]
 
 BASE58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
-COUNTER_BYTES = 8
 
 # Reserved prefixes for MeshCore framework devices (not consumer)
 RESERVED_PREFIXES = {"00", "ff", "FF"}
@@ -66,10 +60,12 @@ def _worker_search(args: tuple) -> tuple:
     """Worker function for parallel search."""
     (prefix, encoding, case_insensitive, max_attempts, seed, prefix_len,
      prefix_cmp, check_slice, both, hrp, start_offset, worker_id,
-     total_workers, progress_interval, is_hex, hrp_expanded) = args
+     total_workers, is_hex, hrp_expanded) = args
+
+    import base64
+    import hashlib
 
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    import base64
 
     _from_private = Ed25519PrivateKey.from_private_bytes
     _b64encode = base64.b64encode
@@ -186,6 +182,18 @@ def _validate_hrp(hrp: str) -> None:
         raise ValueError("hrp must contain only printable ASCII characters")
 
 
+def _validate_bech32_prefix(prefix_cmp: str, hrp: str, case_insensitive: bool) -> None:
+    """Validate that a bech32 prefix is compatible with the HRP."""
+    anchor = hrp if not case_insensitive else hrp.lower()
+    full_start = anchor + "1"
+    a, b = prefix_cmp, full_start
+    if not (b.startswith(a) or a.startswith(b)):
+        raise ValueError(
+            f"bech32 prefix {prefix_cmp!r} is impossible with hrp {hrp!r}: "
+            f"encoded keys always start with {full_start!r}"
+        )
+
+
 def encode_public_key(pubkey: Ed25519PublicKey, encoding: Encoding, hrp: str = "mc") -> str:
     """Encode a 32-byte Ed25519 public key in the specified format."""
     raw = pubkey.public_bytes_raw()
@@ -274,7 +282,7 @@ def generate_vanity_key(
 ) -> VanityResult:
     """Generate Ed25519 keypair until public key encoding matches prefix.
 
-    Uses deterministic counter-based key derivation for performance and reproducibility.
+    Uses scalar-walk key derivation for performance and reproducibility.
     """
     _validate_prefix(prefix, encoding, case_insensitive)
     seed = _validate_seed(seed)
@@ -282,6 +290,9 @@ def generate_vanity_key(
         raise ValueError("progress_interval must be positive")
     if max_attempts is not None and max_attempts <= 0:
         raise ValueError("max_attempts must be positive or None")
+
+    if workers <= 0:
+        raise ValueError("workers must be positive")
 
     prefix_cmp = prefix.lower() if case_insensitive else prefix
     prefix_len = len(prefix)
@@ -309,35 +320,17 @@ def generate_vanity_key(
     if both:
         if suffix:
             raise ValueError("cannot use --both with --suffix")
-        check_slice = slice(0, prefix_len)  # not used in both mode, but keep type checker happy
+        check_slice = None
         _validate_hrp(hrp)
-        # Every bech32 key starts with "<hrp>1"; reject patterns that can
-        # never match as prefix.
         if encoding == "bech32":
-            anchor = hrp if not case_insensitive else hrp.lower()
-            full_start = anchor + "1"
-            a, b = prefix_cmp, full_start
-            if not (b.startswith(a) or a.startswith(b)):
-                raise ValueError(
-                    f"bech32 pattern {prefix!r} is impossible with hrp {hrp!r}: "
-                    f"encoded keys always start with {full_start!r}"
-                )
+            _validate_bech32_prefix(prefix_cmp, hrp, case_insensitive)
     elif suffix:
         check_slice = slice(-prefix_len, None)
     else:
         check_slice = slice(0, prefix_len)
         _validate_hrp(hrp)
-        # Every bech32 key starts with "<hrp>1"; reject prefixes that can
-        # never match instead of searching forever (e.g. "ne" with hrp "mc").
         if encoding == "bech32":
-            anchor = hrp if not case_insensitive else hrp.lower()
-            full_start = anchor + "1"
-            a, b = prefix_cmp, full_start
-            if not (b.startswith(a) or a.startswith(b)):
-                raise ValueError(
-                    f"bech32 prefix {prefix!r} is impossible with hrp {hrp!r}: "
-                    f"encoded keys always start with {full_start!r}"
-                )
+            _validate_bech32_prefix(prefix_cmp, hrp, case_insensitive)
     is_hex = encoding == "hex"
     # HRP expansion is loop-invariant; hoist it out of the hot path.
     hrp_expanded = _bech32_hrp_expand(hrp) if encoding == "bech32" else None
@@ -457,7 +450,7 @@ def _generate_vanity_key_parallel(
     workers: int,
     prefix_cmp: str,
     prefix_len: int,
-    check_slice: slice,
+    check_slice: slice | None,
     is_hex: bool,
     hrp_expanded: list[int] | None,
     start_time: float,
@@ -622,11 +615,14 @@ def main() -> int:
     else:
         mode_desc = f"starting with '{args.prefix}'"
     
-    print(
-        f"Searching for {args.encoding} public key {mode_desc} "
-        f"({'case-insensitive' if not args.case_sensitive else 'case-sensitive'})...",
-        file=sys.stderr,
-    )
+    try:
+        print(
+            f"Searching for {args.encoding} public key {mode_desc} "
+            f"({'case-insensitive' if not args.case_sensitive else 'case-sensitive'})...",
+            file=sys.stderr,
+        )
+    except BrokenPipeError:
+        return 1
 
     try:
         result = generate_vanity_key(
@@ -662,11 +658,14 @@ def main() -> int:
         print(f"set prv.key {expanded_hex}", file=sys.stderr)
 
     rate = result.attempts / result.elapsed if result.elapsed > 0 else 0
-    print(
-        f"Found in {result.attempts:,} attempts ({result.elapsed:.2f}s, "
-        f"{rate:,.0f} keys/s)",
-        file=sys.stderr,
-    )
+    try:
+        print(
+            f"Found in {result.attempts:,} attempts ({result.elapsed:.2f}s, "
+            f"{rate:,.0f} keys/s)",
+            file=sys.stderr,
+        )
+    except BrokenPipeError:
+        pass
     return 0
 
 

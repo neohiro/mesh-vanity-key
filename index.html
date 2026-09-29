@@ -213,11 +213,17 @@
                 alert('Your browser does not support Web Workers. Please use a modern browser.');
                 return;
             }
+            if (typeof nacl === 'undefined') {
+                alert('Failed to load cryptographic library. Please check your internet connection and refresh.');
+                return;
+            }
             if (!validateForm()) return;
 
             const prefix = document.getElementById('prefix').value.toLowerCase();
             const suffix = document.getElementById('suffix').value.toLowerCase();
             const matchBoth = document.getElementById('match-both').checked;
+
+            document.getElementById('estimate').textContent = '';
 
             const workerCode = `
                 importScripts('https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js');

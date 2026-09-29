@@ -298,5 +298,35 @@ def test_generate_vanity_key_both_mutually_exclusive():
         generate_vanity_key("ab", encoding="hex", suffix=True, both=True, max_attempts=10)
 
 
+def test_generate_vanity_key_parallel():
+    result = generate_vanity_key("ab", encoding="hex", max_attempts=100000, workers=2)
+    assert result.encoded.startswith("ab")
+    assert result.attempts >= 0
+
+
+def test_generate_vanity_key_suffix():
+    result = generate_vanity_key("ab", encoding="hex", suffix=True, max_attempts=100000)
+    assert result.encoded.endswith("ab")
+
+
+def test_generate_vanity_key_case_sensitive():
+    result = generate_vanity_key("ab", encoding="hex", case_insensitive=False, max_attempts=100000)
+    assert result.encoded.startswith("ab")
+
+
+def test_encode_public_key_invalid_encoding():
+    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    pub = priv.public_key()
+    with pytest.raises(ValueError, match="unknown encoding"):
+        encode_public_key(pub, "invalid")
+
+
+def test_generate_vanity_key_workers_validation():
+    with pytest.raises(ValueError, match="workers must be positive"):
+        generate_vanity_key("ab", encoding="hex", workers=0)
+    with pytest.raises(ValueError, match="workers must be positive"):
+        generate_vanity_key("ab", encoding="hex", workers=-1)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
