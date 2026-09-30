@@ -212,8 +212,11 @@
 
         <div id="results"></div>
         <div id="history-bar" class="history-bar hidden">
+            <button class="remove-btn" onclick="exportHistory('json')">Export JSON</button>
+            <button class="remove-btn" onclick="exportHistory('csv')">Export CSV</button>
             <button class="remove-btn" onclick="clearHistory()">Clear saved keys</button>
             <span class="history-note">Keys are stored only in this browser (localStorage) and survive refresh.</span>
+            <span class="history-note" id="history-warn" style="display: none; color: #f0c040;"></span>
         </div>
 
         <div class="info">
@@ -766,12 +769,37 @@ function startMining() {
             }
         }
 
+        function isQuotaError(e) {
+            return e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014);
+        }
+
         function persistHistory() {
             try {
                 localStorage.setItem(HISTORY_KEY, JSON.stringify(savedKeys));
+                return;
             } catch (e) {
-                // Quota or privacy mode: history still works for this session.
+                if (!isQuotaError(e)) return;  // privacy mode etc: session-only history
             }
+            // Storage full: evict oldest-first until the newest fits, then
+            // tell the user instead of silently dropping into session-only mode.
+            while (savedKeys.length > 1) {
+                savedKeys.shift();
+                try {
+                    localStorage.setItem(HISTORY_KEY, JSON.stringify(savedKeys));
+                    renderHistory(false);
+                    showHistoryWarn('Browser storage full: oldest saved keys were evicted.');
+                    return;
+                } catch (e) {
+                    if (!isQuotaError(e)) return;
+                }
+            }
+        }
+
+        function showHistoryWarn(msg) {
+            const warn = document.getElementById('history-warn');
+            if (!warn) return;
+            warn.textContent = msg;
+            warn.style.display = 'inline';
         }
 
         function addKeyToHistory(entry) {
@@ -786,6 +814,37 @@ function startMining() {
             savedKeys.splice(index, 1);
             persistHistory();
             renderHistory(false);
+        }
+
+        function downloadFile(filename, mime, content) {
+            const blob = new Blob([content], { type: mime });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }
+
+        function csvCell(v) {
+            return '"' + String(v === undefined || v === null ? '' : v).replace(/"/g, '""') + '"';
+        }
+
+        function exportHistory(format) {
+            if (!savedKeys.length) return;
+            if (format === 'csv') {
+                const header = ['n', 'publicKey', 'privateKey', 'attempts', 'elapsed', 'pattern', 'minedAt'];
+                const lines = [header.map(csvCell).join(',')];
+                for (const e of savedKeys) {
+                    lines.push(header.map(h => csvCell(e[h])).join(','));
+                }
+                downloadFile('meshcore-vanity-keys.csv', 'text/csv', lines.join('\n'));
+            } else {
+                downloadFile('meshcore-vanity-keys.json', 'application/json',
+                    JSON.stringify(savedKeys, null, 2));
+            }
         }
 
         function clearHistory() {

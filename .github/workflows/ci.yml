@@ -32,3 +32,21 @@ jobs:
 
       - name: Syntax-check main inline JS
         run: node --check /tmp/inline-js/main.js
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install chromium
+          sudo -n playwright install-deps chromium
+
+      - name: Browser smoke test
+        run: python tools/smoke_browser.py
