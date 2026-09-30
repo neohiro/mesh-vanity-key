@@ -401,6 +401,8 @@ def generate_vanity_key(
                 # Early reject reserved prefixes for framework devices
                 if encoded[:2].lower() in RESERVED_PREFIXES:
                     attempts += 1
+                    if max_attempts is not None and attempts >= max_attempts:
+                        raise RuntimeError(f"exceeded max_attempts={max_attempts}")
                     continue
             elif encoding == "base64":
                 encoded = _b64encode(raw).decode()
@@ -471,7 +473,7 @@ def _generate_vanity_key_parallel(
     hrp_expanded: list[int] | None,
     start_time: float,
 ) -> VanityResult:
-    """Parallel vanity key search using multiprocessing."""
+    """Parallel vanity key search using multiprocessing with early exit."""
     import multiprocessing as mp
     
     ctx = mp.get_context("spawn")
@@ -485,35 +487,69 @@ def _generate_vanity_key_parallel(
                 is_hex, hrp_expanded
             ))
         
-        results = pool.map(_worker_search, worker_args)
+        # Use imap_unordered for early exit on first result
+        # Track progress across workers
+        total_attempts = 0
+        last_progress_print = start_time
         
-        # Find the first successful result
-        for priv_seed, worker_attempts, _ in results:
-            if priv_seed is not None:
-                # Reconstruct the key from private seed
-                priv = nacl.signing.SigningKey(priv_seed)
-                pub = priv.verify_key
-                raw = bytes(pub)
-                if is_hex:
-                    encoded = raw.hex()
-                elif encoding == "base64":
-                    encoded = base64.b64encode(raw).decode()
-                elif encoding == "base64url":
-                    encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
-                elif encoding == "base58":
-                    encoded = _base58_encode(raw)
-                else:
-                    encoded = _bech32_encode(hrp, raw, hrp_expanded)
+        try:
+            for priv_seed, worker_attempts, _ in pool.imap_unordered(_worker_search, worker_args):
+                total_attempts += worker_attempts
                 
+                # Progress reporting (aggregate across workers)
                 elapsed = time.perf_counter() - start_time
-                return VanityResult(
-                    private_key=priv,
-                    public_key=pub,
-                    encoded=encoded,
-                    attempts=worker_attempts,
-                    elapsed=elapsed,
-                    private_seed=priv_seed,
-                )
+                if elapsed - (last_progress_print - start_time) >= (progress_interval / 50000.0) and elapsed > 0:
+                    rate = total_attempts / elapsed
+                    if encoding == "hex":
+                        alphabet_size = 16
+                    elif encoding in ("base64", "base64url"):
+                        alphabet_size = 64
+                    elif encoding == "base58":
+                        alphabet_size = 58
+                    else:
+                        alphabet_size = 32
+                    if both:
+                        expected_attempts = alphabet_size ** (prefix_len * 2)
+                    else:
+                        expected_attempts = alphabet_size ** prefix_len
+                    pct = (total_attempts / expected_attempts * 100) if expected_attempts > 0 else 0
+                    remaining = (expected_attempts - total_attempts) / rate if rate > 0 else 0
+                    eta = f" eta={remaining:.0f}s" if remaining > 0 else ""
+                    print(
+                        f"  attempts={total_attempts:,} rate={rate:,.0f}/s elapsed={elapsed:.1f}s progress={pct:.2f}%{eta}",
+                        file=sys.stderr,
+                    )
+                    last_progress_print = time.perf_counter()
+                
+                if priv_seed is not None:
+                    pool.terminate()
+                    # Reconstruct the key from private seed
+                    priv = nacl.signing.SigningKey(priv_seed)
+                    pub = priv.verify_key
+                    raw = bytes(pub)
+                    if is_hex:
+                        encoded = raw.hex()
+                    elif encoding == "base64":
+                        encoded = base64.b64encode(raw).decode()
+                    elif encoding == "base64url":
+                        encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+                    elif encoding == "base58":
+                        encoded = _base58_encode(raw)
+                    else:
+                        encoded = _bech32_encode(hrp, raw, hrp_expanded)
+                    
+                    elapsed = time.perf_counter() - start_time
+                    return VanityResult(
+                        private_key=priv,
+                        public_key=pub,
+                        encoded=encoded,
+                        attempts=total_attempts,
+                        elapsed=elapsed,
+                        private_seed=priv_seed,
+                    )
+        except KeyboardInterrupt:
+            pool.terminate()
+            raise
     
     raise RuntimeError(f"exceeded max_attempts={max_attempts}")
 
@@ -645,6 +681,7 @@ def main() -> int:
             hrp=args.hrp,
             suffix=args.suffix,
             both=args.both,
+            workers=args.workers,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
