@@ -9,6 +9,8 @@ from meshcore_vanity import (
     generate_vanity_key,
     _base58_encode,
     _bech32_encode,
+    _expected_attempts,
+    _format_progress,
     _validate_prefix,
     _validate_seed,
     _validate_hrp,
@@ -323,6 +325,70 @@ def test_generate_vanity_key_base58():
     result = generate_vanity_key("A", encoding="base58", max_attempts=50000, seed=bytes(32))
     assert result.encoded.startswith("A")
     assert result.attempts == 3
+
+
+def test_expected_attempts():
+    assert _expected_attempts("hex", 2, False) == 16**2
+    assert _expected_attempts("base64", 1, False) == 64
+    assert _expected_attempts("base58", 1, False) == 58
+    assert _expected_attempts("bech32", 1, False) == 32
+    assert _expected_attempts("hex", 2, True) == 16**4
+
+
+def test_format_progress():
+    s = _format_progress(1000, 2.0, 10000)
+    assert "attempts=1,000" in s
+    assert "rate=500/s" in s
+    assert "elapsed=2.0s" in s
+    assert "progress=10.00%" in s
+    # Pct caps at 100: overrunning the mean is statistically normal.
+    assert "progress=100.00%" in _format_progress(200000, 1.0, 65536)
+    # Zero elapsed never divides by zero.
+    assert "rate=0/s" in _format_progress(0, 0.0, 100)
+
+
+def test_parallel_live_progress_reports(capfd):
+    # Deterministic ~2s search: the monitor thread must stream the shared
+    # echo format to stderr mid-run (previously it printed nothing).
+    result = generate_vanity_key(
+        "abcd", encoding="hex", workers=2, progress_interval=5000, seed=bytes(32)
+    )
+    assert result.encoded.startswith("abcd")
+    err = capfd.readouterr().err
+    assert "attempts=" in err
+    assert "rate=" in err
+
+
+def _load_check_inline_js():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).parent / "tools" / "check_inline_js.py"
+    spec = importlib.util.spec_from_file_location("check_inline_js", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_check_inline_js_extracts_current_page():
+    from pathlib import Path
+
+    mod = _load_check_inline_js()
+    extracted = mod.extract(Path(__file__).parent)
+    assert set(extracted) == {"worker.js", "main.js"}
+    assert "await new Promise" in extracted["worker.js"]
+    assert "startMining" in extracted["main.js"]
+
+
+def test_check_inline_js_rejects_banned_patterns(tmp_path):
+    mod = _load_check_inline_js()
+    (tmp_path / "index.html").write_text(
+        "const workerCode = `await new Promise`; "
+        "<style></style><script>var x = 1;</script>liveEtaStr",
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit, match="banned pattern"):
+        mod.extract(tmp_path)
 
 
 def test_generate_vanity_key_suffix():

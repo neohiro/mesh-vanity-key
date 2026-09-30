@@ -15,10 +15,10 @@ Generates Ed25519 cryptographic keypairs until the encoded public key matches a 
 ### Prerequisites
 
 - Python 3.10+
-- `cryptography` package
+- `PyNaCl` package
 
 ```bash
-pip install cryptography
+pip install -r requirements.txt
 ```
 
 ### Single-Command Usage
@@ -161,7 +161,7 @@ Example:
 
 ```
 Searching for hex public key starting with 'ab' (case-insensitive)...
-  attempts=100,000 rate=45,000/s elapsed=2.2s
+  attempts=100,000 rate=45,000/s elapsed=2.2s progress=38.15% eta=4s
 Found in 123,456 attempts (2.75s, 44,893 keys/s)
 ```
 
@@ -180,4 +180,4 @@ MIT
 - [MeshCore](https://meshcore.co.uk/) — decentralized mesh networking
 - [Ed25519](https://ed25519.cr.yp.to/) — fast, secure elliptic curve signatures
 - [BIP-0173](https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki) — bech32 address format
-- [cryptography](https://cryptography.io/) — Python cryptographic library
+- [PyNaCl](https://pynacl.readthedocs.io/) — Python libsodium bindings (Ed25519)

@@ -91,11 +91,9 @@ def _worker_search(args: tuple) -> tuple:
             return (None, attempts, counter)
 
         for _ in range(BATCH_SIZE):
-            try:
-                scalar_val = (initial_scalar + counter) & ((1 << 256) - 1)
-                priv_seed = scalar_val.to_bytes(32, "big")
-            except OverflowError:
-                return (None, attempts, counter)
+            # Scalar is masked to 256 bits, so to_bytes(32) cannot overflow.
+            scalar_val = (initial_scalar + counter) & ((1 << 256) - 1)
+            priv_seed = scalar_val.to_bytes(32, "big")
 
             priv = _SigningKey(priv_seed)
             raw = bytes(priv.verify_key)
@@ -297,9 +295,14 @@ def _expected_attempts(encoding: Encoding, prefix_len: int, both: bool) -> int:
 
 
 def _format_progress(attempts: int, elapsed: float, expected_attempts: int) -> str:
-    """Single stderr progress-line format shared by all search paths."""
+    """Single stderr progress-line format shared by all search paths.
+
+    Pct is capped at 100: the expectation is the mean of a geometric
+    distribution, so ~37% of searches legitimately run past it.
+    """
     rate = attempts / elapsed if elapsed > 0 else 0
     pct = (attempts / expected_attempts * 100) if expected_attempts > 0 else 0
+    pct = min(pct, 100.0)
     remaining = (expected_attempts - attempts) / rate if rate > 0 else 0
     eta = f" eta={remaining:.0f}s" if remaining > 0 else ""
     return (
@@ -562,6 +565,11 @@ def _generate_vanity_key_parallel(
 
                 if priv_seed is not None:
                     pool.terminate()
+                    # True total work includes the killed workers' partial
+                    # batches (only visible via the shared counter); the
+                    # returned counts cover only completed workers. Take the
+                    # max so the final figure agrees with the progress lines.
+                    total_attempts = max(progress_counter.value, total_attempts)
                     # Reconstruct the key from private seed
                     priv = nacl.signing.SigningKey(priv_seed)
                     pub = priv.verify_key
