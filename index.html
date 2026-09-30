@@ -48,7 +48,7 @@
         .checkbox-field input[type="checkbox"] { width: 18px; height: 18px; accent-color: #58a6ff; }
         .checkbox-field input[type="checkbox"]:disabled { opacity: 0.5; }
         .checkbox-field label { margin-bottom: 0; cursor: pointer; }
-        .buttons { display: flex; gap: 12px; }
+        .buttons { display: flex; gap: 12px; margin-bottom: 12px; }
         button {
             padding: 10px 24px;
             border: none;
@@ -64,7 +64,7 @@
         #stop-btn { background: #da3633; color: white; }
         #stop-btn:hover:not(:disabled) { background: #f85149; }
         #stop-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
-        .status-text { font-size: 14px; color: #8b949e; font-family: 'SFMono-Regular', Consolas, monospace; margin-top: 12px; }
+        .status-text { font-size: 14px; color: #8b949e; font-family: 'SFMono-Regular', Consolas, monospace; }
         .reserved-notice {
             margin-top: 12px;
             padding: 12px;
@@ -82,6 +82,7 @@
             font-size: 12px;
         }
         #progress { margin-top: 12px; }
+        #estimate { margin-top: 12px; }
         #result { margin-top: 24px; padding: 20px; background: #0d1117; border: 1px solid #238636; border-radius: 8px; }
         #result h2 { color: #3fb950; font-size: 18px; margin-bottom: 16px; }
         .result-field { margin-bottom: 16px; }
@@ -283,7 +284,9 @@
             const matchBoth = document.getElementById('match-both').checked;
 
             document.getElementById('estimate').textContent = '';
-            document.getElementById('progress-text').textContent = 'Starting...';
+            const progressEl = document.getElementById('progress-text');
+            progressEl.textContent = 'Starting...';
+            progressEl.className = 'status-text';
 
             const workerCode = `
                 importScripts('https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js');
@@ -295,6 +298,7 @@
                 }
 
                 self.onmessage = function(e) {
+                    console.log('[Worker] Received message:', e.data.type || e.data);
                     try {
                         if (typeof nacl === 'undefined') {
                             self.postMessage({ type: 'error', message: 'Failed to load cryptographic library. Please check your internet connection and refresh.' });
@@ -407,8 +411,10 @@
             };
 
             worker.onmessage = function(e) {
+                console.log('[Main] Received message:', e.data.type, e.data);
                 if (e.data.type === 'ready') {
                     clearTimeout(initTimeout);
+                    console.log('[Main] Sending work data to worker');
                     worker.postMessage({ prefix, suffix, matchBoth });
                     return;
                 }
