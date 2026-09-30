@@ -924,6 +924,15 @@ function startMining() {
             setTimeout(calibrateBenchmark, 0);
             loadHistory();
             renderHistory(false);
+            // Auto-cap workers based on logical cores to prevent thread contention slowdowns (max 2).
+            if (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) {
+                const optimal = Math.min(Math.max(Math.floor(navigator.hardwareConcurrency / 2), 1), 2);
+                const el = document.getElementById('workers');
+                if (el) {
+                    el.value = optimal;
+                    updateEstimate();
+                }
+            }
         });
 
         window.addEventListener('beforeunload', function() {
