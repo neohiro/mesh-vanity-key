@@ -446,8 +446,10 @@ def generate_vanity_key(
             elapsed = time.perf_counter() - start
             rate = attempts / elapsed if elapsed > 0 else 0
             pct = (attempts / expected_attempts * 100) if expected_attempts > 0 else 0
+            remaining = (expected_attempts - attempts) / rate if rate > 0 else 0
+            eta = f" eta={remaining:.0f}s" if remaining > 0 else ""
             print(
-                f"  attempts={attempts:,} rate={rate:,.0f}/s elapsed={elapsed:.1f}s progress={pct:.2f}%",
+                f"  attempts={attempts:,} rate={rate:,.0f}/s elapsed={elapsed:.1f}s progress={pct:.2f}%{eta}",
                 file=sys.stderr,
             )
 

@@ -198,7 +198,19 @@
                 expected = Math.pow(16, Math.max(prefix.length, suffix.length));
             }
 
-            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString();
+            const typicalRate = 50000;
+            const estSeconds = expected / typicalRate;
+            let timeStr;
+            if (estSeconds < 60) {
+                timeStr = estSeconds.toFixed(0) + 's';
+            } else if (estSeconds < 3600) {
+                timeStr = (estSeconds / 60).toFixed(1) + 'm';
+            } else if (estSeconds < 86400) {
+                timeStr = (estSeconds / 3600).toFixed(1) + 'h';
+            } else {
+                timeStr = (estSeconds / 86400).toFixed(1) + 'd';
+            }
+            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (at 50k keys/s)';
         }
 
         function setFormDisabled(disabled) {
@@ -296,7 +308,8 @@
                                 type: 'progress',
                                 attempts: attempts,
                                 rate: rate,
-                                progress: Math.min(pct, 100)
+                                progress: Math.min(pct, 100),
+                                expectedAttempts: expectedAttempts
                             });
                         }
                     }
@@ -308,8 +321,16 @@
 
             worker.onmessage = function(e) {
                 if (e.data.type === 'progress') {
+                    const remaining = (e.data.expectedAttempts - e.data.attempts) / e.data.rate;
+                    let etaStr = '';
+                    if (remaining > 0 && isFinite(remaining)) {
+                        if (remaining < 60) etaStr = ' | ETA: ' + remaining.toFixed(0) + 's';
+                        else if (remaining < 3600) etaStr = ' | ETA: ' + (remaining / 60).toFixed(1) + 'm';
+                        else if (remaining < 86400) etaStr = ' | ETA: ' + (remaining / 3600).toFixed(1) + 'h';
+                        else etaStr = ' | ETA: ' + (remaining / 86400).toFixed(1) + 'd';
+                    }
                     document.getElementById('progress-text').textContent =
-                        'Attempts: ' + e.data.attempts.toLocaleString() + ' | Rate: ' + Math.round(e.data.rate).toLocaleString() + '/s | Progress: ' + e.data.progress.toFixed(2) + '%';
+                        'Attempts: ' + e.data.attempts.toLocaleString() + ' | Rate: ' + Math.round(e.data.rate).toLocaleString() + '/s | Progress: ' + e.data.progress.toFixed(2) + '%' + etaStr;
                 } else if (e.data.type === 'found') {
                     mining = false;
                     setFormDisabled(false);
