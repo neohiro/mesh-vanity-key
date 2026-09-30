@@ -368,6 +368,20 @@ def generate_vanity_key(
     _base58 = _base58_encode
     _bech32 = _bech32_encode
 
+    # Calculate expected attempts for progress percentage
+    if encoding == "hex":
+        alphabet_size = 16
+    elif encoding in ("base64", "base64url"):
+        alphabet_size = 64
+    elif encoding == "base58":
+        alphabet_size = 58
+    else:
+        alphabet_size = 32
+    if both:
+        expected_attempts = alphabet_size ** (prefix_len * 2)
+    else:
+        expected_attempts = alphabet_size ** prefix_len
+
     # Scalar-walk: derive initial scalar from seed once, then increment
     # as a 256-bit integer for each attempt (avoids SHA-256 per attempt)
     scalar = int.from_bytes(hashlib.sha256(seed).digest(), "big")
@@ -431,8 +445,9 @@ def generate_vanity_key(
         if attempts % progress_interval == 0:
             elapsed = time.perf_counter() - start
             rate = attempts / elapsed if elapsed > 0 else 0
+            pct = (attempts / expected_attempts * 100) if expected_attempts > 0 else 0
             print(
-                f"  attempts={attempts:,} rate={rate:,.0f}/s elapsed={elapsed:.1f}s",
+                f"  attempts={attempts:,} rate={rate:,.0f}/s elapsed={elapsed:.1f}s progress={pct:.2f}%",
                 file=sys.stderr,
             )
 

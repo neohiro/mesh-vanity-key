@@ -251,6 +251,10 @@
                     }
                     let scalar = BigInt('0x' + Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join(''));
 
+                    const alphabetSize = 16;
+                    const patternLen = matchBoth ? prefix.length + suffix.length : Math.max(prefix.length, suffix.length);
+                    const expectedAttempts = BigInt(alphabetSize) ** BigInt(patternLen);
+
                     while (true) {
                         scalar = (scalar + 1n) & ((1n << 256n) - 1n);
                         const seedHex = scalar.toString(16).padStart(64, '0');
@@ -285,10 +289,14 @@
                         if (attempts % 1000 === 0) {
                             const elapsed = (Date.now() - startTime) / 1000;
                             const rate = attempts / elapsed;
+                            const pct = expectedAttempts > 0n
+                                ? Number((BigInt(attempts) * 10000n) / expectedAttempts) / 100
+                                : 0;
                             self.postMessage({
                                 type: 'progress',
                                 attempts: attempts,
-                                rate: rate
+                                rate: rate,
+                                progress: Math.min(pct, 100)
                             });
                         }
                     }
@@ -301,7 +309,7 @@
             worker.onmessage = function(e) {
                 if (e.data.type === 'progress') {
                     document.getElementById('progress-text').textContent =
-                        'Attempts: ' + e.data.attempts.toLocaleString() + ' | Rate: ' + Math.round(e.data.rate).toLocaleString() + '/s';
+                        'Attempts: ' + e.data.attempts.toLocaleString() + ' | Rate: ' + Math.round(e.data.rate).toLocaleString() + '/s | Progress: ' + e.data.progress.toFixed(2) + '%';
                 } else if (e.data.type === 'found') {
                     mining = false;
                     setFormDisabled(false);
