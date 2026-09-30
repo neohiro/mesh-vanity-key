@@ -64,7 +64,7 @@
         #stop-btn { background: #da3633; color: white; }
         #stop-btn:hover:not(:disabled) { background: #f85149; }
         #stop-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
-        .estimate { font-size: 14px; color: #8b949e; margin-top: 12px; }
+        .status-text { font-size: 14px; color: #8b949e; font-family: 'SFMono-Regular', Consolas, monospace; margin-top: 12px; }
         .reserved-notice {
             margin-top: 12px;
             padding: 12px;
@@ -81,22 +81,22 @@
             border-radius: 3px;
             font-size: 12px;
         }
-        #progress { margin-top: 24px; }
-        #progress-text { font-size: 14px; color: #8b949e; font-family: 'SFMono-Regular', Consolas, monospace; }
+        #progress { margin-top: 12px; }
         #result { margin-top: 24px; padding: 20px; background: #0d1117; border: 1px solid #238636; border-radius: 8px; }
         #result h2 { color: #3fb950; font-size: 18px; margin-bottom: 16px; }
         .result-field { margin-bottom: 16px; }
         .result-field label { font-size: 12px; color: #8b949e; margin-bottom: 4px; }
+        .key-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
         .result-field code {
-            display: block;
+            flex: 1;
+            min-width: 200px;
             padding: 10px;
             background: #161b22;
             border-radius: 4px;
             font-size: 12px;
             word-break: break-all;
-            margin-bottom: 8px;
         }
-        .copy-btn { padding: 6px 12px; font-size: 12px; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+        .copy-btn { padding: 6px 12px; font-size: 12px; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; white-space: nowrap; }
         .copy-btn:hover { background: #30363d; }
         #result-stats { font-size: 13px; color: #8b949e; margin-top: 12px; }
         #result button { margin-top: 16px; }
@@ -134,25 +134,29 @@
                 <button id="stop-btn" onclick="stopMining()" disabled>Stop</button>
             </div>
 
-            <p id="estimate" class="estimate"></p>
+            <p id="estimate" class="status-text"></p>
             <div id="reserved-notice" class="reserved-notice" style="display: none;"></div>
         </div>
 
         <div id="progress" class="hidden">
-            <p id="progress-text">Attempts: 0 | Rate: 0/s</p>
+            <p id="progress-text" class="status-text">Attempts: 0 | Rate: 0/s</p>
         </div>
 
         <div id="result" class="hidden">
             <h2>Key Found!</h2>
             <div class="result-field">
                 <label>Public Key (hex)</label>
-                <code id="result-public"></code>
-                <button class="copy-btn" onclick="copyToClipboard('result-public', this)">Copy</button>
+                <div class="key-row">
+                    <code id="result-public"></code>
+                    <button class="copy-btn" onclick="copyToClipboard('result-public', this)">Copy</button>
+                </div>
             </div>
             <div class="result-field">
                 <label>Private Key (hex)</label>
-                <code id="result-private"></code>
-                <button class="copy-btn" onclick="copyToClipboard('result-private', this)">Copy</button>
+                <div class="key-row">
+                    <code id="result-private"></code>
+                    <button class="copy-btn" onclick="copyToClipboard('result-private', this)">Copy</button>
+                </div>
             </div>
             <p id="result-stats"></p>
             <button onclick="resetForm()">New Search</button>
