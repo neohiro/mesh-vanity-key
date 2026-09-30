@@ -320,6 +320,16 @@ def test_validate_prefix_reserved_hex():
     _validate_prefix("ab", "hex")  # non-reserved passes
 
 
+def test_validate_prefix_base64_padding():
+    # '=' occurs only as the final char of a 44-char encoding of a 32-byte key.
+    with pytest.raises(ValueError, match="can never match"):
+        _validate_prefix("ab=", "base64")
+    with pytest.raises(ValueError, match="can never match"):
+        _validate_prefix("=abc", "base64")
+    with pytest.raises(ValueError, match="can never match"):
+        generate_vanity_key("ab=", encoding="base64", max_attempts=10)
+
+
 def test_generate_vanity_key_base58():
     # Deterministic seed: scalar-walk finds 'A...' in 3 attempts.
     result = generate_vanity_key("A", encoding="base58", max_attempts=50000, seed=bytes(32))

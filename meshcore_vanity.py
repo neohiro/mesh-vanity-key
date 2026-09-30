@@ -174,6 +174,15 @@ def _validate_prefix(prefix: str, encoding: Encoding, case_insensitive: bool = T
                 f"prefix {prefix!r} is reserved for MeshCore framework devices "
                 f"(00 and FF prefixes are not available for consumer keys)"
             )
+    # A 32-byte key encodes to 44 base64 chars with a single '=' pad at index
+    # 43; '=' anywhere else can never match, so fail fast instead of searching
+    # forever. (base64url strips padding, so '=' is already rejected above.)
+    if encoding == "base64" and "=" in prefix:
+        if not (len(prefix) == 44 and prefix.endswith("=") and prefix.count("=") == 1):
+            raise ValueError(
+                f"prefix {prefix!r} can never match {encoding}: "
+                f"'=' padding occurs only as the last character"
+            )
 
 
 def _validate_seed(seed: bytes | None) -> bytes:

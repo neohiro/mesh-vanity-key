@@ -506,7 +506,7 @@ function startMining() {
                                 const seedHex = scalar.toString(16).padStart(64, '0');
                                 const seedBytes = new Uint8Array(32);
                                 for (let i = 0; i < 32; i++) {
-                                    seedBytes[i] = parseInt(seedHex.substr(i * 2, 2), 16);
+                                    seedBytes[i] = parseInt(seedHex.substring(i * 2, i * 2 + 2), 16);
                                 }
 
                                 const keyPair = nacl.sign.keyPair.fromSeed(seedBytes);
