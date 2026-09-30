@@ -211,6 +211,14 @@
         let workers = [];
         let mining = false;
         let initTimeouts = [];
+        let blobUrls = [];
+
+        function revokeBlobUrls() {
+            for (const u of blobUrls) {
+                try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ }
+            }
+            blobUrls = [];
+        }
 
         function validateHex(input) {
             const errorEl = document.getElementById(input.id + '-error');
@@ -298,7 +306,9 @@
             const typicalRate = 200 * numWorkers;
             const estSeconds = expected / typicalRate;
             let timeStr;
-            if (estSeconds < 60) {
+            if (!isFinite(estSeconds)) {
+                timeStr = 'very long (heat death of the universe first)';
+            } else if (estSeconds < 60) {
                 timeStr = estSeconds.toFixed(0) + 's';
             } else if (estSeconds < 3600) {
                 timeStr = (estSeconds / 60).toFixed(1) + 'm';
@@ -473,12 +483,14 @@ function startMining() {
 
             for (let i = 0; i < numWorkers; i++) {
                 const blob = new Blob([workerCode], { type: 'application/javascript' });
-                const w = new Worker(URL.createObjectURL(blob));
+                const url = URL.createObjectURL(blob);
+                blobUrls.push(url);
+                const w = new Worker(url);
                 workers.push(w);
 
                 const initTimeout = setTimeout(() => {
                     if (mining && workers.includes(w)) {
-                        w.terminate();
+                        stopAllWorkers();
                         mining = false;
                         setFormDisabled(false);
                         document.getElementById('start-btn').disabled = false;
@@ -567,6 +579,7 @@ function startMining() {
                     if (w) w.terminate();
                 }
                 workers = [];
+                revokeBlobUrls();
                 for (const t of initTimeouts) {
                     clearTimeout(t);
                 }
@@ -589,6 +602,7 @@ function startMining() {
                 if (w) w.terminate();
             }
             workers = [];
+            revokeBlobUrls();
             mining = false;
             setFormDisabled(false);
             document.getElementById('start-btn').disabled = false;
@@ -627,6 +641,7 @@ function startMining() {
             for (const w of workers) {
                 if (w) w.terminate();
             }
+            revokeBlobUrls();
         });
     </script>
 </body>

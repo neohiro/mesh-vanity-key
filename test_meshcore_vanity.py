@@ -309,6 +309,22 @@ def test_generate_vanity_key_parallel_max_attempts():
         generate_vanity_key("deadbeefcafe", encoding="hex", max_attempts=20, workers=2)
 
 
+def test_validate_prefix_reserved_hex():
+    # 00/FF prefixes are reserved for MeshCore framework devices.
+    with pytest.raises(ValueError, match="reserved"):
+        _validate_prefix("00ab", "hex")
+    with pytest.raises(ValueError, match="reserved"):
+        _validate_prefix("FF12", "hex")
+    _validate_prefix("ab", "hex")  # non-reserved passes
+
+
+def test_generate_vanity_key_base58():
+    # Deterministic seed: scalar-walk finds 'A...' in 3 attempts.
+    result = generate_vanity_key("A", encoding="base58", max_attempts=50000, seed=bytes(32))
+    assert result.encoded.startswith("A")
+    assert result.attempts == 3
+
+
 def test_generate_vanity_key_suffix():
     result = generate_vanity_key("ab", encoding="hex", suffix=True, max_attempts=100000)
     assert result.encoded.endswith("ab")

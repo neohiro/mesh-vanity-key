@@ -58,9 +58,9 @@ def _worker_search(args: tuple) -> tuple:
      prefix_cmp, check_slice, both, hrp, start_offset, worker_id,
      total_workers, progress_interval, is_hex, hrp_expanded) = args
 
-    import base64
-    import hashlib
-
+    # NOTE: base64/hashlib/nacl are already imported at module level; under
+    # the "spawn" start method the module is re-imported in each child, so no
+    # re-imports are needed here. Locals are bound for the hot loop.
     _b64encode = base64.b64encode
     _urlsafe_b64encode = base64.urlsafe_b64encode
     _hex_encode = bytes.hex
