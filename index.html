@@ -45,54 +45,27 @@
         input[type="text"]:disabled { opacity: 0.5; }
         .error-msg { color: #f85149; font-size: 12px; margin-top: 4px; display: none; }
         .worker-input {
-            width: 60px;
-            padding: 10px 14px;
+            width: 96px;
+            padding: 10px 8px 10px 14px;
             background: #0d1117;
             border: 1px solid #30363d;
             border-radius: 6px;
             color: #c9d1d9;
             font-size: 16px;
             font-family: 'SFMono-Regular', Consolas, monospace;
-            text-align: center;
+            text-align: left;
         }
         .worker-input:focus { outline: none; border-color: #58a6ff; }
         .worker-input:disabled { opacity: 0.5; }
-        /* Style number input arrows */
+        /* Native number spinners: keep visible, docked right, not overlapping text */
         .worker-input::-webkit-inner-spin-button,
         .worker-input::-webkit-outer-spin-button {
-            -webkit-appearance: none;
-            appearance: none;
-            margin: 0;
-            width: 24px;
-            height: 20px;
-            background: #21262d;
-            border-left: 1px solid #30363d;
+            -webkit-appearance: inner-spin-button;
+            appearance: auto;
+            opacity: 1;
+            margin-left: 6px;
+            height: 24px;
             cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #c9d1d9;
-            font-size: 10px;
-            font-weight: bold;
-            line-height: 1;
-        }
-        .worker-input::-webkit-inner-spin-button::before {
-            content: '▲';
-        }
-        .worker-input::-webkit-outer-spin-button::before {
-            content: '▼';
-        }
-        .worker-input::-webkit-inner-spin-button:hover,
-        .worker-input::-webkit-outer-spin-button:hover {
-            background: #30363d;
-        }
-        .worker-input::-webkit-inner-spin-button:active,
-        .worker-input::-webkit-outer-spin-button:active {
-            background: #484f58;
-        }
-        /* Firefox - remove default spinner */
-        .worker-input {
-            -moz-appearance: textfield;
         }
         .worker-wrapper {
             display: flex;
@@ -334,6 +307,7 @@
         function setFormDisabled(disabled) {
             document.getElementById('prefix').disabled = disabled;
             document.getElementById('suffix').disabled = disabled;
+            document.getElementById('workers').disabled = disabled;
         }
 
 function startMining() {
