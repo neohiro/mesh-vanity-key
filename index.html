@@ -310,7 +310,7 @@
                         const expectedAttempts = BigInt(alphabetSize) ** BigInt(patternLen);
 
                         const BATCH_SIZE = 16;
-                        const PROGRESS_INTERVAL = 1000;
+                        const PROGRESS_INTERVAL = 100;
 
                         while (true) {
                             for (let b = 0; b < BATCH_SIZE; b++) {
