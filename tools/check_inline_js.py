@@ -24,17 +24,23 @@ BANNED_PATTERNS = (
 
 
 def extract(repo_root: Path) -> dict[str, str]:
-    html = (repo_root / "index.html").read_text(encoding="utf-8")
+    try:
+        html = (repo_root / "index.html").read_text(encoding="utf-8")
+    except OSError as e:
+        raise SystemExit(f"FAIL: cannot read index.html: {e}")
 
     marker = "const workerCode = `"
-    start = html.index(marker) + len(marker)
-    end = html.index("`;", start)
-    worker_js = html[start:end]
+    try:
+        start = html.index(marker) + len(marker)
+        end = html.index("`;", start)
+        worker_js = html[start:end]
 
-    # Main inline script: the <script> block without a src attribute.
-    script_start = html.index("<script>", html.index("</style>")) + len("<script>")
-    script_end = html.index("</script>", script_start)
-    main_js = html[script_start:script_end]
+        # Main inline script: the <script> block without a src attribute.
+        script_start = html.index("<script>", html.index("</style>")) + len("<script>")
+        script_end = html.index("</script>", script_start)
+        main_js = html[script_start:script_end]
+    except ValueError as e:
+        raise SystemExit(f"FAIL: extraction marker missing or malformed: {e}")
 
     for pat in BANNED_PATTERNS:
         if pat in html:

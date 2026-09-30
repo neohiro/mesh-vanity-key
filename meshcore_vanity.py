@@ -512,8 +512,6 @@ def _generate_vanity_key_parallel(
     counter fed by the workers once per batch, so long unbounded searches
     report continuously instead of only on worker completion.
     """
-    import multiprocessing as mp
-
     ctx = mp.get_context("spawn")
     # Split the total attempt budget across workers so --max-attempts keeps
     # its documented meaning (total, not per-worker).
@@ -537,15 +535,16 @@ def _generate_vanity_key_parallel(
         # Monitor thread: same echo format as the single-threaded path,
         # driven by the shared counter. Daemon so it can never hang exit.
         stop_monitor = threading.Event()
-        next_report = [progress_interval]
+        next_report = progress_interval
 
         def _monitor() -> None:
+            nonlocal next_report
             last_heartbeat = start_time
             while not stop_monitor.wait(0.5):
                 total = progress_counter.value
                 now = time.perf_counter()
-                if total >= next_report[0] or now - last_heartbeat >= 5.0:
-                    next_report[0] = max(next_report[0] + progress_interval, total + 1)
+                if total >= next_report or now - last_heartbeat >= 5.0:
+                    next_report = max(next_report + progress_interval, total + 1)
                     print(
                         _format_progress(total, now - start_time, expected_attempts),
                         file=sys.stderr,

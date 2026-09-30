@@ -682,11 +682,33 @@ function startMining() {
 
         function copyToClipboard(elementId, btn) {
             const text = document.getElementById(elementId).textContent;
-            navigator.clipboard.writeText(text).then(() => {
+            const done = () => {
                 const original = btn.textContent;
                 btn.textContent = 'Copied!';
                 setTimeout(() => btn.textContent = original, 2000);
-            });
+            };
+            // Clipboard API needs a secure context; fall back for file:// / http://.
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
+            } else {
+                fallbackCopy(text, done);
+            }
+        }
+
+        function fallbackCopy(text, done) {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            try {
+                document.execCommand('copy');
+                done();
+            } catch (e) {
+                alert('Copy failed. Please select and copy manually.');
+            }
+            document.body.removeChild(ta);
         }
 
         function resetForm() {
