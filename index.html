@@ -211,13 +211,9 @@
 
         function updateReservedPrefixNotice() {
             const prefixInput = document.getElementById('prefix');
-            const suffixInput = document.getElementById('suffix');
             const noticeEl = document.getElementById('reserved-notice');
 
-            const prefixReserved = checkReservedPrefix(prefixInput);
-            const suffixReserved = checkReservedPrefix(suffixInput);
-
-            if (prefixReserved || suffixReserved) {
+            if (checkReservedPrefix(prefixInput)) {
                 noticeEl.innerHTML = '<strong>Notice:</strong> Prefixes starting with <code>00</code> or <code>FF</code> are reserved for MeshCore framework devices (not consumer nodes). You can still mine for them, but they may not work with standard MeshCore clients.';
                 noticeEl.style.display = 'block';
             } else {
