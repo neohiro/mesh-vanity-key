@@ -136,11 +136,10 @@
             </div>
 
             <p id="estimate" class="status-text"></p>
+            <div id="progress" class="hidden">
+                <p id="progress-text" class="status-text">Attempts: 0 | Rate: 0/s</p>
+            </div>
             <div id="reserved-notice" class="reserved-notice" style="display: none;"></div>
-        </div>
-
-        <div id="progress" class="hidden">
-            <p id="progress-text" class="status-text">Attempts: 0 | Rate: 0/s</p>
         </div>
 
         <div id="result" class="hidden">
@@ -329,6 +328,7 @@
 
                         const BATCH_SIZE = 16;
                         const PROGRESS_INTERVAL = 100;
+                        let lastProgressReport = 0;
 
                         while (true) {
                             for (let b = 0; b < BATCH_SIZE; b++) {
@@ -376,7 +376,25 @@
                                         progress: Math.min(pct, 100),
                                         expectedAttempts: expectedAttempts
                                     });
+                                    lastProgressReport = now;
                                 }
+                            }
+                            // Yield to event loop to ensure messages are processed
+                            if (Date.now() - lastProgressReport > 500) {
+                                const now = Date.now();
+                                const elapsed = (now - startTime) / 1000;
+                                const rate = elapsed > 0 ? attempts / elapsed : 0;
+                                const pct = expectedAttempts > 0n
+                                    ? Number((BigInt(attempts) * 10000n) / expectedAttempts) / 100
+                                    : 0;
+                                self.postMessage({
+                                    type: 'progress',
+                                    attempts: attempts,
+                                    rate: rate,
+                                    progress: Math.min(pct, 100),
+                                    expectedAttempts: expectedAttempts
+                                });
+                                lastProgressReport = now;
                             }
                         }
                     } catch (err) {
