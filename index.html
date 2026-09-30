@@ -309,6 +309,8 @@
                     const expectedAttempts = BigInt(alphabetSize) ** BigInt(patternLen);
 
                     const BATCH_SIZE = 16;
+                    const PROGRESS_INTERVAL = 1000;
+                    let lastProgressTime = Date.now();
 
                     while (true) {
                         for (let b = 0; b < BATCH_SIZE; b++) {
@@ -341,21 +343,24 @@
                             }
 
                             attempts++;
-                        }
 
-                        const elapsed = (Date.now() - startTime) / 1000;
-                        const rate = attempts / elapsed;
-                        const pct = expectedAttempts > 0n
-                            ? Number((BigInt(attempts) * 10000n) / expectedAttempts) / 100
-                            : 0;
-                        self.postMessage({
-                            type: 'progress',
-                            attempts: attempts,
-                            rate: rate,
-                            progress: Math.min(pct, 100),
-                            expectedAttempts: expectedAttempts
-                        });
-                    }
+                            if (attempts % PROGRESS_INTERVAL === 0) {
+                                const now = Date.now();
+                                const elapsed = (now - startTime) / 1000;
+                                const rate = elapsed > 0 ? attempts / elapsed : 0;
+                                const pct = expectedAttempts > 0n
+                                    ? Number((BigInt(attempts) * 10000n) / expectedAttempts) / 100
+                                    : 0;
+                                self.postMessage({
+                                    type: 'progress',
+                                    attempts: attempts,
+                                    rate: rate,
+                                    progress: Math.min(pct, 100),
+                                    expectedAttempts: expectedAttempts
+                                });
+                                lastProgressTime = now;
+                            }
+                        }
                 };
             `;
 
