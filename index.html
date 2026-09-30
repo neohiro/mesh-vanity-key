@@ -63,11 +63,24 @@
             -webkit-appearance: none;
             appearance: none;
             margin: 0;
-            width: 20px;
+            width: 24px;
             height: 20px;
             background: #21262d;
             border-left: 1px solid #30363d;
             cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #c9d1d9;
+            font-size: 10px;
+            font-weight: bold;
+            line-height: 1;
+        }
+        .worker-input::-webkit-inner-spin-button::before {
+            content: '▲';
+        }
+        .worker-input::-webkit-outer-spin-button::before {
+            content: '▼';
         }
         .worker-input::-webkit-inner-spin-button:hover,
         .worker-input::-webkit-outer-spin-button:hover {
@@ -77,9 +90,12 @@
         .worker-input::-webkit-outer-spin-button:active {
             background: #484f58;
         }
-        /* Firefox */
+        /* Firefox - custom spinner */
         .worker-input {
             -moz-appearance: textfield;
+        }
+        .worker-input[type="number"] {
+            padding-right: 48px;
         }
         .worker-wrapper {
             display: flex;
@@ -170,11 +186,6 @@
                 <label for="suffix">Suffix (hex)</label>
                 <input type="text" id="suffix" placeholder="e.g., cd" maxlength="64" oninput="validateHex(this); updateEstimate(); updateReservedPrefixNotice()">
                 <span class="error-msg" id="suffix-error"></span>
-            </div>
-
-            <div class="checkbox-field">
-                <input type="checkbox" id="match-both" checked onchange="updateEstimate()">
-                <label for="match-both">Match both prefix AND suffix</label>
             </div>
 
             <div class="field">
@@ -286,7 +297,6 @@
         function updateEstimate() {
             const prefix = document.getElementById('prefix').value;
             const suffix = document.getElementById('suffix').value;
-            const matchBoth = document.getElementById('match-both').checked;
             const numWorkers = parseInt(document.getElementById('workers').value) || 1;
             const estimateEl = document.getElementById('estimate');
 
@@ -295,14 +305,20 @@
                 return;
             }
 
+            // Independent prefix/suffix matching:
+            // - If both filled: match both (prefix AND suffix) -> 16^(p_len + s_len)
+            // - If only prefix: match prefix -> 16^p_len
+            // - If only suffix: match suffix -> 16^s_len
             let expected;
-            if (matchBoth) {
+            if (prefix && suffix) {
                 expected = Math.pow(16, prefix.length + suffix.length);
+            } else if (prefix) {
+                expected = Math.pow(16, prefix.length);
             } else {
-                expected = Math.pow(16, Math.max(prefix.length, suffix.length));
+                expected = Math.pow(16, suffix.length);
             }
 
-            // Browser Web Worker rate is ~200 keys/s per worker (realistic for BigInt + tweetnacl)
+            // Browser Web Worker rate: ~200 keys/s per worker (tweetnacl + BigInt overhead)
             const typicalRate = 200 * numWorkers;
             const estSeconds = expected / typicalRate;
             let timeStr;
@@ -321,7 +337,6 @@
         function setFormDisabled(disabled) {
             document.getElementById('prefix').disabled = disabled;
             document.getElementById('suffix').disabled = disabled;
-            document.getElementById('match-both').disabled = disabled;
         }
 
 function startMining() {
@@ -338,7 +353,8 @@ function startMining() {
 
             const prefix = document.getElementById('prefix').value.toLowerCase();
             const suffix = document.getElementById('suffix').value.toLowerCase();
-            const matchBoth = document.getElementById('match-both').checked;
+            const matchPrefix = prefix.length > 0;
+            const matchSuffix = suffix.length > 0;
             const numWorkers = Math.min(parseInt(document.getElementById('workers').value) || 1, 16);
 
             document.getElementById('estimate').textContent = '';
@@ -375,7 +391,7 @@ function startMining() {
                             return;
                         }
 
-                        const { prefix, suffix, matchBoth, workerId, totalWorkers } = e.data;
+                        const { prefix, suffix, matchPrefix, matchSuffix, workerId, totalWorkers } = e.data;
                         const prefixLower = prefix.toLowerCase();
                         const suffixLower = suffix.toLowerCase();
 
@@ -395,7 +411,14 @@ function startMining() {
                         scalar = (scalar + BigInt(workerId)) & ((1n << 256n) - 1n);
 
                         const alphabetSize = 16;
-                        const patternLen = matchBoth ? prefix.length + suffix.length : Math.max(prefix.length, suffix.length);
+                        let patternLen;
+                        if (matchPrefix && matchSuffix) {
+                            patternLen = prefix.length + suffix.length;
+                        } else if (matchPrefix) {
+                            patternLen = prefix.length;
+                        } else {
+                            patternLen = suffix.length;
+                        }
                         const expectedAttempts = BigInt(alphabetSize) ** BigInt(patternLen);
 
                         const BATCH_SIZE = 16;
@@ -414,10 +437,12 @@ function startMining() {
                                 const publicKeyHex = Array.from(keyPair.publicKey).map(b => b.toString(16).padStart(2, '0')).join('');
 
                                 let match = false;
-                                if (matchBoth) {
+                                if (matchPrefix && matchSuffix) {
                                     match = publicKeyHex.startsWith(prefixLower) && publicKeyHex.endsWith(suffixLower);
+                                } else if (matchPrefix) {
+                                    match = publicKeyHex.startsWith(prefixLower);
                                 } else {
-                                    match = publicKeyHex.startsWith(prefixLower) || publicKeyHex.endsWith(suffixLower);
+                                    match = publicKeyHex.endsWith(suffixLower);
                                 }
 
                                 if (match) {
@@ -528,7 +553,7 @@ function startMining() {
                     if (e.data.type === 'ready') {
                         clearTimeout(initTimeouts[i]);
                         console.log('[Main] Sending work data to worker ' + i);
-                        w.postMessage({ prefix, suffix, matchBoth, workerId: i, totalWorkers: numWorkers });
+                        w.postMessage({ prefix, suffix, matchPrefix, matchSuffix, workerId: i, totalWorkers: numWorkers });
                         return;
                     }
                     if (e.data.type === 'progress') {
