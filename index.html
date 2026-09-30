@@ -173,6 +173,7 @@
     <script>
         let worker = null;
         let mining = false;
+        let initTimeout = null;
 
         function validateHex(input) {
             const errorEl = document.getElementById(input.id + '-error');
@@ -282,9 +283,16 @@
             const matchBoth = document.getElementById('match-both').checked;
 
             document.getElementById('estimate').textContent = '';
+            document.getElementById('progress-text').textContent = 'Starting...';
 
             const workerCode = `
                 importScripts('https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js');
+
+                if (typeof nacl === 'undefined') {
+                    self.postMessage({ type: 'error', message: 'Failed to load cryptographic library (importScripts failed).' });
+                } else {
+                    self.postMessage({ type: 'ready' });
+                }
 
                 self.onmessage = function(e) {
                     try {
@@ -375,7 +383,21 @@
             const blob = new Blob([workerCode], { type: 'application/javascript' });
             worker = new Worker(URL.createObjectURL(blob));
 
+            initTimeout = setTimeout(() => {
+                if (mining && worker) {
+                    worker.terminate();
+                    worker = null;
+                    mining = false;
+                    setFormDisabled(false);
+                    document.getElementById('start-btn').disabled = false;
+                    document.getElementById('stop-btn').disabled = true;
+                    document.getElementById('progress').classList.add('hidden');
+                    alert('Worker failed to initialize (timeout). Check internet connection and refresh.');
+                }
+            }, 10000);
+
             worker.onerror = function(e) {
+                clearTimeout(initTimeout);
                 mining = false;
                 setFormDisabled(false);
                 document.getElementById('start-btn').disabled = false;
@@ -385,6 +407,11 @@
             };
 
             worker.onmessage = function(e) {
+                if (e.data.type === 'ready') {
+                    clearTimeout(initTimeout);
+                    worker.postMessage({ prefix, suffix, matchBoth });
+                    return;
+                }
                 if (e.data.type === 'progress') {
                     const remaining = (e.data.expectedAttempts - e.data.attempts) / e.data.rate;
                     let etaStr = '';
@@ -397,7 +424,7 @@
                     document.getElementById('progress-text').textContent =
                         'Attempts: ' + e.data.attempts.toLocaleString() + ' | Rate: ' + Math.round(e.data.rate).toLocaleString() + '/s | Progress: ' + e.data.progress.toFixed(2) + '%' + etaStr;
                 } else if (e.data.type === 'found') {
-                    mining = false;
+                    clearTimeout(initTimeout);
                     setFormDisabled(false);
                     document.getElementById('start-btn').disabled = false;
                     document.getElementById('stop-btn').disabled = true;
@@ -410,6 +437,7 @@
                     worker.terminate();
                     worker = null;
                 } else if (e.data.type === 'error') {
+                    clearTimeout(initTimeout);
                     mining = false;
                     setFormDisabled(false);
                     document.getElementById('start-btn').disabled = false;
@@ -421,8 +449,6 @@
                 }
             };
 
-            worker.postMessage({ prefix, suffix, matchBoth });
-
             mining = true;
             setFormDisabled(true);
             document.getElementById('start-btn').disabled = true;
@@ -432,6 +458,10 @@
         }
 
         function stopMining() {
+            if (initTimeout) {
+                clearTimeout(initTimeout);
+                initTimeout = null;
+            }
             if (worker) {
                 worker.terminate();
                 worker = null;
@@ -461,6 +491,9 @@
         }
 
         window.addEventListener('beforeunload', function() {
+            if (initTimeout) {
+                clearTimeout(initTimeout);
+            }
             if (worker) {
                 worker.terminate();
             }
