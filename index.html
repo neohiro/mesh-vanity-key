@@ -180,7 +180,7 @@
             <div class="field">
                 <label for="workers">Workers</label>
                 <div class="worker-wrapper">
-                    <input type="number" id="workers" value="4" min="1" max="16" class="worker-input">
+                    <input type="number" id="workers" value="4" min="1" max="16" class="worker-input" oninput="updateEstimate()">
                     <span class="worker-hint">More workers = faster search (uses more CPU)</span>
                 </div>
             </div>
@@ -302,8 +302,8 @@
                 expected = Math.pow(16, Math.max(prefix.length, suffix.length));
             }
 
-            // Browser Web Worker rate is ~5k keys/s per worker
-            const typicalRate = 5000 * numWorkers;
+            // Browser Web Worker rate is ~200 keys/s per worker (realistic for BigInt + tweetnacl)
+            const typicalRate = 200 * numWorkers;
             const estSeconds = expected / typicalRate;
             let timeStr;
             if (estSeconds < 60) {
@@ -315,7 +315,7 @@
             } else {
                 timeStr = (estSeconds / 86400).toFixed(1) + 'd';
             }
-            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (at ~5k keys/s per worker, ' + (5000 * numWorkers).toLocaleString() + ' keys/s total with ' + numWorkers + ' worker' + (numWorkers > 1 ? 's' : '') + ')';
+            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (at ~200 keys/s per worker, ' + (200 * numWorkers).toLocaleString() + ' keys/s total with ' + numWorkers + ' worker' + (numWorkers > 1 ? 's' : '') + ')';
         }
 
         function setFormDisabled(disabled) {
