@@ -65,6 +65,22 @@
         #stop-btn:hover:not(:disabled) { background: #f85149; }
         #stop-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
         .estimate { font-size: 12px; color: #8b949e; margin-top: 12px; }
+        .reserved-notice {
+            margin-top: 12px;
+            padding: 12px;
+            background: #1a1a2e;
+            border: 1px solid #f0c040;
+            border-radius: 6px;
+            font-size: 13px;
+            color: #f0c040;
+            line-height: 1.5;
+        }
+        .reserved-notice code {
+            background: #2a2a3e;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 12px;
+        }
         #progress { margin-top: 24px; }
         #progress-text { font-size: 14px; color: #8b949e; font-family: 'SFMono-Regular', Consolas, monospace; }
         #result { margin-top: 24px; padding: 20px; background: #0d1117; border: 1px solid #238636; border-radius: 8px; }
@@ -97,13 +113,13 @@
         <div class="form">
             <div class="field">
                 <label for="prefix">Prefix (hex)</label>
-                <input type="text" id="prefix" placeholder="e.g., ab" maxlength="64" oninput="validateHex(this); updateEstimate()">
+                <input type="text" id="prefix" placeholder="e.g., ab" maxlength="64" oninput="validateHex(this); updateEstimate(); updateReservedPrefixNotice()">
                 <span class="error-msg" id="prefix-error"></span>
             </div>
 
             <div class="field">
                 <label for="suffix">Suffix (hex)</label>
-                <input type="text" id="suffix" placeholder="e.g., cd" maxlength="64" oninput="validateHex(this); updateEstimate()">
+                <input type="text" id="suffix" placeholder="e.g., cd" maxlength="64" oninput="validateHex(this); updateEstimate(); updateReservedPrefixNotice()">
                 <span class="error-msg" id="suffix-error"></span>
             </div>
 
@@ -118,6 +134,7 @@
             </div>
 
             <p id="estimate" class="estimate"></p>
+            <div id="reserved-notice" class="reserved-notice" style="display: none;"></div>
         </div>
 
         <div id="progress" class="hidden">
@@ -167,6 +184,17 @@
             }
         }
 
+        function checkReservedPrefix(input) {
+            const value = input.value.toLowerCase();
+            if (value.length >= 2) {
+                const firstTwo = value.substring(0, 2);
+                if (firstTwo === '00' || firstTwo === 'ff') {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         function validateForm() {
             const prefixInput = document.getElementById('prefix');
             const suffixInput = document.getElementById('suffix');
@@ -179,6 +207,22 @@
                 return false;
             }
             return true;
+        }
+
+        function updateReservedNotice() {
+            const prefixInput = document.getElementById('prefix');
+            const suffixInput = document.getElementById('suffix');
+            const noticeEl = document.getElementById('reserved-notice');
+
+            const prefixReserved = checkReservedPrefix(prefixInput);
+            const suffixReserved = checkReservedPrefix(suffixInput);
+
+            if (prefixReserved || suffixReserved) {
+                noticeEl.innerHTML = '<strong>Notice:</strong> Prefixes starting with <code>00</code> or <code>FF</code> are reserved for MeshCore framework devices (not consumer nodes). You can still mine for them, but they may not work with standard MeshCore clients.';
+                noticeEl.style.display = 'block';
+            } else {
+                noticeEl.style.display = 'none';
+            }
         }
 
         function updateEstimate() {
