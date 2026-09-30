@@ -264,10 +264,16 @@
             }
         }
 
+        function getNumWorkers() {
+            const raw = parseInt(document.getElementById('workers').value, 10);
+            if (!Number.isFinite(raw)) return 4;
+            return Math.min(Math.max(raw, 1), 16);
+        }
+
         function updateEstimate() {
             const prefix = document.getElementById('prefix').value;
             const suffix = document.getElementById('suffix').value;
-            const numWorkers = parseInt(document.getElementById('workers').value) || 1;
+            const numWorkers = getNumWorkers();
             const estimateEl = document.getElementById('estimate');
 
             if (!prefix && !suffix) {
@@ -326,7 +332,8 @@ function startMining() {
             const suffix = document.getElementById('suffix').value.toLowerCase();
             const matchPrefix = prefix.length > 0;
             const matchSuffix = suffix.length > 0;
-            const numWorkers = Math.min(parseInt(document.getElementById('workers').value) || 1, 16);
+            const numWorkers = getNumWorkers();
+            document.getElementById('workers').value = numWorkers;
 
             document.getElementById('estimate').textContent = '';
             document.getElementById('live-estimate').textContent = '';
@@ -354,7 +361,7 @@ function startMining() {
                     self.postMessage({ type: 'ready' });
                 }
 
-                self.onmessage = function(e) {
+                self.onmessage = async function(e) {
                     console.log('[Worker] Received message:', e.data.type || e.data);
                     try {
                         if (typeof nacl === 'undefined') {
@@ -381,7 +388,6 @@ function startMining() {
                         let scalar = BigInt('0x' + Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join(''));
                         scalar = (scalar + BigInt(workerId)) & ((1n << 256n) - 1n);
 
-                        const alphabetSize = 16;
                         let patternLen;
                         if (matchPrefix && matchSuffix) {
                             patternLen = prefix.length + suffix.length;
@@ -390,11 +396,31 @@ function startMining() {
                         } else {
                             patternLen = suffix.length;
                         }
-                        const expectedAttempts = BigInt(alphabetSize) ** BigInt(patternLen);
+                        // Send as Number: BigInt can't mix with Number on the main thread
+                        // and huge patterns exceed float precision anyway (progress ~= 0%).
+                        const expectedAttempts = Math.pow(16, patternLen);
 
                         const BATCH_SIZE = 16;
-                        const PROGRESS_INTERVAL = 10;
+                        const REPORT_EVERY_MS = 500;
                         let lastProgressReport = 0;
+
+                        function reportProgress(force) {
+                            const now = Date.now();
+                            if (!force && now - lastProgressReport < REPORT_EVERY_MS) return;
+                            const elapsed = (now - startTime) / 1000;
+                            const rate = elapsed > 0 ? attempts / elapsed : 0;
+                            const pct = isFinite(expectedAttempts) && expectedAttempts > 0
+                                ? Math.min(attempts / expectedAttempts * 100, 100)
+                                : 0;
+                            self.postMessage({
+                                type: 'progress',
+                                attempts: attempts,
+                                rate: rate,
+                                progress: pct,
+                                expectedAttempts: expectedAttempts
+                            });
+                            lastProgressReport = now;
+                        }
 
                         while (true) {
                             for (let b = 0; b < BATCH_SIZE; b++) {
@@ -430,43 +456,11 @@ function startMining() {
                                 attempts++;
                                 // Each worker steps by totalWorkers
                                 scalar = (scalar + BigInt(totalWorkers)) & ((1n << 256n) - 1n);
-
-                                if (attempts % PROGRESS_INTERVAL === 0) {
-                                    const now = Date.now();
-                                    const elapsed = (now - startTime) / 1000;
-                                    const rate = elapsed > 0 ? attempts / elapsed : 0;
-                                    const pct = expectedAttempts > 0n
-                                        ? Number((BigInt(attempts) * 10000n) / expectedAttempts) / 100
-                                        : 0;
-                                    self.postMessage({
-                                        type: 'progress',
-                                        attempts: attempts,
-                                        rate: rate,
-                                        progress: Math.min(pct, 100),
-                                        expectedAttempts: expectedAttempts
-                                    });
-                                    lastProgressReport = now;
-                                }
                             }
-                            // Yield to event loop to ensure messages are processed
-                            if (Date.now() - lastProgressReport > 100) {
-                                const now = Date.now();
-                                const elapsed = (now - startTime) / 1000;
-                                const rate = elapsed > 0 ? attempts / elapsed : 0;
-                                const pct = expectedAttempts > 0n
-                                    ? Number((BigInt(attempts) * 10000n) / expectedAttempts) / 100
-                                    : 0;
-                                self.postMessage({
-                                    type: 'progress',
-                                    attempts: attempts,
-                                    rate: rate,
-                                    progress: Math.min(pct, 100),
-                                    expectedAttempts: expectedAttempts
-                                });
-                                lastProgressReport = now;
-                            }
-                            // Force event loop yield
-                            setTimeout(() => {}, 0);
+                            reportProgress(false);
+                            // Real yield: lets postMessage flush and keeps UI/Stop responsive.
+                            // (A bare setTimeout() without await never yields inside while(true).)
+                            await new Promise(r => setTimeout(r, 0));
                         }
                     } catch (err) {
                         self.postMessage({ type: 'error', message: 'Worker error: ' + err.message });
@@ -515,7 +509,13 @@ function startMining() {
                         return;
                     }
                     if (e.data.type === 'progress') {
-                        const remaining = (e.data.expectedAttempts - e.data.attempts) / e.data.rate;
+                        const attempts = Number(e.data.attempts) || 0;
+                        const rate = Number(e.data.rate) || 0;
+                        const expected = Number(e.data.expectedAttempts);
+                        const pct = Number(e.data.progress) || 0;
+                        const remaining = (isFinite(expected) && rate > 0)
+                            ? (expected - attempts) / rate
+                            : NaN;
                         let etaStr = '';
                         if (remaining > 0 && isFinite(remaining)) {
                             if (remaining < 60) etaStr = ' | ETA: ' + remaining.toFixed(0) + 's';
@@ -523,16 +523,16 @@ function startMining() {
                             else if (remaining < 86400) etaStr = ' | ETA: ' + (remaining / 3600).toFixed(1) + 'h';
                             else etaStr = ' | ETA: ' + (remaining / 86400).toFixed(1) + 'd';
                         }
-                        const liveRateStr = Math.round(e.data.rate).toLocaleString() + '/s';
-                        const progressText = 'Attempts: ' + e.data.attempts.toLocaleString() + ' | Rate: ' + liveRateStr + ' | Progress: ' + e.data.progress.toFixed(2) + '%' + etaStr;
+                        const liveRateStr = Math.round(rate).toLocaleString() + '/s';
+                        const progressText = 'Attempts: ' + attempts.toLocaleString() + ' | Rate: ' + liveRateStr + ' | Progress: ' + pct.toFixed(2) + '%' + etaStr;
                         document.getElementById('progress-text').textContent = progressText;
-                        
+
                         // Update estimate with live data after first progress report
-                        if (e.data.attempts > 0 && !window.liveEstimateShown) {
+                        if (attempts > 0 && !window.liveEstimateShown) {
                             window.liveEstimateShown = true;
                             const liveEstimateEl = document.getElementById('live-estimate');
                             if (liveEstimateEl) {
-                                liveEstimateEl.textContent = 'Live estimate: ~' + liveEtaStr + ' at ' + liveRateStr;
+                                liveEstimateEl.textContent = 'Live estimate:' + (etaStr ? ' ~' + etaStr.replace(' | ETA: ', '') : '') + ' at ' + liveRateStr;
                                 liveEstimateEl.style.display = 'block';
                             }
                         }
@@ -611,6 +611,13 @@ function startMining() {
             document.getElementById('prefix').value = '';
             document.getElementById('suffix').value = '';
             document.getElementById('estimate').textContent = '';
+            const live = document.getElementById('live-estimate');
+            live.textContent = '';
+            live.style.display = 'none';
+            window.liveEstimateShown = false;
+            document.getElementById('progress').classList.add('hidden');
+            document.getElementById('reserved-notice').style.display = 'none';
+            updateEstimate();
         }
 
         window.addEventListener('beforeunload', function() {

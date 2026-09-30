@@ -303,6 +303,12 @@ def test_generate_vanity_key_parallel():
     assert result.attempts >= 0
 
 
+def test_generate_vanity_key_parallel_max_attempts():
+    # Impossible-in-budget search must fail fast, not hang workers.
+    with pytest.raises(RuntimeError, match="exceeded max_attempts"):
+        generate_vanity_key("deadbeefcafe", encoding="hex", max_attempts=20, workers=2)
+
+
 def test_generate_vanity_key_suffix():
     result = generate_vanity_key("ab", encoding="hex", suffix=True, max_attempts=100000)
     assert result.encoded.endswith("ab")

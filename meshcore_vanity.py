@@ -384,6 +384,7 @@ def generate_vanity_key(
 
     # Batch verification: check multiple candidates per iteration
     BATCH_SIZE = 16
+    next_report = progress_interval
 
     while True:
         if max_attempts is not None and attempts >= max_attempts:
@@ -443,7 +444,8 @@ def generate_vanity_key(
 
             attempts += 1
 
-        if attempts % progress_interval == 0:
+        if attempts >= next_report:
+            next_report += progress_interval
             elapsed = time.perf_counter() - start
             rate = attempts / elapsed if elapsed > 0 else 0
             pct = (attempts / expected_attempts * 100) if expected_attempts > 0 else 0
@@ -477,11 +479,17 @@ def _generate_vanity_key_parallel(
     import multiprocessing as mp
     
     ctx = mp.get_context("spawn")
+    # Split the total attempt budget across workers so --max-attempts keeps
+    # its documented meaning (total, not per-worker).
+    if max_attempts is not None:
+        per_worker_max = (max_attempts + workers - 1) // workers
+    else:
+        per_worker_max = None
     with ctx.Pool(processes=workers) as pool:
         worker_args = []
         for w in range(workers):
             worker_args.append((
-                prefix, encoding, case_insensitive, max_attempts, seed,
+                prefix, encoding, case_insensitive, per_worker_max, seed,
                 prefix_len, prefix_cmp, check_slice, both, hrp,
                 w, w, workers, progress_interval,
                 is_hex, hrp_expanded
@@ -495,10 +503,13 @@ def _generate_vanity_key_parallel(
         try:
             for priv_seed, worker_attempts, _ in pool.imap_unordered(_worker_search, worker_args):
                 total_attempts += worker_attempts
-                
-                # Progress reporting (aggregate across workers)
+
+                # Progress reporting (aggregate across workers).
+                # NOTE: workers only report on completion, so with no
+                # max_attempts this prints between worker completions
+                # (i.e. on success), not continuously. Throttle by wall time.
                 elapsed = time.perf_counter() - start_time
-                if elapsed - (last_progress_print - start_time) >= (progress_interval / 50000.0) and elapsed > 0:
+                if elapsed - (last_progress_print - start_time) >= 1.0 and elapsed > 0:
                     rate = total_attempts / elapsed
                     if encoding == "hex":
                         alphabet_size = 16
