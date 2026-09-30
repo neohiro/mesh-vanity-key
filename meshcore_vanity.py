@@ -18,6 +18,7 @@ import base64
 import hashlib
 import os
 import sys
+import threading
 import time
 import multiprocessing as mp
 from dataclasses import dataclass
@@ -52,11 +53,23 @@ class VanityResult:
     private_seed: bytes
 
 
+# Shared live-progress counter for parallel workers. Under the "spawn" start
+# method synchronized objects cannot be passed as pool task args — they must
+# be inherited — so the pool initializer sets this global in each child.
+_PROGRESS_COUNTER = None
+
+
+def _init_worker_counter(counter) -> None:
+    """Pool initializer: inherit the shared progress counter in each child."""
+    global _PROGRESS_COUNTER
+    _PROGRESS_COUNTER = counter
+
+
 def _worker_search(args: tuple) -> tuple:
     """Worker function for parallel search."""
     (prefix, encoding, case_insensitive, max_attempts, seed, prefix_len,
      prefix_cmp, check_slice, both, hrp, start_offset, worker_id,
-     total_workers, progress_interval, is_hex, hrp_expanded) = args
+     total_workers, is_hex, hrp_expanded) = args
 
     # NOTE: base64/hashlib/nacl are already imported at module level; under
     # the "spawn" start method the module is re-imported in each child, so no
@@ -125,6 +138,12 @@ def _worker_search(args: tuple) -> tuple:
 
             attempts += 1
             counter += total_workers
+
+        # Feed the shared live-progress counter once per batch (not per key)
+        # to keep lock contention negligible on the hot path.
+        if _PROGRESS_COUNTER is not None:
+            with _PROGRESS_COUNTER.get_lock():
+                _PROGRESS_COUNTER.value += BATCH_SIZE
 
 
 # Pre-define _bech32_hrp_expand at module level for worker access
@@ -262,6 +281,33 @@ def _bech32_encode(hrp: str, data: bytes, hrp_expanded: list[int] | None = None)
     return hrp + "1" + "".join(BECH32_CHARSET[v] for v in five_bit + checksum)
 
 
+def _expected_attempts(encoding: Encoding, prefix_len: int, both: bool) -> int:
+    """Brute-force search space size for the stderr progress line."""
+    if encoding == "hex":
+        alphabet_size = 16
+    elif encoding in ("base64", "base64url"):
+        alphabet_size = 64
+    elif encoding == "base58":
+        alphabet_size = 58
+    else:
+        alphabet_size = 32
+    if both:
+        return alphabet_size ** (prefix_len * 2)
+    return alphabet_size ** prefix_len
+
+
+def _format_progress(attempts: int, elapsed: float, expected_attempts: int) -> str:
+    """Single stderr progress-line format shared by all search paths."""
+    rate = attempts / elapsed if elapsed > 0 else 0
+    pct = (attempts / expected_attempts * 100) if expected_attempts > 0 else 0
+    remaining = (expected_attempts - attempts) / rate if rate > 0 else 0
+    eta = f" eta={remaining:.0f}s" if remaining > 0 else ""
+    return (
+        f"  attempts={attempts:,} rate={rate:,.0f}/s elapsed={elapsed:.1f}s "
+        f"progress={pct:.2f}%{eta}"
+    )
+
+
 def generate_vanity_key(
     prefix: str,
     encoding: Encoding = "base64",
@@ -365,18 +411,7 @@ def generate_vanity_key(
     _SigningKey = nacl.signing.SigningKey
 
     # Calculate expected attempts for progress percentage
-    if encoding == "hex":
-        alphabet_size = 16
-    elif encoding in ("base64", "base64url"):
-        alphabet_size = 64
-    elif encoding == "base58":
-        alphabet_size = 58
-    else:
-        alphabet_size = 32
-    if both:
-        expected_attempts = alphabet_size ** (prefix_len * 2)
-    else:
-        expected_attempts = alphabet_size ** prefix_len
+    expected_attempts = _expected_attempts(encoding, prefix_len, both)
 
     # Scalar-walk: derive initial scalar from seed once, then increment
     # as a 256-bit integer for each attempt (avoids SHA-256 per attempt)
@@ -447,14 +482,7 @@ def generate_vanity_key(
         if attempts >= next_report:
             next_report += progress_interval
             elapsed = time.perf_counter() - start
-            rate = attempts / elapsed if elapsed > 0 else 0
-            pct = (attempts / expected_attempts * 100) if expected_attempts > 0 else 0
-            remaining = (expected_attempts - attempts) / rate if rate > 0 else 0
-            eta = f" eta={remaining:.0f}s" if remaining > 0 else ""
-            print(
-                f"  attempts={attempts:,} rate={rate:,.0f}/s elapsed={elapsed:.1f}s progress={pct:.2f}%{eta}",
-                file=sys.stderr,
-            )
+            print(_format_progress(attempts, elapsed, expected_attempts), file=sys.stderr)
 
 
 def _generate_vanity_key_parallel(
@@ -475,9 +503,14 @@ def _generate_vanity_key_parallel(
     hrp_expanded: list[int] | None,
     start_time: float,
 ) -> VanityResult:
-    """Parallel vanity key search using multiprocessing with early exit."""
+    """Parallel vanity key search using multiprocessing with early exit.
+
+    Live progress combines the standard stderr echo format with a shared
+    counter fed by the workers once per batch, so long unbounded searches
+    report continuously instead of only on worker completion.
+    """
     import multiprocessing as mp
-    
+
     ctx = mp.get_context("spawn")
     # Split the total attempt budget across workers so --max-attempts keeps
     # its documented meaning (total, not per-worker).
@@ -485,53 +518,48 @@ def _generate_vanity_key_parallel(
         per_worker_max = (max_attempts + workers - 1) // workers
     else:
         per_worker_max = None
-    with ctx.Pool(processes=workers) as pool:
+    expected_attempts = _expected_attempts(encoding, prefix_len, both)
+    progress_counter = ctx.Value("Q", 0)
+    with ctx.Pool(processes=workers, initializer=_init_worker_counter,
+                   initargs=(progress_counter,)) as pool:
         worker_args = []
         for w in range(workers):
             worker_args.append((
                 prefix, encoding, case_insensitive, per_worker_max, seed,
                 prefix_len, prefix_cmp, check_slice, both, hrp,
-                w, w, workers, progress_interval,
+                w, w, workers,
                 is_hex, hrp_expanded
             ))
-        
+
+        # Monitor thread: same echo format as the single-threaded path,
+        # driven by the shared counter. Daemon so it can never hang exit.
+        stop_monitor = threading.Event()
+        next_report = [progress_interval]
+
+        def _monitor() -> None:
+            last_heartbeat = start_time
+            while not stop_monitor.wait(0.5):
+                total = progress_counter.value
+                now = time.perf_counter()
+                if total >= next_report[0] or now - last_heartbeat >= 5.0:
+                    next_report[0] = max(next_report[0] + progress_interval, total + 1)
+                    print(
+                        _format_progress(total, now - start_time, expected_attempts),
+                        file=sys.stderr,
+                    )
+                    last_heartbeat = now
+
+        monitor = threading.Thread(target=_monitor, name="progress-monitor", daemon=True)
+        monitor.start()
+
         # Use imap_unordered for early exit on first result
-        # Track progress across workers
+        # Track exact total across workers from their returned counts.
         total_attempts = 0
-        last_progress_print = start_time
-        
+
         try:
             for priv_seed, worker_attempts, _ in pool.imap_unordered(_worker_search, worker_args):
                 total_attempts += worker_attempts
 
-                # Progress reporting (aggregate across workers).
-                # NOTE: workers only report on completion, so with no
-                # max_attempts this prints between worker completions
-                # (i.e. on success), not continuously. Throttle by wall time.
-                elapsed = time.perf_counter() - start_time
-                if elapsed - (last_progress_print - start_time) >= 1.0 and elapsed > 0:
-                    rate = total_attempts / elapsed
-                    if encoding == "hex":
-                        alphabet_size = 16
-                    elif encoding in ("base64", "base64url"):
-                        alphabet_size = 64
-                    elif encoding == "base58":
-                        alphabet_size = 58
-                    else:
-                        alphabet_size = 32
-                    if both:
-                        expected_attempts = alphabet_size ** (prefix_len * 2)
-                    else:
-                        expected_attempts = alphabet_size ** prefix_len
-                    pct = (total_attempts / expected_attempts * 100) if expected_attempts > 0 else 0
-                    remaining = (expected_attempts - total_attempts) / rate if rate > 0 else 0
-                    eta = f" eta={remaining:.0f}s" if remaining > 0 else ""
-                    print(
-                        f"  attempts={total_attempts:,} rate={rate:,.0f}/s elapsed={elapsed:.1f}s progress={pct:.2f}%{eta}",
-                        file=sys.stderr,
-                    )
-                    last_progress_print = time.perf_counter()
-                
                 if priv_seed is not None:
                     pool.terminate()
                     # Reconstruct the key from private seed
@@ -548,7 +576,7 @@ def _generate_vanity_key_parallel(
                         encoded = _base58_encode(raw)
                     else:
                         encoded = _bech32_encode(hrp, raw, hrp_expanded)
-                    
+
                     elapsed = time.perf_counter() - start_time
                     return VanityResult(
                         private_key=priv,
@@ -561,7 +589,10 @@ def _generate_vanity_key_parallel(
         except KeyboardInterrupt:
             pool.terminate()
             raise
-    
+        finally:
+            stop_monitor.set()
+            monitor.join(timeout=2.0)
+
     raise RuntimeError(f"exceeded max_attempts={max_attempts}")
 
 

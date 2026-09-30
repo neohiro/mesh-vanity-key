@@ -6,6 +6,7 @@
     <title>MeshCore Vanity Key Generator</title>
     <script src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js"></script>
     <style>
+        :root { color-scheme: dark; }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -54,20 +55,38 @@
             font-size: 16px;
             font-family: 'SFMono-Regular', Consolas, monospace;
             text-align: left;
-            color-scheme: dark;
         }
         .worker-input:focus { outline: none; border-color: #58a6ff; }
         .worker-input:disabled { opacity: 0.5; }
-        /* Native number spinners: keep visible, docked right, not overlapping text */
+        /* Native spinners hidden: themed flanking steppers replace them,
+           so they can never overlap the digit. */
         .worker-input::-webkit-inner-spin-button,
         .worker-input::-webkit-outer-spin-button {
-            -webkit-appearance: inner-spin-button;
-            appearance: auto;
-            opacity: 1;
-            margin-left: 6px;
-            height: 24px;
-            cursor: pointer;
+            -webkit-appearance: none;
+            appearance: none;
+            margin: 0;
+            display: none;
         }
+        .worker-input {
+            -moz-appearance: textfield;
+            appearance: textfield;
+        }
+        .step-btn {
+            width: 36px;
+            padding: 10px 0;
+            background: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            font-size: 16px;
+            font-weight: 700;
+            line-height: 1;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .step-btn:hover:not(:disabled) { background: #30363d; }
+        .step-btn:active:not(:disabled) { background: #484f58; }
+        .step-btn:disabled { opacity: 0.5; cursor: not-allowed; }
         .worker-wrapper {
             display: flex;
             align-items: center;
@@ -162,7 +181,9 @@
             <div class="field">
                 <label for="workers">Workers</label>
                 <div class="worker-wrapper">
+                    <button type="button" class="step-btn" id="workers-minus" aria-label="Fewer workers">−</button>
                     <input type="number" id="workers" value="4" min="1" max="16" class="worker-input" oninput="updateEstimate()">
+                    <button type="button" class="step-btn" id="workers-plus" aria-label="More workers">+</button>
                     <span class="worker-hint">More workers = faster search (uses more CPU)</span>
                 </div>
             </div>
@@ -279,6 +300,39 @@
             return Math.min(Math.max(raw, 1), 16);
         }
 
+        // Measured on this device at page load (keys/s for one worker).
+        // Falls back to a conservative 200 keys/s until calibration finishes
+        // (e.g. crypto library failed to load).
+        let calibratedRatePerWorker = null;
+
+        function ratePerWorker() {
+            return calibratedRatePerWorker || 200;
+        }
+
+        async function calibrateBenchmark() {
+            try {
+                if (typeof nacl === 'undefined') return;
+                const N = 48;
+                const seed = new Uint8Array(32);
+                if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+                    crypto.getRandomValues(seed);
+                }
+                const t0 = performance.now();
+                for (let i = 0; i < N; i++) {
+                    seed[0] = i & 0xff;
+                    nacl.sign.keyPair.fromSeed(seed);
+                    if (i % 8 === 7) await new Promise(r => setTimeout(r, 0));
+                }
+                const dt = (performance.now() - t0) / 1000;
+                if (dt > 0) {
+                    calibratedRatePerWorker = N / dt;
+                    updateEstimate();
+                }
+            } catch (e) {
+                // Keep the conservative default; estimate stays valid, just rough.
+            }
+        }
+
         function updateEstimate() {
             const prefix = document.getElementById('prefix').value;
             const suffix = document.getElementById('suffix').value;
@@ -303,8 +357,12 @@
                 expected = Math.pow(16, suffix.length);
             }
 
-            // Browser Web Worker rate: ~200 keys/s per worker (tweetnacl + BigInt overhead)
-            const typicalRate = 200 * numWorkers;
+            // Per-worker rate: measured at page load when available.
+            const perWorker = ratePerWorker();
+            const typicalRate = perWorker * numWorkers;
+            const rateLabel = calibratedRatePerWorker
+                ? 'at ' + Math.round(perWorker).toLocaleString() + ' keys/s per worker (calibrated), '
+                : 'at ~200 keys/s per worker, ';
             const estSeconds = expected / typicalRate;
             let timeStr;
             if (!isFinite(estSeconds)) {
@@ -318,14 +376,24 @@
             } else {
                 timeStr = (estSeconds / 86400).toFixed(1) + 'd';
             }
-            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (at ~200 keys/s per worker, ' + (200 * numWorkers).toLocaleString() + ' keys/s total with ' + numWorkers + ' worker' + (numWorkers > 1 ? 's' : '') + ')';
+            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (' + rateLabel + typicalRate.toLocaleString() + ' keys/s total with ' + numWorkers + ' worker' + (numWorkers > 1 ? 's' : '') + ')';
         }
 
         function setFormDisabled(disabled) {
             document.getElementById('prefix').disabled = disabled;
             document.getElementById('suffix').disabled = disabled;
             document.getElementById('workers').disabled = disabled;
+            document.getElementById('workers-minus').disabled = disabled;
+            document.getElementById('workers-plus').disabled = disabled;
         }
+
+        function stepWorkers(delta) {
+            const el = document.getElementById('workers');
+            el.value = Math.min(16, Math.max(1, getNumWorkers() + delta));
+            updateEstimate();
+        }
+        document.getElementById('workers-minus').addEventListener('click', () => stepWorkers(-1));
+        document.getElementById('workers-plus').addEventListener('click', () => stepWorkers(1));
 
 function startMining() {
             if (mining) return;
@@ -634,6 +702,11 @@ function startMining() {
             document.getElementById('reserved-notice').style.display = 'none';
             updateEstimate();
         }
+
+        window.addEventListener('load', function() {
+            // Defer past first paint so load stays snappy; yields keep UI alive.
+            setTimeout(calibrateBenchmark, 0);
+        });
 
         window.addEventListener('beforeunload', function() {
             for (const t of initTimeouts) {
