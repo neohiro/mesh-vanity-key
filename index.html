@@ -497,19 +497,6 @@ function startMining() {
                             // Force event loop yield
                             setTimeout(() => {}, 0);
                         }
-                                const pct = expectedAttempts > 0n
-                                    ? Number((BigInt(attempts) * 10000n) / expectedAttempts) / 100
-                                    : 0;
-                                self.postMessage({
-                                    type: 'progress',
-                                    attempts: attempts,
-                                    rate: rate,
-                                    progress: Math.min(pct, 100),
-                                    expectedAttempts: expectedAttempts
-                                });
-                                lastProgressReport = now;
-                            }
-                        }
                     } catch (err) {
                         self.postMessage({ type: 'error', message: 'Worker error: ' + err.message });
                     }
