@@ -57,6 +57,40 @@
         }
         .worker-input:focus { outline: none; border-color: #58a6ff; }
         .worker-input:disabled { opacity: 0.5; }
+        /* Style number input arrows */
+        .worker-input::-webkit-inner-spin-button,
+        .worker-input::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            appearance: none;
+            margin: 0;
+            width: 20px;
+            height: 20px;
+            background: #21262d;
+            border-left: 1px solid #30363d;
+            cursor: pointer;
+        }
+        .worker-input::-webkit-inner-spin-button:hover,
+        .worker-input::-webkit-outer-spin-button:hover {
+            background: #30363d;
+        }
+        .worker-input::-webkit-inner-spin-button:active,
+        .worker-input::-webkit-outer-spin-button:active {
+            background: #484f58;
+        }
+        /* Firefox */
+        .worker-input {
+            -moz-appearance: textfield;
+        }
+        .worker-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .worker-hint {
+            font-size: 12px;
+            color: #8b949e;
+            white-space: nowrap;
+        }
         .checkbox-field { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
         .checkbox-field input[type="checkbox"] { width: 18px; height: 18px; accent-color: #58a6ff; }
         .checkbox-field input[type="checkbox"]:disabled { opacity: 0.5; }
@@ -145,7 +179,10 @@
 
             <div class="field">
                 <label for="workers">Workers</label>
-                <input type="number" id="workers" value="4" min="1" max="16" class="worker-input">
+                <div class="worker-wrapper">
+                    <input type="number" id="workers" value="4" min="1" max="16" class="worker-input">
+                    <span class="worker-hint">More workers = faster search (uses more CPU)</span>
+                </div>
             </div>
 
             <div class="buttons">
@@ -362,7 +399,7 @@ function startMining() {
                         const expectedAttempts = BigInt(alphabetSize) ** BigInt(patternLen);
 
                         const BATCH_SIZE = 16;
-                        const PROGRESS_INTERVAL = 100;
+                        const PROGRESS_INTERVAL = 10;
                         let lastProgressReport = 0;
 
                         while (true) {
@@ -416,10 +453,25 @@ function startMining() {
                                 }
                             }
                             // Yield to event loop to ensure messages are processed
-                            if (Date.now() - lastProgressReport > 500) {
+                            if (Date.now() - lastProgressReport > 100) {
                                 const now = Date.now();
                                 const elapsed = (now - startTime) / 1000;
                                 const rate = elapsed > 0 ? attempts / elapsed : 0;
+                                const pct = expectedAttempts > 0n
+                                    ? Number((BigInt(attempts) * 10000n) / expectedAttempts) / 100
+                                    : 0;
+                                self.postMessage({
+                                    type: 'progress',
+                                    attempts: attempts,
+                                    rate: rate,
+                                    progress: Math.min(pct, 100),
+                                    expectedAttempts: expectedAttempts
+                                });
+                                lastProgressReport = now;
+                            }
+                            // Force event loop yield
+                            setTimeout(() => {}, 0);
+                        }
                                 const pct = expectedAttempts > 0n
                                     ? Number((BigInt(attempts) * 10000n) / expectedAttempts) / 100
                                     : 0;
