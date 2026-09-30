@@ -130,6 +130,11 @@
                 <label for="match-both">Match both prefix AND suffix</label>
             </div>
 
+            <div class="field">
+                <label for="workers">Workers</label>
+                <input type="number" id="workers" value="1" min="1" max="16" style="width: 80px;">
+            </div>
+
             <div class="buttons">
                 <button id="start-btn" onclick="startMining()">Start Mining</button>
                 <button id="stop-btn" onclick="stopMining()" disabled>Stop</button>
@@ -172,9 +177,9 @@
     </div>
 
     <script>
-        let worker = null;
+        let workers = [];
         let mining = false;
-        let initTimeout = null;
+        let initTimeouts = [];
 
         function validateHex(input) {
             const errorEl = document.getElementById(input.id + '-error');
@@ -246,7 +251,8 @@
                 expected = Math.pow(16, Math.max(prefix.length, suffix.length));
             }
 
-            const typicalRate = 50000;
+            // Browser Web Worker rate is ~5k keys/s (not 50k which is native Python)
+            const typicalRate = 5000;
             const estSeconds = expected / typicalRate;
             let timeStr;
             if (estSeconds < 60) {
@@ -258,7 +264,7 @@
             } else {
                 timeStr = (estSeconds / 86400).toFixed(1) + 'd';
             }
-            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (at 50k keys/s)';
+            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (at ~5k keys/s per worker in browser)';
         }
 
         function setFormDisabled(disabled) {
@@ -267,7 +273,7 @@
             document.getElementById('match-both').disabled = disabled;
         }
 
-        function startMining() {
+function startMining() {
             if (mining) return;
             if (typeof Worker === 'undefined') {
                 alert('Your browser does not support Web Workers. Please use a modern browser.');
@@ -282,6 +288,7 @@
             const prefix = document.getElementById('prefix').value.toLowerCase();
             const suffix = document.getElementById('suffix').value.toLowerCase();
             const matchBoth = document.getElementById('match-both').checked;
+            const numWorkers = Math.min(parseInt(document.getElementById('workers').value) || 1, 16);
 
             document.getElementById('estimate').textContent = '';
             document.getElementById('live-estimate').textContent = '';
@@ -317,7 +324,7 @@
                             return;
                         }
 
-                        const { prefix, suffix, matchBoth } = e.data;
+                        const { prefix, suffix, matchBoth, workerId, totalWorkers } = e.data;
                         const prefixLower = prefix.toLowerCase();
                         const suffixLower = suffix.toLowerCase();
 
@@ -332,7 +339,9 @@
                                 seed[i] = Math.floor(Math.random() * 256);
                             }
                         }
+                        // Each worker starts at a different offset
                         let scalar = BigInt('0x' + Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join(''));
+                        scalar = (scalar + BigInt(workerId)) & ((1n << 256n) - 1n);
 
                         const alphabetSize = 16;
                         const patternLen = matchBoth ? prefix.length + suffix.length : Math.max(prefix.length, suffix.length);
@@ -344,7 +353,6 @@
 
                         while (true) {
                             for (let b = 0; b < BATCH_SIZE; b++) {
-                                scalar = (scalar + 1n) & ((1n << 256n) - 1n);
                                 const seedHex = scalar.toString(16).padStart(64, '0');
                                 const seedBytes = new Uint8Array(32);
                                 for (let i = 0; i < 32; i++) {
@@ -373,6 +381,8 @@
                                 }
 
                                 attempts++;
+                                // Each worker steps by totalWorkers
+                                scalar = (scalar + BigInt(totalWorkers)) & ((1n << 256n) - 1n);
 
                                 if (attempts % PROGRESS_INTERVAL === 0) {
                                     const now = Date.now();
@@ -415,96 +425,104 @@
                 };
             `;
 
-            const blob = new Blob([workerCode], { type: 'application/javascript' });
-            worker = new Worker(URL.createObjectURL(blob));
+            workers = [];
+            initTimeouts = [];
 
-            initTimeout = setTimeout(() => {
-                if (mining && worker) {
-                    worker.terminate();
-                    worker = null;
+            for (let i = 0; i < numWorkers; i++) {
+                const blob = new Blob([workerCode], { type: 'application/javascript' });
+                const w = new Worker(URL.createObjectURL(blob));
+                workers.push(w);
+
+                const initTimeout = setTimeout(() => {
+                    if (mining && workers.includes(w)) {
+                        w.terminate();
+                        mining = false;
+                        setFormDisabled(false);
+                        document.getElementById('start-btn').disabled = false;
+                        document.getElementById('stop-btn').disabled = true;
+                        document.getElementById('progress').classList.add('hidden');
+                        alert('Worker ' + i + ' failed to initialize (timeout). Check internet connection and refresh.');
+                    }
+                }, 10000);
+                initTimeouts.push(initTimeout);
+
+                w.onerror = function(e) {
+                    clearTimeout(initTimeouts[i]);
                     mining = false;
                     setFormDisabled(false);
                     document.getElementById('start-btn').disabled = false;
                     document.getElementById('stop-btn').disabled = true;
                     document.getElementById('progress').classList.add('hidden');
-                    alert('Worker failed to initialize (timeout). Check internet connection and refresh.');
-                }
-            }, 10000);
+                    alert('Worker ' + i + ' error: ' + e.message);
+                    stopAllWorkers();
+                };
 
-            worker.onerror = function(e) {
-                clearTimeout(initTimeout);
-                mining = false;
-                setFormDisabled(false);
-                document.getElementById('start-btn').disabled = false;
-                document.getElementById('stop-btn').disabled = true;
-                document.getElementById('progress').classList.add('hidden');
-                alert('Worker error: ' + e.message);
-            };
-
-            worker.onmessage = function(e) {
-                console.log('[Main] Received message:', e.data.type, e.data);
-                if (e.data.type === 'ready') {
-                    clearTimeout(initTimeout);
-                    console.log('[Main] Sending work data to worker');
-                    worker.postMessage({ prefix, suffix, matchBoth });
-                    return;
-                }
-                if (e.data.type === 'progress') {
-                    const remaining = (e.data.expectedAttempts - e.data.attempts) / e.data.rate;
-                    let etaStr = '';
-                    if (remaining > 0 && isFinite(remaining)) {
-                        if (remaining < 60) etaStr = ' | ETA: ' + remaining.toFixed(0) + 's';
-                        else if (remaining < 3600) etaStr = ' | ETA: ' + (remaining / 60).toFixed(1) + 'm';
-                        else if (remaining < 86400) etaStr = ' | ETA: ' + (remaining / 3600).toFixed(1) + 'h';
-                        else etaStr = ' | ETA: ' + (remaining / 86400).toFixed(1) + 'd';
+                w.onmessage = function(e) {
+                    console.log('[Main] Received message from worker ' + i + ':', e.data.type, e.data);
+                    if (e.data.type === 'ready') {
+                        clearTimeout(initTimeouts[i]);
+                        console.log('[Main] Sending work data to worker ' + i);
+                        w.postMessage({ prefix, suffix, matchBoth, workerId: i, totalWorkers: numWorkers });
+                        return;
                     }
-                    // Live estimate based on actual measured rate
-                    const liveRemaining = e.data.rate > 0 ? (e.data.expectedAttempts - e.data.attempts) / e.data.rate : 0;
-                    let liveEtaStr = '';
-                    if (liveRemaining > 0 && isFinite(liveRemaining)) {
-                        if (liveRemaining < 60) liveEtaStr = liveRemaining.toFixed(0) + 's';
-                        else if (liveRemaining < 3600) liveEtaStr = (liveRemaining / 60).toFixed(1) + 'm';
-                        else if (liveRemaining < 86400) liveEtaStr = (liveRemaining / 3600).toFixed(1) + 'h';
-                        else liveEtaStr = (liveRemaining / 86400).toFixed(1) + 'd';
-                    }
-                    const liveRateStr = Math.round(e.data.rate).toLocaleString() + '/s';
-                    const progressText = 'Attempts: ' + e.data.attempts.toLocaleString() + ' | Rate: ' + liveRateStr + ' | Progress: ' + e.data.progress.toFixed(2) + '%' + etaStr;
-                    document.getElementById('progress-text').textContent = progressText;
-                    
-                    // Update estimate with live data after first progress report
-                    if (e.data.attempts > 0 && !window.liveEstimateShown) {
-                        window.liveEstimateShown = true;
-                        const liveEstimateEl = document.getElementById('live-estimate');
-                        if (liveEstimateEl) {
-                            liveEstimateEl.textContent = 'Live estimate: ~' + liveEtaStr + ' at ' + liveRateStr;
-                            liveEstimateEl.style.display = 'block';
+                    if (e.data.type === 'progress') {
+                        const remaining = (e.data.expectedAttempts - e.data.attempts) / e.data.rate;
+                        let etaStr = '';
+                        if (remaining > 0 && isFinite(remaining)) {
+                            if (remaining < 60) etaStr = ' | ETA: ' + remaining.toFixed(0) + 's';
+                            else if (remaining < 3600) etaStr = ' | ETA: ' + (remaining / 60).toFixed(1) + 'm';
+                            else if (remaining < 86400) etaStr = ' | ETA: ' + (remaining / 3600).toFixed(1) + 'h';
+                            else etaStr = ' | ETA: ' + (remaining / 86400).toFixed(1) + 'd';
                         }
+                        const liveRateStr = Math.round(e.data.rate).toLocaleString() + '/s';
+                        const progressText = 'Attempts: ' + e.data.attempts.toLocaleString() + ' | Rate: ' + liveRateStr + ' | Progress: ' + e.data.progress.toFixed(2) + '%' + etaStr;
+                        document.getElementById('progress-text').textContent = progressText;
+                        
+                        // Update estimate with live data after first progress report
+                        if (e.data.attempts > 0 && !window.liveEstimateShown) {
+                            window.liveEstimateShown = true;
+                            const liveEstimateEl = document.getElementById('live-estimate');
+                            if (liveEstimateEl) {
+                                liveEstimateEl.textContent = 'Live estimate: ~' + liveEtaStr + ' at ' + liveRateStr;
+                                liveEstimateEl.style.display = 'block';
+                            }
+                        }
+                    } else if (e.data.type === 'found') {
+                        clearTimeout(initTimeouts[i]);
+                        mining = false;
+                        setFormDisabled(false);
+                        document.getElementById('start-btn').disabled = false;
+                        document.getElementById('stop-btn').disabled = true;
+                        document.getElementById('progress').classList.add('hidden');
+                        document.getElementById('result').classList.remove('hidden');
+                        document.getElementById('result-public').textContent = e.data.publicKey;
+                        document.getElementById('result-private').textContent = e.data.privateKey;
+                        document.getElementById('result-stats').textContent =
+                            'Found in ' + e.data.attempts.toLocaleString() + ' attempts (' + e.data.elapsed.toFixed(2) + 's)';
+                        stopAllWorkers();
+                    } else if (e.data.type === 'error') {
+                        clearTimeout(initTimeouts[i]);
+                        mining = false;
+                        setFormDisabled(false);
+                        document.getElementById('start-btn').disabled = false;
+                        document.getElementById('stop-btn').disabled = true;
+                        document.getElementById('progress').classList.add('hidden');
+                        alert(e.data.message);
+                        stopAllWorkers();
                     }
-                } else if (e.data.type === 'found') {
-                    clearTimeout(initTimeout);
-                    setFormDisabled(false);
-                    document.getElementById('start-btn').disabled = false;
-                    document.getElementById('stop-btn').disabled = true;
-                    document.getElementById('progress').classList.add('hidden');
-                    document.getElementById('result').classList.remove('hidden');
-                    document.getElementById('result-public').textContent = e.data.publicKey;
-                    document.getElementById('result-private').textContent = e.data.privateKey;
-                    document.getElementById('result-stats').textContent =
-                        'Found in ' + e.data.attempts.toLocaleString() + ' attempts (' + e.data.elapsed.toFixed(2) + 's)';
-                    worker.terminate();
-                    worker = null;
-                } else if (e.data.type === 'error') {
-                    clearTimeout(initTimeout);
-                    mining = false;
-                    setFormDisabled(false);
-                    document.getElementById('start-btn').disabled = false;
-                    document.getElementById('stop-btn').disabled = true;
-                    document.getElementById('progress').classList.add('hidden');
-                    alert(e.data.message);
-                    worker.terminate();
-                    worker = null;
+                };
+            }
+
+            function stopAllWorkers() {
+                for (const w of workers) {
+                    if (w) w.terminate();
                 }
-            };
+                workers = [];
+                for (const t of initTimeouts) {
+                    clearTimeout(t);
+                }
+                initTimeouts.length = 0;
+            }
 
             mining = true;
             setFormDisabled(true);
@@ -514,14 +532,14 @@
         }
 
         function stopMining() {
-            if (initTimeout) {
-                clearTimeout(initTimeout);
-                initTimeout = null;
+            for (const t of initTimeouts) {
+                clearTimeout(t);
             }
-            if (worker) {
-                worker.terminate();
-                worker = null;
+            initTimeouts.length = 0;
+            for (const w of workers) {
+                if (w) w.terminate();
             }
+            workers = [];
             mining = false;
             setFormDisabled(false);
             document.getElementById('start-btn').disabled = false;
@@ -547,11 +565,11 @@
         }
 
         window.addEventListener('beforeunload', function() {
-            if (initTimeout) {
-                clearTimeout(initTimeout);
+            for (const t of initTimeouts) {
+                clearTimeout(t);
             }
-            if (worker) {
-                worker.terminate();
+            for (const w of workers) {
+                if (w) w.terminate();
             }
         });
     </script>
