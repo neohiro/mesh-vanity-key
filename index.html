@@ -282,90 +282,102 @@
                 importScripts('https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js');
 
                 self.onmessage = function(e) {
-                    if (typeof nacl === 'undefined') {
-                        self.postMessage({ type: 'error', message: 'Failed to load cryptographic library. Please check your internet connection and refresh.' });
-                        return;
-                    }
-
-                    const { prefix, suffix, matchBoth } = e.data;
-                    const prefixLower = prefix.toLowerCase();
-                    const suffixLower = suffix.toLowerCase();
-
-                    let attempts = 0;
-                    const startTime = Date.now();
-
-                    let seed = new Uint8Array(32);
-                    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-                        crypto.getRandomValues(seed);
-                    } else {
-                        for (let i = 0; i < 32; i++) {
-                            seed[i] = Math.floor(Math.random() * 256);
+                    try {
+                        if (typeof nacl === 'undefined') {
+                            self.postMessage({ type: 'error', message: 'Failed to load cryptographic library. Please check your internet connection and refresh.' });
+                            return;
                         }
-                    }
-                    let scalar = BigInt('0x' + Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join(''));
 
-                    const alphabetSize = 16;
-                    const patternLen = matchBoth ? prefix.length + suffix.length : Math.max(prefix.length, suffix.length);
-                    const expectedAttempts = BigInt(alphabetSize) ** BigInt(patternLen);
+                        const { prefix, suffix, matchBoth } = e.data;
+                        const prefixLower = prefix.toLowerCase();
+                        const suffixLower = suffix.toLowerCase();
 
-                    const BATCH_SIZE = 16;
-                    const PROGRESS_INTERVAL = 1000;
-                    let lastProgressTime = Date.now();
+                        let attempts = 0;
+                        const startTime = Date.now();
 
-                    while (true) {
-                        for (let b = 0; b < BATCH_SIZE; b++) {
-                            scalar = (scalar + 1n) & ((1n << 256n) - 1n);
-                            const seedHex = scalar.toString(16).padStart(64, '0');
-                            const seedBytes = new Uint8Array(32);
+                        let seed = new Uint8Array(32);
+                        if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+                            crypto.getRandomValues(seed);
+                        } else {
                             for (let i = 0; i < 32; i++) {
-                                seedBytes[i] = parseInt(seedHex.substr(i * 2, 2), 16);
-                            }
-
-                            const keyPair = nacl.sign.keyPair.fromSeed(seedBytes);
-                            const publicKeyHex = Array.from(keyPair.publicKey).map(b => b.toString(16).padStart(2, '0')).join('');
-
-                            let match = false;
-                            if (matchBoth) {
-                                match = publicKeyHex.startsWith(prefixLower) && publicKeyHex.endsWith(suffixLower);
-                            } else {
-                                match = publicKeyHex.startsWith(prefixLower) || publicKeyHex.endsWith(suffixLower);
-                            }
-
-                            if (match) {
-                                self.postMessage({
-                                    type: 'found',
-                                    publicKey: publicKeyHex,
-                                    privateKey: seedHex,
-                                    attempts: attempts,
-                                    elapsed: (Date.now() - startTime) / 1000
-                                });
-                                return;
-                            }
-
-                            attempts++;
-
-                            if (attempts % PROGRESS_INTERVAL === 0) {
-                                const now = Date.now();
-                                const elapsed = (now - startTime) / 1000;
-                                const rate = elapsed > 0 ? attempts / elapsed : 0;
-                                const pct = expectedAttempts > 0n
-                                    ? Number((BigInt(attempts) * 10000n) / expectedAttempts) / 100
-                                    : 0;
-                                self.postMessage({
-                                    type: 'progress',
-                                    attempts: attempts,
-                                    rate: rate,
-                                    progress: Math.min(pct, 100),
-                                    expectedAttempts: expectedAttempts
-                                });
-                                lastProgressTime = now;
+                                seed[i] = Math.floor(Math.random() * 256);
                             }
                         }
+                        let scalar = BigInt('0x' + Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join(''));
+
+                        const alphabetSize = 16;
+                        const patternLen = matchBoth ? prefix.length + suffix.length : Math.max(prefix.length, suffix.length);
+                        const expectedAttempts = BigInt(alphabetSize) ** BigInt(patternLen);
+
+                        const BATCH_SIZE = 16;
+                        const PROGRESS_INTERVAL = 1000;
+
+                        while (true) {
+                            for (let b = 0; b < BATCH_SIZE; b++) {
+                                scalar = (scalar + 1n) & ((1n << 256n) - 1n);
+                                const seedHex = scalar.toString(16).padStart(64, '0');
+                                const seedBytes = new Uint8Array(32);
+                                for (let i = 0; i < 32; i++) {
+                                    seedBytes[i] = parseInt(seedHex.substr(i * 2, 2), 16);
+                                }
+
+                                const keyPair = nacl.sign.keyPair.fromSeed(seedBytes);
+                                const publicKeyHex = Array.from(keyPair.publicKey).map(b => b.toString(16).padStart(2, '0')).join('');
+
+                                let match = false;
+                                if (matchBoth) {
+                                    match = publicKeyHex.startsWith(prefixLower) && publicKeyHex.endsWith(suffixLower);
+                                } else {
+                                    match = publicKeyHex.startsWith(prefixLower) || publicKeyHex.endsWith(suffixLower);
+                                }
+
+                                if (match) {
+                                    self.postMessage({
+                                        type: 'found',
+                                        publicKey: publicKeyHex,
+                                        privateKey: seedHex,
+                                        attempts: attempts,
+                                        elapsed: (Date.now() - startTime) / 1000
+                                    });
+                                    return;
+                                }
+
+                                attempts++;
+
+                                if (attempts % PROGRESS_INTERVAL === 0) {
+                                    const now = Date.now();
+                                    const elapsed = (now - startTime) / 1000;
+                                    const rate = elapsed > 0 ? attempts / elapsed : 0;
+                                    const pct = expectedAttempts > 0n
+                                        ? Number((BigInt(attempts) * 10000n) / expectedAttempts) / 100
+                                        : 0;
+                                    self.postMessage({
+                                        type: 'progress',
+                                        attempts: attempts,
+                                        rate: rate,
+                                        progress: Math.min(pct, 100),
+                                        expectedAttempts: expectedAttempts
+                                    });
+                                }
+                            }
+                        }
+                    } catch (err) {
+                        self.postMessage({ type: 'error', message: 'Worker error: ' + err.message });
+                    }
                 };
             `;
 
             const blob = new Blob([workerCode], { type: 'application/javascript' });
             worker = new Worker(URL.createObjectURL(blob));
+
+            worker.onerror = function(e) {
+                mining = false;
+                setFormDisabled(false);
+                document.getElementById('start-btn').disabled = false;
+                document.getElementById('stop-btn').disabled = true;
+                document.getElementById('progress').classList.add('hidden');
+                alert('Worker error: ' + e.message);
+            };
 
             worker.onmessage = function(e) {
                 if (e.data.type === 'progress') {
