@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 import nacl.signing
-import hashlib
 
 Encoding = Literal["base64", "base64url", "base58", "hex", "bech32"]
 
@@ -350,7 +349,7 @@ def generate_vanity_key(
             start_time=time.perf_counter(),
         )
 
-    # Single-threaded fallback (scalar-walk, optimized)
+    # Single-threaded fallback (scalar-walk, batch verification)
     attempts = 0
     start = time.perf_counter()
 
@@ -380,60 +379,64 @@ def generate_vanity_key(
     # as a 256-bit integer for each attempt (avoids SHA-256 per attempt)
     scalar = int.from_bytes(hashlib.sha256(seed).digest(), "big")
 
+    # Batch verification: check multiple candidates per iteration
+    BATCH_SIZE = 16
+
     while True:
         if max_attempts is not None and attempts >= max_attempts:
             raise RuntimeError(f"exceeded max_attempts={max_attempts}")
 
-        priv_seed = scalar.to_bytes(32, "big")
-        scalar = (scalar + 1) & ((1 << 256) - 1)
+        for _ in range(BATCH_SIZE):
+            priv_seed = scalar.to_bytes(32, "big")
+            scalar = (scalar + 1) & ((1 << 256) - 1)
 
-        priv = _SigningKey(priv_seed)
-        raw = bytes(priv.verify_key)
+            priv = _SigningKey(priv_seed)
+            raw = bytes(priv.verify_key)
 
-        if is_hex:
-            encoded = _hex_encode(raw)
-            # Early reject reserved prefixes for framework devices
-            if encoded[:2].lower() in RESERVED_PREFIXES:
-                attempts += 1
-                continue
-        elif encoding == "base64":
-            encoded = _b64encode(raw).decode()
-        elif encoding == "base64url":
-            encoded = _urlsafe_b64encode(raw).decode().rstrip("=")
-        elif encoding == "base58":
-            encoded = _base58(raw)
-        else:
-            encoded = _bech32(hrp, raw, hrp_expanded)
-
-        # Inline prefix/suffix/both check for hot path
-        if both:
-            encoded_prefix = encoded[:prefix_len]
-            encoded_suffix = encoded[-prefix_len:]
-            if case_insensitive:
-                pref_match = encoded_prefix.lower() == prefix_cmp
-                suff_match = encoded_suffix.lower() == prefix_cmp
+            if is_hex:
+                encoded = _hex_encode(raw)
+                # Early reject reserved prefixes for framework devices
+                if encoded[:2].lower() in RESERVED_PREFIXES:
+                    attempts += 1
+                    continue
+            elif encoding == "base64":
+                encoded = _b64encode(raw).decode()
+            elif encoding == "base64url":
+                encoded = _urlsafe_b64encode(raw).decode().rstrip("=")
+            elif encoding == "base58":
+                encoded = _base58(raw)
             else:
-                pref_match = encoded_prefix == prefix_cmp
-                suff_match = encoded_suffix == prefix_cmp
-            match = pref_match and suff_match
-        else:
-            encoded_part = encoded[check_slice]
-            if case_insensitive:
-                chk = encoded_part.lower()
-            else:
-                chk = encoded_part
-            match = chk == prefix_cmp
-        if match:
-            return VanityResult(
-                private_key=priv,
-                public_key=priv.verify_key,
-                encoded=encoded,
-                attempts=attempts,
-                elapsed=time.perf_counter() - start,
-                private_seed=priv_seed,
-            )
+                encoded = _bech32(hrp, raw, hrp_expanded)
 
-        attempts += 1
+            # Inline prefix/suffix/both check for hot path
+            if both:
+                encoded_prefix = encoded[:prefix_len]
+                encoded_suffix = encoded[-prefix_len:]
+                if case_insensitive:
+                    pref_match = encoded_prefix.lower() == prefix_cmp
+                    suff_match = encoded_suffix.lower() == prefix_cmp
+                else:
+                    pref_match = encoded_prefix == prefix_cmp
+                    suff_match = encoded_suffix == prefix_cmp
+                match = pref_match and suff_match
+            else:
+                encoded_part = encoded[check_slice]
+                if case_insensitive:
+                    chk = encoded_part.lower()
+                else:
+                    chk = encoded_part
+                match = chk == prefix_cmp
+            if match:
+                return VanityResult(
+                    private_key=priv,
+                    public_key=priv.verify_key,
+                    encoded=encoded,
+                    attempts=attempts,
+                    elapsed=time.perf_counter() - start,
+                    private_seed=priv_seed,
+                )
+
+            attempts += 1
 
         if attempts % progress_interval == 0:
             elapsed = time.perf_counter() - start

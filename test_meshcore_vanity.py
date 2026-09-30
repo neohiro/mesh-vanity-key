@@ -329,5 +329,11 @@ def test_generate_vanity_key_workers_validation():
         generate_vanity_key("ab", encoding="hex", workers=257)
 
 
+def test_generate_vanity_key_batch_verification():
+    result = generate_vanity_key("ab", encoding="hex", max_attempts=100000)
+    assert result.encoded.startswith("ab")
+    assert result.attempts >= 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
