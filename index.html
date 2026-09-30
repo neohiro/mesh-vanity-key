@@ -136,6 +136,7 @@
             </div>
 
             <p id="estimate" class="status-text"></p>
+            <p id="live-estimate" class="status-text" style="display: none; color: #3fb950;"></p>
             <div id="progress" class="hidden">
                 <p id="progress-text" class="status-text">Attempts: 0 | Rate: 0/s</p>
             </div>
@@ -245,7 +246,7 @@
                 expected = Math.pow(16, Math.max(prefix.length, suffix.length));
             }
 
-            const typicalRate = 5000;
+            const typicalRate = 50000;
             const estSeconds = expected / typicalRate;
             let timeStr;
             if (estSeconds < 60) {
@@ -257,7 +258,7 @@
             } else {
                 timeStr = (estSeconds / 86400).toFixed(1) + 'd';
             }
-            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (at ~5k keys/s in browser)';
+            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (at 50k keys/s)';
         }
 
         function setFormDisabled(disabled) {
@@ -283,6 +284,9 @@
             const matchBoth = document.getElementById('match-both').checked;
 
             document.getElementById('estimate').textContent = '';
+            document.getElementById('live-estimate').textContent = '';
+            document.getElementById('live-estimate').style.display = 'none';
+            window.liveEstimateShown = false;
             const progressEl = document.getElementById('progress-text');
             progressEl.textContent = 'Starting...';
             progressEl.className = 'status-text';
@@ -454,8 +458,28 @@
                         else if (remaining < 86400) etaStr = ' | ETA: ' + (remaining / 3600).toFixed(1) + 'h';
                         else etaStr = ' | ETA: ' + (remaining / 86400).toFixed(1) + 'd';
                     }
-                    document.getElementById('progress-text').textContent =
-                        'Attempts: ' + e.data.attempts.toLocaleString() + ' | Rate: ' + Math.round(e.data.rate).toLocaleString() + '/s | Progress: ' + e.data.progress.toFixed(2) + '%' + etaStr;
+                    // Live estimate based on actual measured rate
+                    const liveRemaining = e.data.rate > 0 ? (e.data.expectedAttempts - e.data.attempts) / e.data.rate : 0;
+                    let liveEtaStr = '';
+                    if (liveRemaining > 0 && isFinite(liveRemaining)) {
+                        if (liveRemaining < 60) liveEtaStr = liveRemaining.toFixed(0) + 's';
+                        else if (liveRemaining < 3600) liveEtaStr = (liveRemaining / 60).toFixed(1) + 'm';
+                        else if (liveRemaining < 86400) liveEtaStr = (liveRemaining / 3600).toFixed(1) + 'h';
+                        else liveEtaStr = (liveRemaining / 86400).toFixed(1) + 'd';
+                    }
+                    const liveRateStr = Math.round(e.data.rate).toLocaleString() + '/s';
+                    const progressText = 'Attempts: ' + e.data.attempts.toLocaleString() + ' | Rate: ' + liveRateStr + ' | Progress: ' + e.data.progress.toFixed(2) + '%' + etaStr;
+                    document.getElementById('progress-text').textContent = progressText;
+                    
+                    // Update estimate with live data after first progress report
+                    if (e.data.attempts > 0 && !window.liveEstimateShown) {
+                        window.liveEstimateShown = true;
+                        const liveEstimateEl = document.getElementById('live-estimate');
+                        if (liveEstimateEl) {
+                            liveEstimateEl.textContent = 'Live estimate: ~' + liveEtaStr + ' at ' + liveRateStr;
+                            liveEstimateEl.style.display = 'block';
+                        }
+                    }
                 } else if (e.data.type === 'found') {
                     clearTimeout(initTimeout);
                     setFormDisabled(false);
