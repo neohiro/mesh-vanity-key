@@ -424,6 +424,7 @@
             document.getElementById('start-btn').disabled = false;
             document.getElementById('stop-btn').disabled = true;
             document.getElementById('progress').classList.add('hidden');
+            updateEstimate();
         }
 
         function copyToClipboard(elementId, btn) {
