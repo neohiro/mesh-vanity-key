@@ -782,17 +782,23 @@ function startMining() {
             }
             // Storage full: evict oldest-first until the newest fits, then
             // tell the user instead of silently dropping into session-only mode.
+            let evicted = 0;
             while (savedKeys.length > 1) {
                 savedKeys.shift();
+                evicted++;
                 try {
                     localStorage.setItem(HISTORY_KEY, JSON.stringify(savedKeys));
                     renderHistory(false);
-                    showHistoryWarn('Browser storage full: oldest saved keys were evicted.');
+                    showHistoryWarn('Browser storage full: ' + evicted +
+                        ' oldest saved key' + (evicted === 1 ? '' : 's') + ' evicted.');
                     return;
                 } catch (e) {
                     if (!isQuotaError(e)) return;
                 }
             }
+            // Even a single key doesn't fit: keep the in-memory session
+            // history, but say so instead of failing silently.
+            showHistoryWarn('Browser storage unavailable: new keys are session-only.');
         }
 
         function showHistoryWarn(msg) {

@@ -45,40 +45,42 @@ def main() -> int:
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch()
-            page = browser.new_page()
-            errors: list[str] = []
-            dialogs: list[str] = []
-            page.on("pageerror", lambda e: errors.append(str(e)))
-            # Worker failures surface via alert(); dismiss so the test fails
-            # fast with the message instead of hanging on a modal.
-            page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
-            page.goto(url, wait_until="load")
+            try:
+                page = browser.new_page()
+                errors: list[str] = []
+                dialogs: list[str] = []
+                page.on("pageerror", lambda e: errors.append(str(e)))
+                # Worker failures surface via alert(); dismiss so the test
+                # fails fast with the message instead of hanging on a modal.
+                page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
+                page.goto(url, wait_until="load")
 
-            # 1-char hex pattern: ~16 expected attempts, instant even headless.
-            page.fill("#prefix", "a")
-            page.fill("#workers", "1")
-            page.click("#start-btn")
+                # 1-char hex pattern: ~16 expected attempts, instant even headless.
+                page.fill("#prefix", "a")
+                page.fill("#workers", "1")
+                page.click("#start-btn")
 
-            page.wait_for_selector(".result-frame", timeout=120_000)
-            heading = page.text_content(".result-frame h2")
-            assert heading and "Key 1 Found!" in heading, f"unexpected heading: {heading!r}"
+                page.wait_for_selector(".result-frame", timeout=120_000)
+                heading = page.text_content(".result-frame h2")
+                assert heading and "Key 1 Found!" in heading, f"unexpected heading: {heading!r}"
 
-            codes = page.eval_on_selector_all(
-                ".result-frame code", "els => els.map(e => e.textContent)"
-            )
-            assert len(codes) == 2, f"expected public+private key, got: {codes!r}"
-            assert all(len(c) == 64 for c in codes), f"keys must be 64 hex chars: {codes!r}"
+                codes = page.eval_on_selector_all(
+                    ".result-frame code", "els => els.map(e => e.textContent)"
+                )
+                assert len(codes) == 2, f"expected public+private key, got: {codes!r}"
+                assert all(len(c) == 64 for c in codes), f"keys must be 64 hex chars: {codes!r}"
 
-            # Reload: history must survive via localStorage.
-            page.reload(wait_until="load")
-            page.wait_for_selector(".result-frame", timeout=30_000)
-            heading = page.text_content(".result-frame h2")
-            assert heading and "Key 1 Found!" in heading, "history lost across reload"
+                # Reload: history must survive via localStorage.
+                page.reload(wait_until="load")
+                page.wait_for_selector(".result-frame", timeout=30_000)
+                heading = page.text_content(".result-frame h2")
+                assert heading and "Key 1 Found!" in heading, "history lost across reload"
 
-            worker_errors = [e for e in errors if "Worker" in e]
-            assert not worker_errors, f"worker errors: {worker_errors!r}"
-            assert not dialogs, f"unexpected dialogs: {dialogs!r}"
-            browser.close()
+                worker_errors = [e for e in errors if "Worker" in e]
+                assert not worker_errors, f"worker errors: {worker_errors!r}"
+                assert not dialogs, f"unexpected dialogs: {dialogs!r}"
+            finally:
+                browser.close()
     finally:
         server.shutdown()
     print("smoke OK: mined, rendered, and persisted Key 1 across reload")

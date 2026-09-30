@@ -372,6 +372,35 @@ def test_parallel_live_progress_reports(capfd):
     assert "rate=" in err
 
 
+def _load_smoke_browser():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).parent / "tools" / "smoke_browser.py"
+    spec = importlib.util.spec_from_file_location("smoke_browser", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_smoke_server_serves_page():
+    # Browser-free half of the smoke test: the local server must serve the page.
+    import urllib.request
+    from pathlib import Path
+
+    mod = _load_smoke_browser()
+    server = mod.serve(Path(__file__).parent, 0)
+    try:
+        port = server.server_address[1]
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/index.html", timeout=10) as r:
+            body = r.read().decode("utf-8")
+        assert "MeshCore Vanity Key Generator" in body
+        assert "result-frame" in body or "results" in body
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def _load_check_inline_js():
     import importlib.util
     from pathlib import Path
