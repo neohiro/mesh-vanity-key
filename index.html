@@ -117,6 +117,7 @@
         #stop-btn { background: #da3633; color: white; }
         #stop-btn:hover:not(:disabled) { background: #f85149; }
         #stop-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+        #new-search-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
         .status-text { font-size: 14px; color: #8b949e; font-family: 'SFMono-Regular', Consolas, monospace; }
         .reserved-notice {
             margin-top: 12px;
@@ -379,6 +380,7 @@
             document.getElementById('workers').disabled = disabled;
             document.getElementById('workers-minus').disabled = disabled;
             document.getElementById('workers-plus').disabled = disabled;
+            document.getElementById('new-search-btn').disabled = disabled;
         }
 
         function stepWorkers(delta) {
@@ -673,6 +675,10 @@ function startMining() {
             document.getElementById('start-btn').disabled = false;
             document.getElementById('stop-btn').disabled = true;
             document.getElementById('progress').classList.add('hidden');
+            // Drop the previous run's live figures; updateEstimate() redraws static ones.
+            document.getElementById('live-estimate').textContent = '';
+            document.getElementById('live-estimate').style.display = 'none';
+            window.liveEstimateShown = false;
             updateEstimate();
         }
 
@@ -746,9 +752,14 @@ function startMining() {
                 if (!raw) return;
                 const parsed = JSON.parse(raw);
                 if (!Array.isArray(parsed)) return;
-                savedKeys = parsed.filter(e => e && e.publicKey && e.privateKey).slice(0, MAX_SAVED_KEYS);
+                const hex64 = /^[0-9a-fA-F]{64}$/;
+                savedKeys = parsed.filter(e => e
+                    && hex64.test(e.publicKey || '')
+                    && hex64.test(e.privateKey || '')).slice(0, MAX_SAVED_KEYS);
                 for (const e of savedKeys) {
-                    if (typeof e.n === 'number' && e.n >= nextKeyNum) nextKeyNum = e.n + 1;
+                    // Backfill sequence numbers for entries predating them.
+                    if (typeof e.n !== 'number') e.n = nextKeyNum++;
+                    else if (e.n >= nextKeyNum) nextKeyNum = e.n + 1;
                 }
             } catch (e) {
                 savedKeys = [];  // corrupt/quota-blocked storage: start fresh
