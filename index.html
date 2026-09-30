@@ -245,7 +245,7 @@
                 expected = Math.pow(16, Math.max(prefix.length, suffix.length));
             }
 
-            const typicalRate = 50000;
+            const typicalRate = 5000;
             const estSeconds = expected / typicalRate;
             let timeStr;
             if (estSeconds < 60) {
@@ -257,7 +257,7 @@
             } else {
                 timeStr = (estSeconds / 86400).toFixed(1) + 'd';
             }
-            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (at 50k keys/s)';
+            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (at ~5k keys/s in browser)';
         }
 
         function setFormDisabled(disabled) {
@@ -289,11 +289,19 @@
             document.getElementById('progress').classList.remove('hidden');
 
             const workerCode = `
-                importScripts('https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js');
+                try {
+                    importScripts('https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js');
+                    console.log('[Worker] tweetnacl loaded successfully');
+                } catch (e) {
+                    console.error('[Worker] importScripts failed:', e);
+                    self.postMessage({ type: 'error', message: 'Failed to load cryptographic library: ' + e.message });
+                }
 
                 if (typeof nacl === 'undefined') {
+                    console.error('[Worker] nacl is undefined after import');
                     self.postMessage({ type: 'error', message: 'Failed to load cryptographic library (importScripts failed).' });
                 } else {
+                    console.log('[Worker] Ready to work');
                     self.postMessage({ type: 'ready' });
                 }
 
