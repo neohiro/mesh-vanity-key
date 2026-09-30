@@ -71,57 +71,60 @@ def _worker_search(args: tuple) -> tuple:
 
     initial_scalar = int.from_bytes(hashlib.sha256(seed).digest(), "big")
 
+    BATCH_SIZE = 16
+
     while True:
         if max_attempts is not None and attempts >= max_attempts:
             return (None, attempts, counter)
 
-        try:
-            scalar_val = (initial_scalar + counter) & ((1 << 256) - 1)
-            priv_seed = scalar_val.to_bytes(32, "big")
-        except OverflowError:
-            return (None, attempts, counter)
+        for _ in range(BATCH_SIZE):
+            try:
+                scalar_val = (initial_scalar + counter) & ((1 << 256) - 1)
+                priv_seed = scalar_val.to_bytes(32, "big")
+            except OverflowError:
+                return (None, attempts, counter)
 
-        priv = _SigningKey(priv_seed)
-        raw = bytes(priv.verify_key)
+            priv = _SigningKey(priv_seed)
+            raw = bytes(priv.verify_key)
 
-        if encoding == "hex":
-            encoded = _hex_encode(raw)
-            if encoded[:2].lower() in RESERVED_PREFIXES:
-                attempts += 1
-                counter += total_workers
-                continue
-        elif encoding == "base64":
-            encoded = _b64encode(raw).decode()
-        elif encoding == "base64url":
-            encoded = _urlsafe_b64encode(raw).decode().rstrip("=")
-        elif encoding == "base58":
-            encoded = _base58_encode(raw)
-        else:
-            encoded = _bech32_encode(hrp, raw, hrp_expanded)
-
-        if both:
-            encoded_prefix = encoded[:prefix_len]
-            encoded_suffix = encoded[-prefix_len:]
-            if case_insensitive:
-                pref_match = encoded_prefix.lower() == prefix_cmp
-                suff_match = encoded_suffix.lower() == prefix_cmp
+            if encoding == "hex":
+                encoded = _hex_encode(raw)
+                if encoded[:2].lower() in RESERVED_PREFIXES:
+                    attempts += 1
+                    counter += total_workers
+                    continue
+            elif encoding == "base64":
+                encoded = _b64encode(raw).decode()
+            elif encoding == "base64url":
+                encoded = _urlsafe_b64encode(raw).decode().rstrip("=")
+            elif encoding == "base58":
+                encoded = _base58_encode(raw)
             else:
-                pref_match = encoded_prefix == prefix_cmp
-                suff_match = encoded_suffix == prefix_cmp
-            match = pref_match and suff_match
-        else:
-            encoded_part = encoded[check_slice]
-            if case_insensitive:
-                chk = encoded_part.lower()
+                encoded = _bech32_encode(hrp, raw, hrp_expanded)
+
+            if both:
+                encoded_prefix = encoded[:prefix_len]
+                encoded_suffix = encoded[-prefix_len:]
+                if case_insensitive:
+                    pref_match = encoded_prefix.lower() == prefix_cmp
+                    suff_match = encoded_suffix.lower() == prefix_cmp
+                else:
+                    pref_match = encoded_prefix == prefix_cmp
+                    suff_match = encoded_suffix == prefix_cmp
+                match = pref_match and suff_match
             else:
-                chk = encoded_part
-            match = chk == prefix_cmp
+                encoded_part = encoded[check_slice]
+                if case_insensitive:
+                    chk = encoded_part.lower()
+                else:
+                    chk = encoded_part
+                match = chk == prefix_cmp
 
-        if match:
-            return (priv_seed, attempts, counter)
+            if match:
+                return (priv_seed, attempts, counter)
 
-        attempts += 1
-        counter += total_workers
+            attempts += 1
+            counter += total_workers
 
 
 # Pre-define _bech32_hrp_expand at module level for worker access

@@ -308,51 +308,53 @@
                     const patternLen = matchBoth ? prefix.length + suffix.length : Math.max(prefix.length, suffix.length);
                     const expectedAttempts = BigInt(alphabetSize) ** BigInt(patternLen);
 
+                    const BATCH_SIZE = 16;
+
                     while (true) {
-                        scalar = (scalar + 1n) & ((1n << 256n) - 1n);
-                        const seedHex = scalar.toString(16).padStart(64, '0');
-                        const seedBytes = new Uint8Array(32);
-                        for (let i = 0; i < 32; i++) {
-                            seedBytes[i] = parseInt(seedHex.substr(i * 2, 2), 16);
+                        for (let b = 0; b < BATCH_SIZE; b++) {
+                            scalar = (scalar + 1n) & ((1n << 256n) - 1n);
+                            const seedHex = scalar.toString(16).padStart(64, '0');
+                            const seedBytes = new Uint8Array(32);
+                            for (let i = 0; i < 32; i++) {
+                                seedBytes[i] = parseInt(seedHex.substr(i * 2, 2), 16);
+                            }
+
+                            const keyPair = nacl.sign.keyPair.fromSeed(seedBytes);
+                            const publicKeyHex = Array.from(keyPair.publicKey).map(b => b.toString(16).padStart(2, '0')).join('');
+
+                            let match = false;
+                            if (matchBoth) {
+                                match = publicKeyHex.startsWith(prefixLower) && publicKeyHex.endsWith(suffixLower);
+                            } else {
+                                match = publicKeyHex.startsWith(prefixLower) || publicKeyHex.endsWith(suffixLower);
+                            }
+
+                            if (match) {
+                                self.postMessage({
+                                    type: 'found',
+                                    publicKey: publicKeyHex,
+                                    privateKey: seedHex,
+                                    attempts: attempts,
+                                    elapsed: (Date.now() - startTime) / 1000
+                                });
+                                return;
+                            }
+
+                            attempts++;
                         }
 
-                        const keyPair = nacl.sign.keyPair.fromSeed(seedBytes);
-                        const publicKeyHex = Array.from(keyPair.publicKey).map(b => b.toString(16).padStart(2, '0')).join('');
-
-                        let match = false;
-                        if (matchBoth) {
-                            match = publicKeyHex.startsWith(prefixLower) && publicKeyHex.endsWith(suffixLower);
-                        } else {
-                            match = publicKeyHex.startsWith(prefixLower) || publicKeyHex.endsWith(suffixLower);
-                        }
-
-                        if (match) {
-                            self.postMessage({
-                                type: 'found',
-                                publicKey: publicKeyHex,
-                                privateKey: seedHex,
-                                attempts: attempts,
-                                elapsed: (Date.now() - startTime) / 1000
-                            });
-                            return;
-                        }
-
-                        attempts++;
-
-                        if (attempts % 1000 === 0) {
-                            const elapsed = (Date.now() - startTime) / 1000;
-                            const rate = attempts / elapsed;
-                            const pct = expectedAttempts > 0n
-                                ? Number((BigInt(attempts) * 10000n) / expectedAttempts) / 100
-                                : 0;
-                            self.postMessage({
-                                type: 'progress',
-                                attempts: attempts,
-                                rate: rate,
-                                progress: Math.min(pct, 100),
-                                expectedAttempts: expectedAttempts
-                            });
-                        }
+                        const elapsed = (Date.now() - startTime) / 1000;
+                        const rate = attempts / elapsed;
+                        const pct = expectedAttempts > 0n
+                            ? Number((BigInt(attempts) * 10000n) / expectedAttempts) / 100
+                            : 0;
+                        self.postMessage({
+                            type: 'progress',
+                            attempts: attempts,
+                            rate: rate,
+                            progress: Math.min(pct, 100),
+                            expectedAttempts: expectedAttempts
+                        });
                     }
                 };
             `;
