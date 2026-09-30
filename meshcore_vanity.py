@@ -65,6 +65,7 @@ def _worker_search(args: tuple) -> tuple:
     _b64encode = base64.b64encode
     _urlsafe_b64encode = base64.urlsafe_b64encode
     _hex_encode = bytes.hex
+    _SigningKey = nacl.signing.SigningKey
 
     attempts = 0
     counter = start_offset
@@ -81,7 +82,7 @@ def _worker_search(args: tuple) -> tuple:
         except OverflowError:
             return (None, attempts, counter)
 
-        priv = nacl.signing.SigningKey(priv_seed)
+        priv = _SigningKey(priv_seed)
         raw = bytes(priv.verify_key)
 
         if encoding == "hex":
@@ -359,6 +360,7 @@ def generate_vanity_key(
     _hex_encode = bytes.hex
     _base58 = _base58_encode
     _bech32 = _bech32_encode
+    _SigningKey = nacl.signing.SigningKey
 
     # Calculate expected attempts for progress percentage
     if encoding == "hex":
@@ -385,7 +387,7 @@ def generate_vanity_key(
         priv_seed = scalar.to_bytes(32, "big")
         scalar = (scalar + 1) & ((1 << 256) - 1)
 
-        priv = nacl.signing.SigningKey(priv_seed)
+        priv = _SigningKey(priv_seed)
         raw = bytes(priv.verify_key)
 
         if is_hex:
