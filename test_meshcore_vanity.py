@@ -15,23 +15,22 @@ from meshcore_vanity import (
     meshcore_expanded_private_key,
     serialize_private_key,
     serialize_public_key,
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
+    nacl,
 )
 
 
 def test_encode_base64():
-    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
-    pub = priv.public_key()
+    priv = nacl.signing.SigningKey.generate()
+    pub = priv.verify_key
     encoded = encode_public_key(pub, "base64")
     assert isinstance(encoded, str)
     decoded = base64.b64decode(encoded)
-    assert decoded == pub.public_bytes_raw()
+    assert decoded == bytes(pub)
 
 
 def test_encode_base64url():
-    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
-    pub = priv.public_key()
+    priv = nacl.signing.SigningKey.generate()
+    pub = priv.verify_key
     encoded = encode_public_key(pub, "base64url")
     assert isinstance(encoded, str)
     assert "=" not in encoded
@@ -39,22 +38,22 @@ def test_encode_base64url():
     assert "/" not in encoded
     padded = encoded + "=" * ((4 - len(encoded) % 4) % 4)
     decoded = base64.urlsafe_b64decode(padded)
-    assert decoded == pub.public_bytes_raw()
+    assert decoded == bytes(pub)
 
 
 def test_encode_hex():
-    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
-    pub = priv.public_key()
+    priv = nacl.signing.SigningKey.generate()
+    pub = priv.verify_key
     encoded = encode_public_key(pub, "hex")
     assert isinstance(encoded, str)
     assert len(encoded) == 64
     assert all(c in "0123456789abcdef" for c in encoded)
-    assert bytes.fromhex(encoded) == pub.public_bytes_raw()
+    assert bytes.fromhex(encoded) == bytes(pub)
 
 
 def test_encode_base58():
-    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
-    pub = priv.public_key()
+    priv = nacl.signing.SigningKey.generate()
+    pub = priv.verify_key
     encoded = encode_public_key(pub, "base58")
     assert isinstance(encoded, str)
     assert len(encoded) > 0
@@ -63,8 +62,8 @@ def test_encode_base58():
 
 
 def test_encode_bech32():
-    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
-    pub = priv.public_key()
+    priv = nacl.signing.SigningKey.generate()
+    pub = priv.verify_key
     encoded = encode_public_key(pub, "bech32", hrp="mc")
     assert isinstance(encoded, str)
     assert encoded.startswith("mc1")
@@ -96,27 +95,27 @@ def test_generate_vanity_key_short_prefix():
     assert result.encoded.startswith("ab")
     assert result.attempts >= 0
     assert result.elapsed > 0
-    assert isinstance(result.private_key, Ed25519PrivateKey)
-    assert isinstance(result.public_key, Ed25519PublicKey)
+    assert isinstance(result.private_key, nacl.signing.SigningKey)
+    assert isinstance(result.public_key, nacl.signing.VerifyKey)
 
 
 def test_serialize_private_key():
-    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    priv = nacl.signing.SigningKey.generate()
     serialized = serialize_private_key(priv)
     assert isinstance(serialized, bytes)
     assert len(serialized) == 32
-    restored = Ed25519PrivateKey.from_private_bytes(serialized)
-    assert restored.private_bytes_raw() == priv.private_bytes_raw()
+    restored = nacl.signing.SigningKey(serialized)
+    assert bytes(restored) == bytes(priv)
 
 
 def test_serialize_public_key():
-    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
-    pub = priv.public_key()
+    priv = nacl.signing.SigningKey.generate()
+    pub = priv.verify_key
     serialized = serialize_public_key(pub)
     assert isinstance(serialized, bytes)
     assert len(serialized) == 32
-    restored = Ed25519PublicKey.from_public_bytes(serialized)
-    assert restored.public_bytes_raw() == pub.public_bytes_raw()
+    restored = nacl.signing.VerifyKey(serialized)
+    assert bytes(restored) == bytes(pub)
 
 
 def test_validate_prefix_valid():
@@ -315,8 +314,8 @@ def test_generate_vanity_key_case_sensitive():
 
 
 def test_encode_public_key_invalid_encoding():
-    priv = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
-    pub = priv.public_key()
+    priv = nacl.signing.SigningKey.generate()
+    pub = priv.verify_key
     with pytest.raises(ValueError, match="unknown encoding"):
         encode_public_key(pub, "invalid")
 

@@ -23,11 +23,9 @@ import multiprocessing as mp
 from dataclasses import dataclass
 from typing import Literal
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
-from cryptography.hazmat.primitives import serialization
+import nacl.signing
+import nacl.encoding
+import hashlib
 
 Encoding = Literal["base64", "base64url", "base58", "hex", "bech32"]
 
@@ -48,8 +46,8 @@ _PREFIX_VALID_CHARS = {
 
 @dataclass(slots=True, frozen=True)
 class VanityResult:
-    private_key: Ed25519PrivateKey
-    public_key: Ed25519PublicKey
+    private_key: nacl.signing.SigningKey
+    public_key: nacl.signing.VerifyKey
     encoded: str
     attempts: int
     elapsed: float
@@ -65,9 +63,6 @@ def _worker_search(args: tuple) -> tuple:
     import base64
     import hashlib
 
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-    _from_private = Ed25519PrivateKey.from_private_bytes
     _b64encode = base64.b64encode
     _urlsafe_b64encode = base64.urlsafe_b64encode
     _hex_encode = bytes.hex
@@ -75,7 +70,6 @@ def _worker_search(args: tuple) -> tuple:
     attempts = 0
     counter = start_offset
 
-    # Scalar-walk: derive initial scalar from seed once
     initial_scalar = int.from_bytes(hashlib.sha256(seed).digest(), "big")
 
     while True:
@@ -88,13 +82,11 @@ def _worker_search(args: tuple) -> tuple:
         except OverflowError:
             return (None, attempts, counter)
 
-        priv = _from_private(priv_seed)
-        pub = priv.public_key()
-        raw = pub.public_bytes_raw()
+        priv = nacl.signing.SigningKey(priv_seed)
+        raw = bytes(priv.verify_key)
 
         if encoding == "hex":
             encoded = _hex_encode(raw)
-            # Early reject reserved prefixes for framework devices
             if encoded[:2].lower() in RESERVED_PREFIXES:
                 attempts += 1
                 counter += total_workers
@@ -194,9 +186,9 @@ def _validate_bech32_prefix(prefix_cmp: str, hrp: str, case_insensitive: bool) -
         )
 
 
-def encode_public_key(pubkey: Ed25519PublicKey, encoding: Encoding, hrp: str = "mc") -> str:
+def encode_public_key(pubkey: nacl.signing.VerifyKey, encoding: Encoding, hrp: str = "mc") -> str:
     """Encode a 32-byte Ed25519 public key in the specified format."""
-    raw = pubkey.public_bytes_raw()
+    raw = bytes(pubkey)
     if encoding == "base64":
         return base64.b64encode(raw).decode()
     if encoding == "base64url":
@@ -361,7 +353,6 @@ def generate_vanity_key(
     start = time.perf_counter()
 
     # Local variable lookups for hot path
-    _from_private = Ed25519PrivateKey.from_private_bytes
     _b64encode = base64.b64encode
     _urlsafe_b64encode = base64.urlsafe_b64encode
     _hex_encode = bytes.hex
@@ -393,9 +384,8 @@ def generate_vanity_key(
         priv_seed = scalar.to_bytes(32, "big")
         scalar = (scalar + 1) & ((1 << 256) - 1)
 
-        priv = _from_private(priv_seed)
-        pub = priv.public_key()
-        raw = pub.public_bytes_raw()
+        priv = nacl.signing.SigningKey(priv_seed)
+        raw = bytes(priv.verify_key)
 
         if is_hex:
             encoded = _hex_encode(raw)
@@ -433,7 +423,7 @@ def generate_vanity_key(
         if match:
             return VanityResult(
                 private_key=priv,
-                public_key=pub,
+                public_key=priv.verify_key,
                 encoded=encoded,
                 attempts=attempts,
                 elapsed=time.perf_counter() - start,
@@ -491,9 +481,9 @@ def _generate_vanity_key_parallel(
         for priv_seed, worker_attempts, _ in results:
             if priv_seed is not None:
                 # Reconstruct the key from private seed
-                priv = Ed25519PrivateKey.from_private_bytes(priv_seed)
-                pub = priv.public_key()
-                raw = pub.public_bytes_raw()
+                priv = nacl.signing.SigningKey(priv_seed)
+                pub = priv.verify_key
+                raw = bytes(pub)
                 if is_hex:
                     encoded = raw.hex()
                 elif encoding == "base64":
@@ -536,21 +526,14 @@ def meshcore_expanded_private_key(seed: bytes) -> bytes:
     return bytes(clamped) + h[32:]
 
 
-def serialize_private_key(key: Ed25519PrivateKey) -> bytes:
+def serialize_private_key(key: nacl.signing.SigningKey) -> bytes:
     """Return the 32-byte raw Ed25519 private seed."""
-    return key.private_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PrivateFormat.Raw,
-        encryption_algorithm=serialization.NoEncryption(),
-    )
+    return bytes(key)
 
 
-def serialize_public_key(key: Ed25519PublicKey) -> bytes:
+def serialize_public_key(key: nacl.signing.VerifyKey) -> bytes:
     """Return the 32-byte raw Ed25519 public key."""
-    return key.public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
+    return bytes(key)
 
 
 def main() -> int:
