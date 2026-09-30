@@ -325,6 +325,8 @@ def test_generate_vanity_key_workers_validation():
         generate_vanity_key("ab", encoding="hex", workers=0)
     with pytest.raises(ValueError, match="workers must be positive"):
         generate_vanity_key("ab", encoding="hex", workers=-1)
+    with pytest.raises(ValueError, match="workers must be <= 256"):
+        generate_vanity_key("ab", encoding="hex", workers=257)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 import nacl.signing
-import nacl.encoding
 import hashlib
 
 Encoding = Literal["base64", "base64url", "base58", "hex", "bech32"]
@@ -58,7 +57,7 @@ def _worker_search(args: tuple) -> tuple:
     """Worker function for parallel search."""
     (prefix, encoding, case_insensitive, max_attempts, seed, prefix_len,
      prefix_cmp, check_slice, both, hrp, start_offset, worker_id,
-     total_workers, is_hex, hrp_expanded) = args
+     total_workers, progress_interval, is_hex, hrp_expanded) = args
 
     import base64
     import hashlib
@@ -285,6 +284,8 @@ def generate_vanity_key(
 
     if workers <= 0:
         raise ValueError("workers must be positive")
+    if workers > 256:
+        raise ValueError("workers must be <= 256")
 
     prefix_cmp = prefix.lower() if case_insensitive else prefix
     prefix_len = len(prefix)
@@ -472,7 +473,8 @@ def _generate_vanity_key_parallel(
             worker_args.append((
                 prefix, encoding, case_insensitive, max_attempts, seed,
                 prefix_len, prefix_cmp, check_slice, both, hrp,
-                w, workers, progress_interval, is_hex, hrp_expanded
+                w, w, workers, progress_interval,
+                is_hex, hrp_expanded
             ))
         
         results = pool.map(_worker_search, worker_args)
