@@ -44,6 +44,19 @@
         input[type="text"].error { border-color: #f85149; }
         input[type="text"]:disabled { opacity: 0.5; }
         .error-msg { color: #f85149; font-size: 12px; margin-top: 4px; display: none; }
+        .worker-input {
+            width: 60px;
+            padding: 10px 14px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            font-size: 16px;
+            font-family: 'SFMono-Regular', Consolas, monospace;
+            text-align: center;
+        }
+        .worker-input:focus { outline: none; border-color: #58a6ff; }
+        .worker-input:disabled { opacity: 0.5; }
         .checkbox-field { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
         .checkbox-field input[type="checkbox"] { width: 18px; height: 18px; accent-color: #58a6ff; }
         .checkbox-field input[type="checkbox"]:disabled { opacity: 0.5; }
@@ -132,7 +145,7 @@
 
             <div class="field">
                 <label for="workers">Workers</label>
-                <input type="number" id="workers" value="1" min="1" max="16" style="width: 80px;">
+                <input type="number" id="workers" value="4" min="1" max="16" class="worker-input">
             </div>
 
             <div class="buttons">
@@ -237,6 +250,7 @@
             const prefix = document.getElementById('prefix').value;
             const suffix = document.getElementById('suffix').value;
             const matchBoth = document.getElementById('match-both').checked;
+            const numWorkers = parseInt(document.getElementById('workers').value) || 1;
             const estimateEl = document.getElementById('estimate');
 
             if (!prefix && !suffix) {
@@ -251,8 +265,8 @@
                 expected = Math.pow(16, Math.max(prefix.length, suffix.length));
             }
 
-            // Browser Web Worker rate is ~5k keys/s (not 50k which is native Python)
-            const typicalRate = 5000;
+            // Browser Web Worker rate is ~5k keys/s per worker
+            const typicalRate = 5000 * numWorkers;
             const estSeconds = expected / typicalRate;
             let timeStr;
             if (estSeconds < 60) {
@@ -264,7 +278,7 @@
             } else {
                 timeStr = (estSeconds / 86400).toFixed(1) + 'd';
             }
-            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (at ~5k keys/s per worker in browser)';
+            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (at ~5k keys/s per worker, ' + (5000 * numWorkers).toLocaleString() + ' keys/s total with ' + numWorkers + ' worker' + (numWorkers > 1 ? 's' : '') + ')';
         }
 
         function setFormDisabled(disabled) {
