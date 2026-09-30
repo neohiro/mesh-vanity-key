@@ -33,6 +33,24 @@ The encoded public key is printed to **stdout**. Progress and statistics go to *
 python meshcore_vanity.py ab --encoding hex > mykey.txt
 ```
 
+### Budget estimator
+
+Before every search, the tool prints the expected attempt count, a locally
+measured keygen rate, and an ETA — and asks for confirmation on interactive
+terminals:
+
+```
+Estimate: 65,536 expected attempts (38,400 keys/s measured locally with 2 workers) | ETA ~2s
+Continue? [y/N]:
+```
+
+Piped/non-interactive runs skip the prompt automatically. Use `-f` / `--force`
+to skip it explicitly in scripts:
+
+```bash
+python meshcore_vanity.py abcdef --encoding hex --workers 4 -f
+```
+
 ## Usage Examples
 
 ### Basic prefix search (hex encoding)
@@ -109,6 +127,7 @@ Prints the private key in multiple formats to stderr:
 | `--output-private` | off | Also output private key to stderr |
 | `--seed` | random | 64 hex chars (32 bytes) for deterministic search |
 | `--workers` | 1 | Number of parallel processes |
+| `-f`, `--force` | off | Skip the pre-search estimate confirmation |
 
 ## Supported Encodings
 

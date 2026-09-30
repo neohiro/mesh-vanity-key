@@ -320,6 +320,39 @@ def _format_progress(attempts: int, elapsed: float, expected_attempts: int) -> s
     )
 
 
+def _benchmark_rate(sample_keys: int = 200) -> float:
+    """Measure local single-worker keygen rate (keys/s) for the estimator.
+
+    Runs a handful of real Ed25519 derivations; takes milliseconds.
+    Returns 0.0 if timing fails.
+    """
+    try:
+        seed = os.urandom(32)
+        start = time.perf_counter()
+        for _ in range(sample_keys):
+            priv = nacl.signing.SigningKey(seed)
+            bytes(priv.verify_key)
+        elapsed = time.perf_counter() - start
+        return sample_keys / elapsed if elapsed > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def _human_duration(seconds: float) -> str:
+    """Compact duration mirroring the web estimator (s/m/h/d)."""
+    if seconds != seconds or seconds <= 0:  # NaN or non-positive
+        return "unknown"
+    if seconds == float("inf"):
+        return "very long"
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    if seconds < 86400:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.1f}d"
+
+
 def generate_vanity_key(
     prefix: str,
     encoding: Encoding = "base64",
@@ -699,6 +732,12 @@ def main() -> int:
         default=1,
         help="Number of parallel workers (multiprocessing)",
     )
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="Skip the pre-search estimate confirmation",
+    )
     args = parser.parse_args()
 
     # Validate seed if provided (strict: exactly 64 hex chars, no whitespace).
@@ -718,7 +757,34 @@ def main() -> int:
         mode_desc = f"ending with '{args.prefix}'"
     else:
         mode_desc = f"starting with '{args.prefix}'"
-    
+
+    # Budget estimator: search-space size + locally measured rate + ETA.
+    # Requires confirmation on interactive terminals unless --force.
+    try:
+        expected = _expected_attempts(args.encoding, len(args.prefix), args.both)
+        measured = _benchmark_rate()
+        workers_n = args.workers if args.workers and args.workers > 0 else 1
+        rate = (measured * workers_n) if measured > 0 else 0.0
+        eta = _human_duration(expected / rate if rate > 0 else float("inf"))
+        rate_str = f"{rate:,.0f} keys/s" if rate > 0 else "unknown rate"
+        print(
+            f"Estimate: {expected:,} expected attempts "
+            f"({rate_str} measured locally with {workers_n} worker"
+            f"{'s' if workers_n != 1 else ''}) | ETA ~{eta}",
+            file=sys.stderr,
+        )
+        if not args.force and sys.stdin.isatty():
+            try:
+                answer = input("Continue? [y/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("Aborted.", file=sys.stderr)
+                return 1
+            if answer not in ("y", "yes"):
+                print("Aborted.", file=sys.stderr)
+                return 1
+    except BrokenPipeError:
+        return 1
+
     try:
         print(
             f"Searching for {args.encoding} public key {mode_desc} "

@@ -2,6 +2,7 @@
 """Tests for meshcore_vanity.py"""
 
 import base64
+import io
 import pytest
 
 from meshcore_vanity import (
@@ -9,8 +10,10 @@ from meshcore_vanity import (
     generate_vanity_key,
     _base58_encode,
     _bech32_encode,
+    _benchmark_rate,
     _expected_attempts,
     _format_progress,
+    _human_duration,
     _validate_prefix,
     _validate_seed,
     _validate_hrp,
@@ -399,6 +402,67 @@ def test_check_inline_js_rejects_banned_patterns(tmp_path):
     )
     with pytest.raises(SystemExit, match="banned pattern"):
         mod.extract(tmp_path)
+
+
+def test_benchmark_rate_positive():
+    assert _benchmark_rate() > 0
+
+
+def test_human_duration():
+    assert _human_duration(45) == "45s"
+    assert _human_duration(90) == "1.5m"
+    assert _human_duration(7200) == "2.0h"
+    assert _human_duration(172800) == "2.0d"
+    assert _human_duration(float("inf")) == "very long"
+    assert _human_duration(0) == "unknown"
+    assert _human_duration(float("nan")) == "unknown"
+
+
+class _TtyIn(io.StringIO):
+    def isatty(self):
+        return True
+
+
+def test_main_estimator_abort_on_decline(monkeypatch, capsys):
+    import sys
+    import meshcore_vanity as mv
+
+    monkeypatch.setattr(
+        sys, "argv", ["meshcore_vanity.py", "ab", "--encoding", "hex", "--max-attempts", "100000"]
+    )
+    monkeypatch.setattr(sys, "stdin", _TtyIn("n\n"))
+    assert mv.main() == 1
+    assert "Aborted." in capsys.readouterr().err
+
+
+def test_main_estimator_confirm_proceeds(monkeypatch, capsys):
+    import sys
+    import meshcore_vanity as mv
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["meshcore_vanity.py", "ab", "--encoding", "hex", "--max-attempts", "100000",
+         "--seed", "00" * 32],
+    )
+    monkeypatch.setattr(sys, "stdin", _TtyIn("y\n"))
+    assert mv.main() == 0
+    err = capsys.readouterr().err
+    assert "Estimate:" in err
+
+
+def test_main_force_bypasses_prompt(monkeypatch, capsys):
+    import sys
+    import meshcore_vanity as mv
+
+    # Impossible bech32 prefix exits 2; with -f no prompt is shown even on a tty.
+    monkeypatch.setattr(
+        sys, "argv", ["meshcore_vanity.py", "ne", "--encoding", "bech32", "-f"]
+    )
+    monkeypatch.setattr(sys, "stdin", _TtyIn("y\n"))
+    assert mv.main() == 2
+    err = capsys.readouterr().err
+    assert "Continue?" not in err
+    assert "Estimate:" in err
 
 
 def test_generate_vanity_key_suffix():

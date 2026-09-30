@@ -136,8 +136,9 @@
         }
         #progress { margin-top: 12px; }
         #estimate { margin-top: 12px; }
-        #result { margin-top: 24px; padding: 20px; background: #0d1117; border: 1px solid #238636; border-radius: 8px; }
-        #result h2 { color: #3fb950; font-size: 18px; margin-bottom: 16px; }
+        #results { margin-top: 24px; display: flex; flex-direction: column; gap: 16px; max-height: 60vh; overflow-y: auto; }
+        .result-frame { padding: 20px; background: #0d1117; border: 1px solid #238636; border-radius: 8px; }
+        .result-frame h2 { color: #3fb950; font-size: 18px; margin-bottom: 16px; }
         .result-field { margin-bottom: 16px; }
         .result-field label { font-size: 12px; color: #8b949e; margin-bottom: 4px; }
         .key-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -152,8 +153,14 @@
         }
         .copy-btn { padding: 6px 12px; font-size: 12px; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; white-space: nowrap; }
         .copy-btn:hover { background: #30363d; }
-        #result-stats { font-size: 13px; color: #8b949e; margin-top: 12px; }
-        #result button { margin-top: 16px; }
+        .result-stats { font-size: 13px; color: #8b949e; margin-top: 12px; }
+        .result-frame button { margin-top: 16px; }
+        .result-frame .copy-btn { margin-top: 0; }
+        .frame-actions { display: flex; gap: 12px; }
+        .remove-btn { padding: 10px 24px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+        .remove-btn:hover { background: #30363d; }
+        .history-bar { margin-top: 16px; display: flex; gap: 12px; align-items: center; }
+        .history-note { font-size: 12px; color: #8b949e; }
         .hidden { display: none; }
         .info { margin-top: 20px; padding: 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; font-size: 12px; color: #8b949e; }
         .info a { color: #58a6ff; text-decoration: none; }
@@ -191,6 +198,7 @@
             <div class="buttons">
                 <button id="start-btn" onclick="startMining()">Start Mining</button>
                 <button id="stop-btn" onclick="stopMining()" disabled>Stop</button>
+                <button id="new-search-btn" onclick="resetForm()">New Search</button>
             </div>
 
             <p id="estimate" class="status-text"></p>
@@ -201,24 +209,10 @@
             <div id="reserved-notice" class="reserved-notice" style="display: none;"></div>
         </div>
 
-        <div id="result" class="hidden">
-            <h2>Key Found!</h2>
-            <div class="result-field">
-                <label>Public Key (hex)</label>
-                <div class="key-row">
-                    <code id="result-public"></code>
-                    <button class="copy-btn" onclick="copyToClipboard('result-public', this)">Copy</button>
-                </div>
-            </div>
-            <div class="result-field">
-                <label>Private Key (hex)</label>
-                <div class="key-row">
-                    <code id="result-private"></code>
-                    <button class="copy-btn" onclick="copyToClipboard('result-private', this)">Copy</button>
-                </div>
-            </div>
-            <p id="result-stats"></p>
-            <button onclick="resetForm()">New Search</button>
+        <div id="results"></div>
+        <div id="history-bar" class="history-bar hidden">
+            <button class="remove-btn" onclick="clearHistory()">Clear saved keys</button>
+            <span class="history-note">Keys are stored only in this browser (localStorage) and survive refresh.</span>
         </div>
 
         <div class="info">
@@ -624,11 +618,14 @@ function startMining() {
                         document.getElementById('start-btn').disabled = false;
                         document.getElementById('stop-btn').disabled = true;
                         document.getElementById('progress').classList.add('hidden');
-                        document.getElementById('result').classList.remove('hidden');
-                        document.getElementById('result-public').textContent = e.data.publicKey;
-                        document.getElementById('result-private').textContent = e.data.privateKey;
-                        document.getElementById('result-stats').textContent =
-                            'Found in ' + e.data.attempts.toLocaleString() + ' attempts (' + e.data.elapsed.toFixed(2) + 's)';
+                        addKeyToHistory({
+                            publicKey: e.data.publicKey,
+                            privateKey: e.data.privateKey,
+                            attempts: e.data.attempts,
+                            elapsed: e.data.elapsed,
+                            pattern: currentPatternDesc(),
+                            minedAt: new Date().toISOString()
+                        });
                         stopAllWorkers();
                     } else if (e.data.type === 'error') {
                         clearTimeout(initTimeouts[i]);
@@ -659,7 +656,6 @@ function startMining() {
             setFormDisabled(true);
             document.getElementById('start-btn').disabled = true;
             document.getElementById('stop-btn').disabled = false;
-            document.getElementById('result').classList.add('hidden');
         }
 
         function stopMining() {
@@ -680,8 +676,7 @@ function startMining() {
             updateEstimate();
         }
 
-        function copyToClipboard(elementId, btn) {
-            const text = document.getElementById(elementId).textContent;
+        function copyText(text, btn) {
             const done = () => {
                 const original = btn.textContent;
                 btn.textContent = 'Copied!';
@@ -693,6 +688,11 @@ function startMining() {
             } else {
                 fallbackCopy(text, done);
             }
+        }
+
+        function copySavedKey(index, field, btn) {
+            const entry = savedKeys[index];
+            if (entry && entry[field]) copyText(entry[field], btn);
         }
 
         function fallbackCopy(text, done) {
@@ -712,7 +712,8 @@ function startMining() {
         }
 
         function resetForm() {
-            document.getElementById('result').classList.add('hidden');
+            // History is intentionally preserved: mined keys are never lost
+            // by starting a new search. Use "Clear saved keys" to wipe them.
             document.getElementById('prefix').value = '';
             document.getElementById('suffix').value = '';
             document.getElementById('estimate').textContent = '';
@@ -725,9 +726,128 @@ function startMining() {
             updateEstimate();
         }
 
+        // ---- Mined-key history (localStorage-backed, survives refresh) ----
+        const HISTORY_KEY = 'meshcoreVanityKeys';
+        const MAX_SAVED_KEYS = 200;
+        let savedKeys = [];
+        let nextKeyNum = 1;
+
+        function currentPatternDesc() {
+            const p = document.getElementById('prefix').value;
+            const s = document.getElementById('suffix').value;
+            if (p && s) return "prefix '" + p + "' + suffix '" + s + "'";
+            if (p) return "prefix '" + p + "'";
+            return "suffix '" + s + "'";
+        }
+
+        function loadHistory() {
+            try {
+                const raw = localStorage.getItem(HISTORY_KEY);
+                if (!raw) return;
+                const parsed = JSON.parse(raw);
+                if (!Array.isArray(parsed)) return;
+                savedKeys = parsed.filter(e => e && e.publicKey && e.privateKey).slice(0, MAX_SAVED_KEYS);
+                for (const e of savedKeys) {
+                    if (typeof e.n === 'number' && e.n >= nextKeyNum) nextKeyNum = e.n + 1;
+                }
+            } catch (e) {
+                savedKeys = [];  // corrupt/quota-blocked storage: start fresh
+            }
+        }
+
+        function persistHistory() {
+            try {
+                localStorage.setItem(HISTORY_KEY, JSON.stringify(savedKeys));
+            } catch (e) {
+                // Quota or privacy mode: history still works for this session.
+            }
+        }
+
+        function addKeyToHistory(entry) {
+            entry.n = nextKeyNum++;
+            savedKeys.push(entry);
+            if (savedKeys.length > MAX_SAVED_KEYS) savedKeys.shift();
+            persistHistory();
+            renderHistory(true);
+        }
+
+        function removeKey(index) {
+            savedKeys.splice(index, 1);
+            persistHistory();
+            renderHistory(false);
+        }
+
+        function clearHistory() {
+            if (!savedKeys.length) return;
+            if (!confirm('Delete all ' + savedKeys.length + ' saved key(s) from this browser?')) return;
+            savedKeys = [];
+            persistHistory();
+            renderHistory(false);
+        }
+
+        function makeKeyField(labelText, value, index, field) {
+            const fieldDiv = document.createElement('div');
+            fieldDiv.className = 'result-field';
+            const label = document.createElement('label');
+            label.textContent = labelText;
+            const row = document.createElement('div');
+            row.className = 'key-row';
+            const code = document.createElement('code');
+            code.textContent = value;
+            const btn = document.createElement('button');
+            btn.className = 'copy-btn';
+            btn.textContent = 'Copy';
+            btn.addEventListener('click', () => copySavedKey(index, field, btn));
+            row.appendChild(code);
+            row.appendChild(btn);
+            fieldDiv.appendChild(label);
+            fieldDiv.appendChild(row);
+            return fieldDiv;
+        }
+
+        function renderHistory(scrollToNew) {
+            const list = document.getElementById('results');
+            list.textContent = '';
+            document.getElementById('history-bar').classList.toggle('hidden', savedKeys.length === 0);
+            savedKeys.forEach((entry, index) => {
+                const frame = document.createElement('div');
+                frame.className = 'result-frame';
+                const h2 = document.createElement('h2');
+                h2.textContent = 'Key ' + entry.n + ' Found!';
+                frame.appendChild(h2);
+                frame.appendChild(makeKeyField('Public Key (hex)', entry.publicKey, index, 'publicKey'));
+                frame.appendChild(makeKeyField('Private Key (hex)', entry.privateKey, index, 'privateKey'));
+                const stats = document.createElement('p');
+                stats.className = 'result-stats';
+                let statsText = 'Found in ' + Number(entry.attempts).toLocaleString() +
+                    ' attempts (' + Number(entry.elapsed).toFixed(2) + 's) | ' + entry.pattern;
+                if (entry.minedAt) {
+                    try {
+                        statsText += ' | mined ' + new Date(entry.minedAt).toLocaleString();
+                    } catch (e) { /* ignore bad dates */ }
+                }
+                stats.textContent = statsText;
+                frame.appendChild(stats);
+                const actions = document.createElement('div');
+                actions.className = 'frame-actions';
+                const rm = document.createElement('button');
+                rm.className = 'remove-btn';
+                rm.textContent = 'Remove';
+                rm.addEventListener('click', () => removeKey(index));
+                actions.appendChild(rm);
+                frame.appendChild(actions);
+                list.appendChild(frame);
+            });
+            if (scrollToNew && list.lastElementChild) {
+                list.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+        }
+
         window.addEventListener('load', function() {
             // Defer past first paint so load stays snappy; yields keep UI alive.
             setTimeout(calibrateBenchmark, 0);
+            loadHistory();
+            renderHistory(false);
         });
 
         window.addEventListener('beforeunload', function() {
