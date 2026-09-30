@@ -446,8 +446,11 @@ def test_main_estimator_confirm_proceeds(monkeypatch, capsys):
     )
     monkeypatch.setattr(sys, "stdin", _TtyIn("y\n"))
     assert mv.main() == 0
-    err = capsys.readouterr().err
-    assert "Estimate:" in err
+    captured = capsys.readouterr()
+    assert "Estimate:" in captured.err
+    # Prompt must not leak to stdout: stdout carries only the key.
+    assert "Continue?" not in captured.out
+    assert captured.out.strip().startswith("ab")
 
 
 def test_main_force_bypasses_prompt(monkeypatch, capsys):

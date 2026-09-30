@@ -760,22 +760,34 @@ def main() -> int:
 
     # Budget estimator: search-space size + locally measured rate + ETA.
     # Requires confirmation on interactive terminals unless --force.
+    # All user-facing text goes to stderr: stdout carries only the key.
     try:
         expected = _expected_attempts(args.encoding, len(args.prefix), args.both)
         measured = _benchmark_rate()
         workers_n = args.workers if args.workers and args.workers > 0 else 1
-        rate = (measured * workers_n) if measured > 0 else 0.0
+        if measured > 0:
+            rate = measured * workers_n
+            rate_str = (
+                f"~{rate:,.0f} keys/s "
+                f"(single-worker measurement x {workers_n})"
+            )
+        else:
+            rate = 0.0
+            rate_str = "unknown rate"
         eta = _human_duration(expected / rate if rate > 0 else float("inf"))
-        rate_str = f"{rate:,.0f} keys/s" if rate > 0 else "unknown rate"
-        print(
+        estimate_line = (
             f"Estimate: {expected:,} expected attempts "
-            f"({rate_str} measured locally with {workers_n} worker"
-            f"{'s' if workers_n != 1 else ''}) | ETA ~{eta}",
-            file=sys.stderr,
+            f"({rate_str}) | ETA ~{eta}"
         )
+        if args.max_attempts is not None:
+            estimate_line += f" | capped at {args.max_attempts:,} attempts by --max-attempts"
+        print(estimate_line, file=sys.stderr)
         if not args.force and sys.stdin.isatty():
             try:
-                answer = input("Continue? [y/N]: ").strip().lower()
+                # Prompt via stderr: input() would print to stdout and
+                # contaminate piped output like `... > key.txt`.
+                print("Continue? [y/N]: ", end="", file=sys.stderr)
+                answer = input().strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print("Aborted.", file=sys.stderr)
                 return 1

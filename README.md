@@ -40,7 +40,7 @@ measured keygen rate, and an ETA — and asks for confirmation on interactive
 terminals:
 
 ```
-Estimate: 65,536 expected attempts (38,400 keys/s measured locally with 2 workers) | ETA ~2s
+Estimate: 65,536 expected attempts (~38,400 keys/s (single-worker measurement x 2)) | ETA ~2s
 Continue? [y/N]:
 ```
 
