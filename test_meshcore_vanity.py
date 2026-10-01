@@ -809,6 +809,14 @@ def test_committed_icons_match_generator():
     ), f"{name} is out of date; re-run `python tools/make_icons.py`"
 
 
+def test_index_html_has_history_obfuscation():
+    html = (_REPO_ROOT / "index.html").read_text(encoding="utf-8")
+    assert "encryptHistoryData" in html
+    assert "decryptHistoryData" in html
+    assert "OBFUSCATION_KEY_STORAGE" in html
+    assert "0xef" in html  # obfuscation marker
+
+
 def _load_make_icons():
     import importlib.util
 
