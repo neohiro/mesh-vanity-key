@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import functools
 import http.server
+import re
 import socketserver
 import threading
 from pathlib import Path
@@ -68,6 +69,33 @@ def main() -> int:
                 )
                 assert len(codes) == 2, f"expected public+private key, got: {codes!r}"
                 assert all(len(c) == 64 for c in codes), f"keys must be 64 hex chars: {codes!r}"
+
+                # Elapsed renders via formatElapsed() ("45.2s" / "2m 10s" / "1h 2m 9s"),
+                # never a raw float or NaN.
+                stats = page.text_content(".result-frame .result-stats") or ""
+                assert "attempts (" in stats, f"unexpected stats line: {stats!r}"
+                assert "NaN" not in stats and "undefined" not in stats, (
+                    f"unformatted time in stats: {stats!r}"
+                )
+                assert not re.search(r"\(\d+\.\d+s\)", stats), (
+                    f"elapsed should be humanized, not a raw float: {stats!r}"
+                )
+
+                # "Clear All Keys" must match the export buttons' height.
+                heights = page.eval_on_selector_all(
+                    ".history-bar button",
+                    "els => els.map(e => Math.round(e.getBoundingClientRect().height))",
+                )
+                assert len(set(heights)) == 1, f"history buttons differ in height: {heights!r}"
+                labels = page.eval_on_selector_all(
+                    ".history-bar button", "els => els.map(e => e.textContent.trim())"
+                )
+                assert "Clear All Keys" in labels, f"unexpected button labels: {labels!r}"
+
+                # Singular/plural worker count in the estimate.
+                page.fill("#prefix", "ab")
+                est = page.text_content("#estimate") or ""
+                assert re.search(r"\d+ workers?,", est), f"malformed worker label: {est!r}"
 
                 # Reload: history must survive via localStorage.
                 page.reload(wait_until="load")

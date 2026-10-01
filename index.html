@@ -107,11 +107,28 @@
         .result-frame button { margin-top: 16px; }
         .result-frame .copy-btn { margin-top: 0; }
         .frame-actions { display: flex; gap: 12px; }
-        .remove-btn { padding: 10px 24px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; box-sizing: border-box; line-height: normal; display: inline-flex; align-items: center; justify-content: center; }
+        .remove-btn, .clear-all-btn {
+            padding: 10px 24px;
+            border: 1px solid;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            line-height: normal;
+            box-sizing: border-box;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            /* Explicit height so the destructive button matches the export
+               buttons exactly regardless of label length or font metrics. */
+            height: 40px;
+            white-space: nowrap;
+        }
+        .remove-btn { background: #21262d; color: #c9d1d9; border-color: #30363d; }
         .remove-btn:hover { background: #30363d; }
-        .clear-all-btn { padding: 10px 24px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; background: #2d1619; color: #f85149; border: 1px solid #67060c; box-sizing: border-box; line-height: normal; display: inline-flex; align-items: center; justify-content: center; }
+        .clear-all-btn { background: #2d1619; color: #f85149; border-color: #67060c; }
         .clear-all-btn:hover { background: #3b1c21; border-color: #da3633; }
-        .history-bar { margin-top: 16px; display: flex; gap: 12px; align-items: center; }
+        .history-bar { margin-top: 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
         .history-note { font-size: 12px; color: #8b949e; }
         .hidden { display: none; }
         .info { margin-top: 20px; padding: 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; font-size: 12px; color: #8b949e; }
@@ -154,7 +171,7 @@
         <div id="history-bar" class="history-bar hidden">
             <button class="remove-btn" onclick="exportHistory('json')">Export JSON</button>
             <button class="remove-btn" onclick="exportHistory('csv')">Export CSV</button>
-            <button class="clear-all-btn" onclick="clearHistory()">Clear saved keys</button>
+            <button class="clear-all-btn" onclick="clearHistory()">Clear All Keys</button>
             <span class="history-note">Keys are stored only in this browser (localStorage) and survive refresh.</span>
             <span class="history-note" id="history-warn" style="display: none; color: #f0c040;"></span>
         </div>
@@ -181,6 +198,26 @@
             blobUrls = [];
         }
 
+        // libsodium.js is an Emscripten build: the `sodium` namespace is an empty
+        // shell until its WASM module initializes. `sodium.ready` is a promise that
+        // resolves once crypto_* wrappers exist, so every caller must await it
+        // before touching the API (otherwise: "... is not a function").
+        function sodiumIsUsable() {
+            return typeof sodium !== 'undefined'
+                && !!sodium
+                && typeof sodium.crypto_sign_seed_keypair === 'function';
+        }
+
+        async function awaitSodium() {
+            if (typeof libsodium === 'undefined' || !libsodium || !libsodium.ready) {
+                throw new Error('libsodium did not load (check network and refresh).');
+            }
+            await libsodium.ready;
+            if (!sodiumIsUsable()) {
+                throw new Error('libsodium loaded but crypto API is unavailable.');
+            }
+        }
+
         // Measured on this device at page load (keys/s for one worker).
         // Falls back to a conservative 200 keys/s until calibration finishes
         // (e.g. crypto library failed to load).
@@ -192,7 +229,7 @@
 
         async function calibrateBenchmark() {
             try {
-                if (typeof sodium === 'undefined') return;
+                await awaitSodium();
                 const N = 48;
                 const seed = new Uint8Array(32);
                 if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
@@ -211,7 +248,24 @@
                 }
             } catch (e) {
                 // Keep the conservative default; estimate stays valid, just rough.
+                console.warn('Calibration failed:', e);
             }
+        }
+
+        // "45.2s" / "2m 10s" / "1h 2m 9s" - readable at a glance, no unit soup.
+        function formatElapsed(seconds) {
+            if (typeof seconds !== 'number' || !isFinite(seconds) || seconds < 0) {
+                return 'unknown';
+            }
+            if (seconds < 60) return seconds.toFixed(1) + 's';
+            const total = Math.round(seconds);
+            const h = Math.floor(total / 3600);
+            const m = Math.floor((total % 3600) / 60);
+            const s = total % 60;
+            let out = '';
+            if (h > 0) out += h + 'h ';
+            if (h > 0 || m > 0) out += m + 'm ';
+            return (out + s + 's').trim();
         }
 
         function validateHex(input) {
@@ -309,7 +363,8 @@
                     timeStr = (estSeconds / 86400).toFixed(1) + 'd';
                 }
             }
-            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (' + numWorkers + ' workers, ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel + ')';
+            const workerLabel = numWorkers === 1 ? 'worker' : 'workers';
+            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (' + numWorkers + ' ' + workerLabel + ', ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel + ')';
         }
 
         function setFormDisabled(disabled) {
@@ -329,11 +384,15 @@ function startMining() {
                 alert('Your browser does not support Web Workers. Please use a modern browser.');
                 return;
             }
-            if (typeof sodium === 'undefined') {
-                alert('Failed to load cryptographic library. Please check your internet connection and refresh.');
+            if (!validateForm()) return;
+
+            // Blocking readiness check: startMining() is sync (inline onclick),
+            // so guard against the un-loaded/uninitialized case up front, then
+            // await libsodium.ready inside an async IIFE before touching crypto.
+            if (!sodiumIsUsable()) {
+                alert('Cryptographic library is still loading or unavailable. Wait a moment and try again, or refresh the page.');
                 return;
             }
-            if (!validateForm()) return;
 
             const prefix = document.getElementById('prefix').value.toLowerCase();
             const suffix = document.getElementById('suffix').value.toLowerCase();
@@ -350,27 +409,44 @@ function startMining() {
             document.getElementById('progress').classList.remove('hidden');
 
             const workerCode = `
-                try {
-                    importScripts('${new URL('libsodium.js', location.href).href}');
-                    console.log('[Worker] libsodium loaded successfully');
-                } catch (e) {
-                    console.error('[Worker] importScripts failed:', e);
-                    self.postMessage({ type: 'error', message: 'Failed to load cryptographic library: ' + e.message });
-                }
+                let readyResolve, readyReject;
+                const readyPromise = new Promise((res, rej) => { readyResolve = res; readyReject = rej; });
 
-                if (typeof sodium === 'undefined') {
-                    console.error('[Worker] sodium is undefined after import');
-                    self.postMessage({ type: 'error', message: 'Failed to load cryptographic library (importScripts failed).' });
-                } else {
-                    console.log('[Worker] Ready to work');
-                    self.postMessage({ type: 'ready' });
-                }
+                self.postMessage({ type: 'booting' });
+
+                (async function boot() {
+                    try {
+                        importScripts('${new URL('libsodium.js', location.href).href}');
+                        // libsodium.js is an Emscripten build: crypto_* wrappers only
+                        // exist after libsodium.ready resolves. Awaiting it here is
+                        // what prevents "crypto_sign_seed_keypair is not a function".
+                        if (typeof libsodium === 'undefined' || !libsodium.ready) {
+                            throw new Error('libsodium did not load in worker.');
+                        }
+                        await libsodium.ready;
+                        if (typeof sodium === 'undefined'
+                            || typeof sodium.crypto_sign_seed_keypair !== 'function') {
+                            throw new Error('libsodium loaded but crypto API is unavailable.');
+                        }
+                        readyResolve();
+                        self.postMessage({ type: 'ready' });
+                    } catch (e) {
+                        const msg = 'Failed to load cryptographic library: ' + e.message;
+                        console.error('[Worker] boot failed:', e);
+                        readyReject(e);
+                        self.postMessage({ type: 'error', message: msg });
+                    }
+                })();
 
                 self.onmessage = async function(e) {
                     console.log('[Worker] Received message:', e.data.type || e.data);
                     try {
-                        if (typeof sodium === 'undefined') {
-                            self.postMessage({ type: 'error', message: 'Failed to load cryptographic library. Please check your internet connection and refresh.' });
+                        // Main thread only posts work after 'ready', but await
+                        // defensively so a race can never surface as a raw TypeError.
+                        await readyPromise;
+                        if (typeof sodium === 'undefined'
+                            || typeof sodium.crypto_sign_seed_keypair !== 'function') {
+                            self.postMessage({ type: 'error', message: 'Cryptographic library unavailable in worker.' });
                             return;
                         }
 
@@ -854,7 +930,7 @@ function startMining() {
                 const attempts = Number(entry.attempts) || 0;
                 const elapsed = Number(entry.elapsed) || 0;
                 let statsText = 'Found in ' + attempts.toLocaleString() +
-                    ' attempts (' + elapsed.toFixed(2) + 's) | ' + (entry.pattern || 'unknown pattern');
+                    ' attempts (' + formatElapsed(elapsed) + ') | ' + (entry.pattern || 'unknown pattern');
                 if (entry.minedAt) {
                     try {
                         statsText += ' | mined ' + new Date(entry.minedAt).toLocaleString();

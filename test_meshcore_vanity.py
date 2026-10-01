@@ -422,6 +422,52 @@ def test_check_inline_js_extracts_current_page():
     assert "startMining" in extracted["main.js"]
 
 
+def test_worker_awaits_libsodium_ready():
+    """Regression: libsodium.js is an Emscripten build whose crypto_* wrappers
+    only exist after libsodium.ready resolves. Without awaiting it, the worker
+    throws "sodium.crypto_sign_seed_keypair is not a function"."""
+    from pathlib import Path
+
+    mod = _load_check_inline_js()
+    worker = mod.extract(Path(__file__).parent)["worker.js"]
+    assert "libsodium.ready" in worker, "worker must await libsodium.ready"
+    assert "crypto_sign_seed_keypair" in worker
+    # Readiness must be awaited before any crypto call, and guarded by a
+    # typeof check so a missing API degrades to a message, not a TypeError.
+    assert worker.index("await libsodium.ready") < worker.index("crypto_sign_seed_keypair(")
+
+
+def test_page_estimates_and_formatting():
+    """HTML helpers: singular/plural worker label and humanized elapsed time."""
+    import re
+    from pathlib import Path
+
+    html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+    # Singular vs plural must be conditional, not a hardcoded "workers".
+    assert "numWorkers === 1 ? 'worker' : 'workers'" in html
+    assert "1 workers" not in html
+
+    # formatElapsed() powers the "Found in ... attempts (...)" line.
+    assert "function formatElapsed(seconds)" in html
+    assert "formatElapsed(elapsed)" in html
+    assert "'unknown'" in html
+    # Guarded against NaN/Infinity/negative input.
+    assert "isFinite(seconds)" in html
+
+    # History buttons share one explicit height so labels can't misalign.
+    assert ".remove-btn, .clear-all-btn" in html
+    assert "height: 40px" in html
+    assert "Clear All Keys" in html
+
+    # Ready the page awaits libsodium before touching the crypto API.
+    assert "await awaitSodium()" in html or "libsodium.ready" in html
+    assert "sodiumIsUsable" in html
+
+    # Sanity: the estimate line still names attempts and keys/s.
+    assert re.search(r"Expected attempts: ", html)
+
+
 def test_check_inline_js_rejects_banned_patterns(tmp_path):
     mod = _load_check_inline_js()
     (tmp_path / "index.html").write_text(
