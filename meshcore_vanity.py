@@ -32,7 +32,7 @@ BASE58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 
 # Reserved prefixes for MeshCore framework devices (not consumer)
-RESERVED_PREFIXES = {"00", "ff", "FF"}
+RESERVED_PREFIXES = {"00", "ff"}
 
 _PREFIX_VALID_CHARS = {
     "base64": set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="),

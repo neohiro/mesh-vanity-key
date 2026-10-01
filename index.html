@@ -47,56 +47,6 @@
         input[type="text"].error { border-color: #f85149; }
         input[type="text"]:disabled { opacity: 0.5; }
         .error-msg { color: #f85149; font-size: 12px; margin-top: 4px; display: none; }
-        .worker-input {
-            width: calc(3ch + 30px);
-            padding: 10px 8px 10px 14px;
-            background: #0d1117;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            color: #c9d1d9;
-            font-size: 16px;
-            font-family: 'SFMono-Regular', Consolas, monospace;
-            text-align: left;
-        }
-        .worker-input:focus { outline: none; border-color: #58a6ff; }
-        .worker-input:disabled { opacity: 0.5; }
-        .worker-input::-webkit-inner-spin-button,
-        .worker-input::-webkit-outer-spin-button {
-            -webkit-appearance: none;
-            appearance: none;
-            margin: 0;
-            display: none;
-        }
-        .worker-input {
-            -moz-appearance: textfield;
-            appearance: textfield;
-        }
-        .step-btn {
-            width: 36px;
-            padding: 10px 0;
-            background: #21262d;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            color: #c9d1d9;
-            font-size: 16px;
-            font-weight: 700;
-            line-height: 1;
-            cursor: pointer;
-            transition: background 0.2s;
-        }
-        .step-btn:hover:not(:disabled) { background: #30363d; }
-        .step-btn:active:not(:disabled) { background: #484f58; }
-        .step-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .worker-wrapper {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-        .worker-hint {
-            font-size: 12px;
-            color: #8b949e;
-            white-space: nowrap;
-        }
         .checkbox-field input[type="checkbox"] { width: 18px; height: 18px; accent-color: #58a6ff; }
         .checkbox-field input[type="checkbox"]:disabled { opacity: 0.5; }
         .checkbox-field label { margin-bottom: 0; cursor: pointer; }
@@ -186,17 +136,6 @@
                 <span class="error-msg" id="suffix-error"></span>
             </div>
 
-            <div class="field">
-                <label for="workers">Workers</label>
-                <div class="worker-wrapper">
-                    <button type="button" class="step-btn" id="workers-minus" aria-label="Fewer workers">−</button>
-                    <input type="number" id="workers" value="4" min="1" max="16" class="worker-input" oninput="updateEstimate()">
-                    <button type="button" class="step-btn" id="workers-plus" aria-label="More workers">+</button>
-                    <span class="worker-hint">More workers = faster search (uses more CPU)</span>
-                </div>
-            </div>
-
-
             <div class="buttons">
                 <button id="start-btn" onclick="startMining()">Start Mining</button>
                 <button id="stop-btn" onclick="stopMining()" disabled>Stop</button>
@@ -221,8 +160,8 @@
         </div>
 
         <div class="info">
-            <p><strong>How it works:</strong> This page uses Web Workers with libsodium WASM to search for Ed25519 keys in the background. Multiple workers run in parallel for maximum performance.</p>
-            <p style="margin-top: 8px;"><strong>Tip:</strong> Shorter patterns are found faster. A 2-char prefix takes seconds; a 6-char pattern may take hours. More workers = faster search.</p>
+            <p><strong>How it works:</strong> This page uses Web Workers with libsodium WASM to search for Ed25519 keys in the background. Workers are auto-detected based on your CPU cores for maximum performance.</p>
+            <p style="margin-top: 8px;"><strong>Tip:</strong> Shorter patterns are found faster. A 2-char prefix takes seconds; a 6-char pattern may take hours.</p>
             <p style="margin-top: 8px;"><strong>Note:</strong> For maximum performance with SharedArrayBuffer, deploy with COOP/COEP headers (see <code>_headers</code> file for Netlify).</p>
             <p style="margin-top: 8px;">Inspired by <a href="https://meshcore.co.uk/">MeshCore</a>.</p>
             <p style="margin-top: 8px;"><a href="https://neohiro.github.io/">← Back to neohiro.github.io</a></p>
@@ -350,11 +289,12 @@
                 expected = Math.pow(16, suffix.length);
             }
 
-            const typicalRate = ratePerWorker();
+            const numWorkers = detectOptimalWorkers();
+            const totalRate = ratePerWorker() * numWorkers;
             const rateLabel = calibratedRatePerWorker
-                ? 'at ' + Math.round(typicalRate).toLocaleString() + ' keys/s (calibrated), '
-                : 'at ~200 keys/s, ';
-            const estSeconds = expected / typicalRate;
+                ? 'calibrated'
+                : 'estimated';
+            const estSeconds = expected / totalRate;
             let timeStr;
             if (!isFinite(estSeconds)) {
                 timeStr = 'very long (heat death of the universe first)';
@@ -367,31 +307,19 @@
             } else {
                 timeStr = (estSeconds / 86400).toFixed(1) + 'd';
             }
-            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (' + rateLabel + typicalRate.toLocaleString() + ' keys/s)';
-        }
-
-        function getNumWorkers() {
-            const raw = parseInt(document.getElementById('workers').value, 10);
-            if (!Number.isFinite(raw)) return 4;
-            return Math.min(Math.max(raw, 1), 16);
+            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (' + numWorkers + ' workers, ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel + ')';
         }
 
         function setFormDisabled(disabled) {
             document.getElementById('prefix').disabled = disabled;
             document.getElementById('suffix').disabled = disabled;
-            document.getElementById('workers').disabled = disabled;
-            document.getElementById('workers-minus').disabled = disabled;
-            document.getElementById('workers-plus').disabled = disabled;
             document.getElementById('new-search-btn').disabled = disabled;
         }
 
-        function stepWorkers(delta) {
-            const el = document.getElementById('workers');
-            el.value = Math.min(16, Math.max(1, getNumWorkers() + delta));
-            updateEstimate();
+        function detectOptimalWorkers() {
+            const cores = navigator.hardwareConcurrency || 4;
+            return Math.min(Math.max(cores - 1, 1), 16);
         }
-        document.getElementById('workers-minus').addEventListener('click', () => stepWorkers(-1));
-        document.getElementById('workers-plus').addEventListener('click', () => stepWorkers(1));
 
 function startMining() {
             if (mining) return;
@@ -409,7 +337,7 @@ function startMining() {
             const suffix = document.getElementById('suffix').value.toLowerCase();
             const matchPrefix = prefix.length > 0;
             const matchSuffix = suffix.length > 0;
-            const numWorkers = getNumWorkers();
+            const numWorkers = detectOptimalWorkers();
 
             document.getElementById('live-estimate').textContent = '';
             document.getElementById('live-estimate').style.display = 'none';
@@ -421,7 +349,7 @@ function startMining() {
 
             const workerCode = `
                 try {
-                    importScripts('libsodium.js');
+                    importScripts('${new URL('libsodium.js', location.href).href}');
                     console.log('[Worker] libsodium loaded successfully');
                 } catch (e) {
                     console.error('[Worker] importScripts failed:', e);
@@ -738,6 +666,18 @@ function startMining() {
         const MAX_SAVED_KEYS = 200;
         let savedKeys = [];
         let nextKeyNum = 1;
+        let storageAvailable = true;
+
+        function checkStorageAvailable() {
+            try {
+                const testKey = '__storage_test__';
+                localStorage.setItem(testKey, '1');
+                localStorage.removeItem(testKey);
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
 
         function currentPatternDesc() {
             const p = document.getElementById('prefix').value;
@@ -748,6 +688,10 @@ function startMining() {
         }
 
         function loadHistory() {
+            if (!storageAvailable) {
+                showHistoryWarn('Browser storage unavailable: keys will not persist across sessions.');
+                return;
+            }
             try {
                 const raw = localStorage.getItem(HISTORY_KEY);
                 if (!raw) return;
@@ -764,6 +708,7 @@ function startMining() {
                 }
             } catch (e) {
                 savedKeys = [];  // corrupt/quota-blocked storage: start fresh
+                showHistoryWarn('Browser storage error: starting with empty history.');
             }
         }
 
@@ -772,11 +717,15 @@ function startMining() {
         }
 
         function persistHistory() {
+            if (!storageAvailable) return;
             try {
                 localStorage.setItem(HISTORY_KEY, JSON.stringify(savedKeys));
                 return;
             } catch (e) {
-                if (!isQuotaError(e)) return;  // privacy mode etc: session-only history
+                if (!isQuotaError(e)) {
+                    storageAvailable = false;
+                    return;  // privacy mode etc: session-only history
+                }
             }
             // Storage full: evict oldest-first until the newest fits, then
             // tell the user instead of silently dropping into session-only mode.
@@ -920,6 +869,7 @@ function startMining() {
         window.addEventListener('load', function() {
             // Defer past first paint so load stays snappy; yields keep UI alive.
             setTimeout(calibrateBenchmark, 0);
+            storageAvailable = checkStorageAvailable();
             loadHistory();
             renderHistory(false);
             
