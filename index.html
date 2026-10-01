@@ -242,6 +242,39 @@
             blobUrls = [];
         }
 
+        // Measured on this device at page load (keys/s for one worker).
+        // Falls back to a conservative 200 keys/s until calibration finishes
+        // (e.g. crypto library failed to load).
+        let calibratedRatePerWorker = null;
+
+        function ratePerWorker() {
+            return calibratedRatePerWorker || 200;
+        }
+
+        async function calibrateBenchmark() {
+            try {
+                if (typeof sodium === 'undefined') return;
+                const N = 48;
+                const seed = new Uint8Array(32);
+                if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+                    crypto.getRandomValues(seed);
+                }
+                const t0 = performance.now();
+                for (let i = 0; i < N; i++) {
+                    seed[0] = i & 0xff;
+                    sodium.crypto_sign_seed_keypair(seed);
+                    if (i % 8 === 7) await new Promise(r => setTimeout(r, 0));
+                }
+                const dt = (performance.now() - t0) / 1000;
+                if (dt > 0) {
+                    calibratedRatePerWorker = N / dt;
+                    updateEstimate();
+                }
+            } catch (e) {
+                // Keep the conservative default; estimate stays valid, just rough.
+            }
+        }
+
         function validateHex(input) {
             const errorEl = document.getElementById(input.id + '-error');
             const value = input.value;
@@ -378,7 +411,6 @@ function startMining() {
             const matchSuffix = suffix.length > 0;
             const numWorkers = getNumWorkers();
 
-            document.getElementById('estimate').textContent = '';
             document.getElementById('live-estimate').textContent = '';
             document.getElementById('live-estimate').style.display = 'none';
             window.liveEstimateShown = false;
@@ -453,14 +485,29 @@ function startMining() {
                             lastProgressReport = now;
                         }
 
+                        // Scalar-walk: initialize random scalar, then increment for each attempt
+                        let seed = new Uint8Array(32);
+                        if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+                            crypto.getRandomValues(seed);
+                        } else {
+                            for (let i = 0; i < 32; i++) {
+                                seed[i] = Math.floor(Math.random() * 256);
+                            }
+                        }
+                        let scalar = BigInt('0x' + Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join(''));
+
                         while (true) {
                             for (let b = 0; b < BATCH_SIZE; b++) {
-                                // Generate a random seed using libsodium's CSPRNG
-                                const seed = sodium.randombytes_buf(32);
+                                // Scalar-walk: increment the scalar for each attempt
+                                const seedHex = scalar.toString(16).padStart(64, '0');
+                                const seed = new Uint8Array(32);
+                                for (let i = 0; i < 32; i++) {
+                                    seed[i] = parseInt(seedHex.substring(i * 2, i * 2 + 2), 16);
+                                }
                                 // Derive keypair from seed
                                 const keyPair = sodium.crypto_sign_seed_keypair(seed);
                                 const publicKeyHex = Array.from(keyPair.publicKey).map(b => b.toString(16).padStart(2, '0')).join('');
-                                const privateKeyHex = Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join('');
+                                const privateKeyHex = seedHex;
 
                                 let match = false;
                                 if (matchPrefix && matchSuffix) {
@@ -470,6 +517,22 @@ function startMining() {
                                 } else {
                                     match = publicKeyHex.endsWith(suffixLower);
                                 }
+
+                                if (match) {
+                                    self.postMessage({
+                                        type: 'found',
+                                        publicKey: publicKeyHex,
+                                        privateKey: seedHex,
+                                        attempts: attempts,
+                                        elapsed: (Date.now() - startTime) / 1000
+                                    });
+                                    return;
+                                }
+
+                                attempts++;
+                                // Scalar-walk: increment by 1 for next attempt
+                                scalar = (scalar + 1n) & ((1n << 256n) - 1n);
+                            }
 
                                 if (match) {
                                     self.postMessage({
