@@ -141,6 +141,13 @@ def main() -> int:
                     f"obfuscation key must not be stored in localStorage: {obf_key!r}"
                 )
 
+                # Past the expected mean the ETA must not vanish or go
+                # negative: the overshoot has to be stated.
+                over = page.evaluate("() => formatProgressLine(1500, 10, 1000)")
+                assert "Progress: +150.00%" in over, f"no overshoot marker: {over!r}"
+                assert "past expected" in over, f"overshoot not explained: {over!r}"
+                assert "ETA: -" not in over, f"negative ETA rendered: {over!r}"
+
                 # The stored history must be ciphertext, not readable JSON.
                 stored = page.evaluate(
                     f"() => localStorage.getItem('{HISTORY_KEY}')"

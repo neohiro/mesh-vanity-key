@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import math
 import os
 import sys
 import threading
@@ -36,6 +37,17 @@ BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 # Reserved prefixes for MeshCore framework devices (not consumer).
 # These are skipped during mining by default, but may be explicitly requested.
 RESERVED_PREFIXES = {"00", "ff"}
+
+
+_warned_reserved: set[str] = set()
+
+
+def _warn_reserved_once(message: str) -> None:
+    """Emit ``message`` as a warning, at most once per process."""
+    if message in _warned_reserved:
+        return
+    _warned_reserved.add(message)
+    warnings.warn(message, stacklevel=3)
 
 
 def _allow_reserved(prefix: str, encoding: str) -> bool:
@@ -218,14 +230,18 @@ def _validate_prefix(
         prefix_lower = prefix[:2].lower()
         if prefix_lower in RESERVED_PREFIXES:
             message = (
-                f"WARNING: {label} {prefix!r} starts with a prefix reserved for "
-                f"MeshCore framework devices (00 and FF are not available for "
-                f"consumer nodes). It will still be mined, but the key may not "
-                f"work with standard MeshCore clients."
+                f"{label} {prefix!r} starts with a prefix reserved for MeshCore "
+                f"framework devices (00 and FF are not available for consumer "
+                f"nodes). It will still be mined, but the key may not work with "
+                f"standard MeshCore clients."
             )
             if os.environ.get("MESHCORE_VANITY_STRICT_RESERVED"):
-                raise ValueError(message)
-            warnings.warn(message, stacklevel=2)
+                raise ValueError(
+                    f"{message} (MESHCORE_VANITY_STRICT_RESERVED is set)"
+                )
+            # Warn once per distinct pattern, so repeated validation of the same
+            # search (library use, retries) cannot spam the output.
+            _warn_reserved_once(message)
     # A 32-byte key encodes to 44 base64 chars with a single '=' pad at index
     # 43; '=' anywhere else can never match, so fail fast instead of searching
     # forever. (base64url strips padding, so '=' is already rejected above.)
@@ -385,11 +401,23 @@ def _format_progress(attempts: int, elapsed: float, expected_attempts: int) -> s
     has reached, which a hard 100% ceiling threw away.
     """
     rate = attempts / elapsed if elapsed > 0 else 0
-    pct = (attempts / expected_attempts * 100) if expected_attempts > 0 else 0
+    have_expected = expected_attempts > 0 and math.isfinite(expected_attempts)
+    pct = (attempts / expected_attempts * 100) if have_expected else 0.0
     # Prefix "+" once past the expected mean so the overshoot is unmistakable.
     progress = f"+{pct:.2f}%" if pct > 100.0 else f"{pct:.2f}%"
-    remaining = (expected_attempts - attempts) / rate if rate > 0 else 0
-    eta = f" eta={format_elapsed(remaining)}" if remaining > 0 else ""
+    remaining = (expected_attempts - attempts) / rate if (have_expected and rate > 0) else None
+    if remaining is None:
+        # Either the rate is not yet known or the expectation overflowed to
+        # infinity; say so instead of implying "no time remaining".
+        eta = " eta=unknown"
+    elif remaining > 0:
+        eta = f" eta={format_elapsed(remaining)}"
+    else:
+        # Past the mean the naive remaining figure is negative and meaningless,
+        # and dropping it silently left the user with no sense of progress.
+        # Report how far past the mean the search has gone instead.
+        pct_over = (-remaining) / (attempts / rate) * 100 if attempts > 0 else 0.0
+        eta = f" ({pct_over:.0f}% past expected, {format_elapsed(-remaining)} over)"
     return (
         f"  attempts={attempts:,} rate={rate:,.0f}/s "
         f"elapsed={format_elapsed(elapsed)} progress={progress}{eta}"

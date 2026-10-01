@@ -6,10 +6,12 @@ import io
 import json
 import re
 import struct
+import warnings
 from pathlib import Path
 
 import pytest
 
+import meshcore_vanity
 from meshcore_vanity import (
     encode_public_key,
     generate_vanity_key,
@@ -339,6 +341,21 @@ def test_validate_prefix_reserved_hex_strict_env_rejects(monkeypatch):
         _validate_prefix("00ab", "hex")
 
 
+def test_reserved_warning_is_emitted_once(monkeypatch):
+    # Library use can validate the same pattern repeatedly (retries, or a
+    # wrapper calling generate_vanity_key in a loop). The warning must fire
+    # exactly once so output is not spammed.
+    monkeypatch.setattr(meshcore_vanity, "_warned_reserved", set())
+    counts = []
+    for _ in range(5):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _validate_prefix("00ab", "hex")
+        counts.append(len(caught))
+    assert counts == [1, 0, 0, 0, 0], f"warned on every call: {counts}"
+    assert len(meshcore_vanity._warned_reserved) == 1
+
+
 def test_allow_reserved_only_for_explicit_hex_request():
     # A reserved hex prefix opts in; anything else must not.
     assert _allow_reserved("00ab", "hex")
@@ -386,8 +403,29 @@ def test_format_progress():
     # than being clamped: ~37% of searches legitimately run past 100%.
     over = _format_progress(200000, 1.0, 65536)
     assert "progress=+305.18%" in over
+    # Past the mean the naive remaining time is negative. It must never be
+    # rendered as a negative ETA, and must not simply vanish: report the
+    # overshoot share and duration instead.
+    assert "eta=-" not in over
+    assert "past expected" in over, over
+    assert "over)" in over, over
     # Zero elapsed never divides by zero.
     assert "rate=0/s" in _format_progress(0, 0.0, 100)
+
+
+def test_format_progress_unknown_expectation():
+    # 16**n overflows to infinity for very long patterns. Reporting
+    # progress=0.00% with a confident "no time remaining" would be misleading.
+    s = _format_progress(500, 10.0, float("inf"))
+    assert "eta=unknown" in s, s
+    assert "NaN" not in s and "inf" not in s
+
+
+def test_format_progress_zero_rate_is_explicit():
+    s = _format_progress(0, 0.0, 1000)
+    assert "rate=0/s" in s
+    assert "eta=unknown" in s
+    assert "NaN" not in s
 
 
 def test_format_elapsed_units():

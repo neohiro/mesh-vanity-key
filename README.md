@@ -50,6 +50,12 @@ Browser-specific behaviour, for comparison with the CLI below:
 > protect against script running on the origin (XSS, a malicious extension),
 > because such code can recompute the fingerprint and derive the key itself.
 > Treat the history as a secret store, and clear it when done.
+>
+> Because the key comes from a fingerprint, anything that changes it makes
+> existing history unreadable: a different browser, a moved profile, a changed
+> screen size, or travelling to another timezone. The stored data is never
+> deleted when this happens — it simply cannot be decoded, and the page says so
+> rather than pretending the history is empty.
 
 Reserved hex prefixes `00` and `ff` are **mined with a warning** rather than
 rejected, in both the browser app and the CLI — some users deliberately want
@@ -252,7 +258,7 @@ Hex prefixes `00` and `ff` are reserved for MeshCore framework devices and are r
 - **Browser app must be served over HTTP(S).** Blob Web Workers are blocked on `file://` URLs.
 - **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency - 1` (capped at 16), which can over- or under-estimate on constrained or shared hardware.
 - **Browser key history is obfuscated, not encrypted.** The XOR key is derived from a machine + origin fingerprint rather than stored, so stolen storage cannot be decoded elsewhere. Script on the origin can recompute it, so this is not XSS protection. Moving a browser profile to a new machine loses the ability to read previously saved history.
-- **Progress is not capped at 100%.** Expected attempts are the mean of a geometric distribution, so ~37% of searches legitimately run past it. The CLI and browser show the overshoot as `+105.00%`, which indicates how far into the tail the search has gone.
+- **Progress is not capped at 100%.** Expected attempts are the mean of a geometric distribution, so ~37% of searches legitimately run past it. The CLI and browser show the overshoot as `+105.00%` plus how far past the mean the search has run. Once past the mean there is no meaningful "time remaining", so the ETA is replaced by the overshoot instead of being dropped or shown negative.
 - **Browser prefix + suffix are limited to 64 hex digits combined.** A key is exactly 64 hex digits, so longer patterns would overlap and could never match; the app refuses to start such a search.
 
 ## Output

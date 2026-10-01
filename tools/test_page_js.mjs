@@ -189,7 +189,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), machineFingerprint, deriveObfuscationKey, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), machineFingerprint, deriveObfuscationKey, formatProgressLine, progressEtaClause, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -581,6 +581,59 @@ check('csvCell: quotes and escapes correctly', () => {
 // of searches legitimately exceed it. Clamping at 100% hid how far into the
 // tail a long search actually was; the display must overshoot with a "+".
 
+// ---- progress-line rendering ----------------------------------------------
+// Past the expected mean the naive remaining-time figure goes negative, which
+// used to blank the ETA entirely. The overshoot must be reported instead, and
+// formatted with human units like everything else.
+
+check('formatProgressLine: reports overshoot instead of hiding the ETA', () => {
+    const under = api.formatProgressLine(500, 10, 1000);
+    ok(under.includes('Progress: 50.00%'), `under 100%: ${under}`);
+    ok(under.includes('ETA:'), `ETA expected while under the mean: ${under}`);
+    ok(!under.includes('+50'), 'no + prefix below the mean');
+
+    const exact = api.formatProgressLine(1000, 10, 1000);
+    ok(exact.includes('Progress: 100.00%'), `exactly 100%: ${exact}`);
+    ok(!exact.includes('+100'), '100% itself is not an overshoot');
+
+    const over = api.formatProgressLine(1500, 10, 1000);
+    ok(over.includes('Progress: +150.00%'), `overshoot must carry a +: ${over}`);
+    ok(/past expected/.test(over), `must say it is past the mean: ${over}`);
+    ok(!/ETA: -/.test(over), 'a negative ETA must never be rendered');
+    // 1500 attempts where 1000 were expected: half the elapsed time was spent
+    // beyond the mean, so the overshoot share is 33% (500 of 1500).
+    ok(/33% past expected/.test(over), `overshoot percentage: ${over}`);
+    ok(/50\.0s over/.test(over), `overshoot duration: ${over}`);
+});
+
+check('formatProgressLine: humanises long times', () => {
+    const s = api.formatProgressLine(1000, 100, 1000000);
+    ok(s.includes('ETA: 2h 46m 30s'), `eta should be humanized: ${s}`);
+    ok(!/\d+\.\d+s\b/.test(s), `no raw float seconds: ${s}`);
+});
+
+check('formatProgressLine: handles an unknown total without NaN', () => {
+    const s = api.formatProgressLine(500, 10, Infinity);
+    ok(!/NaN|undefined/.test(s), `must degrade cleanly: ${s}`);
+});
+
+check('formatProgressLine: a display rate can override the raw one', () => {
+    const raw = api.formatProgressLine(1000, 100, 10000);
+    const smoothed = api.formatProgressLine(1000, 100, 10000, 87);
+    ok(raw.includes('Rate: 100/s'), `raw rate: ${raw}`);
+    ok(smoothed.includes('Rate: 87/s'), `EMA rate must be used for display: ${smoothed}`);
+    // Progress maths must stay on the raw sample so it matches the attempts.
+    ok(raw.split('Progress:')[1] === smoothed.split('Progress:')[1],
+        'smoothing the rate must not change the progress figure');
+});
+
+check('progressEtaClause: returns only the trailing clause', () => {
+    eq(api.progressEtaClause(500, 10, 1000), 'ETA: 50.0s');
+    ok(/past expected/.test(api.progressEtaClause(1500, 10, 1000)),
+        `overshoot clause: ${api.progressEtaClause(1500, 10, 1000)}`);
+    eq(api.progressEtaClause(0, 0, 0), '', 'no clause when there is nothing to report');
+});
+
 check('formatElapsed: human units for long searches', () => {
     eq(api.formatElapsed(0), '0.0s');
     eq(api.formatElapsed(42.34), '42.3s');
@@ -659,6 +712,67 @@ await asyncCheck('a foreign machine cannot decode stolen history', async () => {
 
     ok(decodedElsewhere !== plain,
         'ciphertext from another machine must not decode to the history');
+});
+
+await asyncCheck('the legacy stored key is removed at load', async () => {
+    // The previous scheme persisted the key beside the ciphertext. It must be
+    // cleared, or someone who already ran that build keeps a copy forever.
+    localStorageMock.setItem('meshcoreVanityObfKey', 'ab'.repeat(32));
+    storage.set(api.HISTORY_KEY, JSON.stringify([
+        { publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1 },
+    ]));
+    await api.loadHistory();
+    eq(localStorageMock.getItem('meshcoreVanityObfKey'), null,
+        'legacy obfuscation key must be cleared at load');
+    storage.delete(api.HISTORY_KEY);
+});
+
+await asyncCheck('undecodable history warns instead of looking lost', async () => {
+    // Ciphertext that this machine's key cannot read (fingerprint changed).
+    storage.set(api.HISTORY_KEY, '7b3d6a7f8271615b');
+    await api.loadHistory();
+    const warn = getElementById('history-warn');
+    ok(warn.style.display !== 'none', 'a decode failure must be surfaced');
+    ok(/could not be decoded/.test(warn.textContent),
+        `warning should explain, got: ${warn.textContent}`);
+    ok(/still stored/.test(warn.textContent),
+        'must reassure that the data is not deleted');
+    // Critically: the ciphertext must be left in place.
+    eq(storage.get(api.HISTORY_KEY), '7b3d6a7f8271615b',
+        'unreadable history must not be deleted');
+    storage.delete(api.HISTORY_KEY);
+});
+
+await asyncCheck('concurrent persists serialise, last write wins', async () => {
+    // persistHistory is async; overlapping calls must not interleave writes.
+    storage.clear();
+    api.getSavedKeys().length = 0;
+    const realDigest = globalThis.crypto.subtle.digest.bind(globalThis.crypto.subtle);
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let first = true;
+    globalThis.crypto.subtle.digest = async (...a) => {
+        if (first) { first = false; await gate; }  // hold the first save open
+        return realDigest(...a);
+    };
+    api.__resetObfKeyCache();
+    api.getSavedKeys().push({ publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1 });
+    const p1 = api.persistHistory();
+    api.getSavedKeys().push({ publicKey: 'c'.repeat(64), privateKey: 'd'.repeat(64), n: 2 });
+    const p2 = api.persistHistory();
+    release();
+    await Promise.all([p1, p2]);
+    globalThis.crypto.subtle.digest = realDigest;
+    // Whatever landed last must be internally consistent (decodable), never a
+    // half-written blend of the two states.
+    const stored = storage.get(api.HISTORY_KEY);
+    ok(stored, 'history must have been written');
+    const decoded = await api.decryptHistoryData(stored);
+    const parsed = JSON.parse(decoded);
+    ok(Array.isArray(parsed), 'stored history must be valid JSON');
+    ok(parsed.length === 1 || parsed.length === 2,
+        `stored history must be one coherent state, got ${parsed.length} entries`);
+    storage.clear();
 });
 
 await asyncCheck('legacy plaintext history still loads', async () => {

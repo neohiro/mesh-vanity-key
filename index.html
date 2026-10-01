@@ -493,6 +493,53 @@
             estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (' + numWorkers + ' ' + workerLabel + ', ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel + ')';
         }
 
+        // Single formatter for the live progress line, shared by the status text and
+        // the live estimate so the two can never disagree. `rateForDisplay`
+        // lets the caller substitute the EMA-smoothed rate for the headline
+        // figure while progress maths stays on the raw sample.
+        //
+        // Once attempts pass the expected mean, remaining time goes negative and
+        // a naive ETA renders nothing (or "-12s"). That is exactly when the user
+        // most needs information, so the overshoot is reported explicitly: how
+        // far past the mean, and for how long.
+        function formatProgressLine(attempts, rate, expected, rateForDisplay) {
+            attempts = Number(attempts) || 0;
+            rate = Number(rate) || 0;
+            expected = Number(expected);
+            const haveExpected = isFinite(expected) && expected > 0;
+            const pct = haveExpected ? attempts / expected * 100 : 0;
+            const remaining = (haveExpected && rate > 0)
+                ? (expected - attempts) / rate
+                : NaN;
+
+            let eta = '';
+            if (isFinite(remaining) && rate > 0) {
+                if (remaining > 0) {
+                    eta = 'ETA: ' + formatElapsed(remaining);
+                } else {
+                    // Share of elapsed time spent beyond the expected mean.
+                    const pctOver = attempts > 0
+                        ? (-remaining) / (attempts / rate) * 100
+                        : 0;
+                    eta = pctOver.toFixed(0) + '% past expected ('
+                        + formatElapsed(-remaining) + ' over)';
+                }
+            }
+
+            const shownRate = (rateForDisplay === undefined) ? rate : rateForDisplay;
+            return 'Attempts: ' + attempts.toLocaleString()
+                + ' | Rate: ' + Math.round(shownRate).toLocaleString() + '/s'
+                + ' | Progress: ' + (pct > 100 ? '+' : '') + pct.toFixed(2) + '%'
+                + (eta ? ' | ' + eta : '');
+        }
+
+        // The ETA clause on its own, for the secondary "Live estimate" line.
+        function progressEtaClause(attempts, rate, expected) {
+            const line = formatProgressLine(attempts, rate, expected);
+            const parts = line.split('|').map(s => s.trim());
+            return parts.length > 3 ? parts.slice(3).join(' | ') : '';
+        }
+
         function setFormDisabled(disabled) {
             document.getElementById('prefix').disabled = disabled;
             document.getElementById('suffix').disabled = disabled;
@@ -813,34 +860,23 @@
                         const attempts = Number(e.data.attempts) || 0;
                         const rate = Number(e.data.rate) || 0;
                         const expected = Number(e.data.expectedAttempts);
-                        const pct = Number(e.data.progress) || 0;
-                        const remaining = (isFinite(expected) && rate > 0)
-                            ? (expected - attempts) / rate
-                            : NaN;
-                        let etaStr = '';
-                        if (remaining > 0 && isFinite(remaining)) {
-                            if (remaining < 60) etaStr = ' | ETA: ' + remaining.toFixed(0) + 's';
-                            else if (remaining < 3600) etaStr = ' | ETA: ' + (remaining / 60).toFixed(1) + 'm';
-                            else if (remaining < 86400) etaStr = ' | ETA: ' + (remaining / 3600).toFixed(1) + 'h';
-                            else etaStr = ' | ETA: ' + (remaining / 86400).toFixed(1) + 'd';
-                        }
-                        // EMA smoothing for rate display (alpha = 0.3)
+                        // EMA smoothing for rate display (alpha = 0.3): the
+                        // headline rate uses the smoothed value, but progress
+                        // percentages and ETA use the raw sample so the math
+                        // stays consistent with the reported attempts.
                         smoothRate(rate);
                         const liveRateStr = Math.round(emaRate).toLocaleString() + '/s';
-                        // Past the expected mean, mark the overshoot with "+" so "+105.00%" reads as
-                        // "5% beyond the statistically expected point" rather
-                        // than as a formatting glitch.
-                        const progressText = 'Attempts: ' + attempts.toLocaleString()
-                            + ' | Rate: ' + liveRateStr
-                            + ' | Progress: ' + (pct > 100 ? '+' : '') + pct.toFixed(2) + '%'
-                            + etaStr;
-                        document.getElementById('progress-text').textContent = progressText;
+
+                        document.getElementById('progress-text').textContent =
+                            formatProgressLine(attempts, rate, expected, emaRate);
 
                         // Update live estimate continuously (not just first time)
                         const liveEstimateEl = document.getElementById('live-estimate');
                         if (liveEstimateEl) {
-                            if (attempts > 0 && etaStr) {
-                                liveEstimateEl.textContent = 'Live estimate: ~' + etaStr.replace(' | ETA: ', '') + ' at ' + liveRateStr;
+                            const etaPart = progressEtaClause(attempts, rate, expected);
+                            if (attempts > 0 && etaPart) {
+                                liveEstimateEl.textContent = 'Live estimate: '
+                                    + etaPart + ' at ' + liveRateStr;
                                 liveEstimateEl.style.display = 'block';
                             } else if (attempts > 0) {
                                 liveEstimateEl.textContent = 'Live estimate: calculating...';
@@ -998,7 +1034,12 @@
             return "suffix '" + s + "'";
         }
 
-        // ---- Client-Side History Obfuscation (Zero-Passphrase, Sync) ----
+        // Stale key left behind by the previous scheme, which persisted the
+        // obfuscation key next to the ciphertext in localStorage. Reading a
+        // localStorage key that copies the ciphertext is self-defeating, so it
+        // is cleared once at load to shrink the exposure window for anyone
+        // who already ran the old build.
+        const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
         //
         // SECURITY MODEL (read before trusting this with real value):
         // History is XOR-obfuscated, NOT encrypted. The key is *derived* from a
@@ -1112,10 +1153,28 @@
                 return;
             }
             try {
+                // Remove the old scheme's stored key now that it is unused.
+                try { localStorage.removeItem(LEGACY_OBFUSCATION_KEY_STORAGE); } catch (e) { /* ignore */ }
                 const raw = localStorage.getItem(HISTORY_KEY);
                 if (!raw) return;
                 const jsonText = await decryptHistoryData(raw);
-                const parsed = JSON.parse(jsonText);
+                let parsed;
+                try {
+                    parsed = JSON.parse(jsonText);
+                } catch (e) {
+                    // Decryption produced something that is not JSON. With a
+                    // fingerprint-derived key the overwhelmingly likely cause is
+                    // that the fingerprint changed (different browser/machine,
+                    // zoom or window resize, timezone travel), not corruption.
+                    // Say so plainly instead of showing an empty history with a
+                    // generic message, or the user thinks their keys are lost.
+                    showHistoryWarn(
+                        'Saved history could not be decoded on this browser. '
+                        + 'It is still stored and is not deleted, but it can only be '
+                        + 'read where it was written (same browser and device).'
+                    );
+                    return;
+                }
                 if (!Array.isArray(parsed)) return;
                 const hex64 = /^[0-9a-fA-F]{64}$/;
                 savedKeys = parsed.filter(e => e
@@ -1137,7 +1196,16 @@
             return e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014);
         }
 
-        async function persistHistory() {
+        // Serialises writes: the key derivation is async, so two overlapping calls
+        // (e.g. a key found while the user removes another) could otherwise
+        // interleave and let the slower, older write land last.
+        let persistChain = Promise.resolve();
+        function persistHistory() {
+            persistChain = persistChain.then(doPersistHistory, doPersistHistory);
+            return persistChain;
+        }
+
+        async function doPersistHistory() {
             if (!storageAvailable) return;
             try {
                 const jsonText = JSON.stringify(savedKeys);
@@ -1189,8 +1257,10 @@
             entry.n = nextKeyNum++;
             savedKeys.push(entry);
             if (savedKeys.length > MAX_SAVED_KEYS) savedKeys.shift();
-            persistHistory();
+            // Render immediately so the key is visible without waiting on the
+            // async encrypt-and-store round trip.
             renderHistory(true);
+            persistHistory();
         }
 
         function removeKey(index) {
