@@ -188,6 +188,9 @@
     <script>
         let workers = [];
         let mining = false;
+        // Guards double-start while startMining() awaits libsodium.ready:
+        // `mining` is still false during that await, so it cannot block re-entry.
+        let starting = false;
         let initTimeouts = [];
         let blobUrls = [];
 
@@ -378,21 +381,36 @@
             return Math.min(Math.max(cores - 1, 1), 16);
         }
 
-function startMining() {
-            if (mining) return;
+        async function startMining() {
+            if (mining || starting) return;
             if (typeof Worker === 'undefined') {
                 alert('Your browser does not support Web Workers. Please use a modern browser.');
                 return;
             }
             if (!validateForm()) return;
 
-            // Blocking readiness check: startMining() is sync (inline onclick),
-            // so guard against the un-loaded/uninitialized case up front, then
-            // await libsodium.ready inside an async IIFE before touching crypto.
-            if (!sodiumIsUsable()) {
-                alert('Cryptographic library is still loading or unavailable. Wait a moment and try again, or refresh the page.');
+            // libsodium.ready can still be pending on a cold load, so wait for
+            // it rather than rejecting the click. `starting` blocks re-entry for
+            // the duration of the await.
+            const startBtn = document.getElementById('start-btn');
+            starting = true;
+            startBtn.disabled = true;
+            const progressEl0 = document.getElementById('progress-text');
+            progressEl0.textContent = 'Loading crypto library...';
+            document.getElementById('progress').classList.remove('hidden');
+            try {
+                await awaitSodium();
+            } catch (e) {
+                starting = false;
+                startBtn.disabled = false;
+                document.getElementById('progress').classList.add('hidden');
+                alert('Failed to load cryptographic library: ' + e.message
+                    + ' Check your internet connection and refresh.');
                 return;
             }
+            starting = false;
+            // The user may have hit Stop while we waited.
+            if (mining) return;
 
             const prefix = document.getElementById('prefix').value.toLowerCase();
             const suffix = document.getElementById('suffix').value.toLowerCase();
@@ -677,6 +695,7 @@ function startMining() {
             }
             workers = [];
             revokeBlobUrls();
+            starting = false;
             mining = false;
             setFormDisabled(false);
             document.getElementById('start-btn').disabled = false;
@@ -736,6 +755,7 @@ function startMining() {
             window.liveEstimateShown = false;
             document.getElementById('progress').classList.add('hidden');
             document.getElementById('reserved-notice').style.display = 'none';
+            starting = false;
             updateEstimate();
         }
 

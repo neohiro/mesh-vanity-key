@@ -422,6 +422,40 @@ def test_check_inline_js_extracts_current_page():
     assert "startMining" in extracted["main.js"]
 
 
+def test_page_js_behaviour():
+    """Execute the extracted page/worker JS under node (skipped if absent).
+
+    `node --check` only validates syntax. This runs tools/test_page_js.mjs,
+    which asserts real behaviour: formatElapsed output, worker-count
+    pluralisation, corrupt-history handling and - the shipped regression -
+    that the worker waits for libsodium.ready before touching the crypto API.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    node = shutil.which("node") or shutil.which("bun")
+    if node is None:
+        pytest.skip("no node/bun runtime; CI runs tools/test_page_js.mjs directly")
+
+    mod = _load_check_inline_js()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        extracted = mod.extract(Path(__file__).parent)
+        for name, src in extracted.items():
+            (root / name).write_text(src, encoding="utf-8")
+        proc = subprocess.run(
+            [node, str(Path(__file__).parent / "tools" / "test_page_js.mjs"),
+             str(root / "main.js"), str(root / "worker.js")],
+            capture_output=True, text=True, timeout=120,
+        )
+    assert proc.returncode == 0, (
+        f"page JS behaviour tests failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    )
+    assert "behaviour checks passed" in proc.stdout, proc.stdout
+
+
 def test_worker_awaits_libsodium_ready():
     """Regression: libsodium.js is an Emscripten build whose crypto_* wrappers
     only exist after libsodium.ready resolves. Without awaiting it, the worker

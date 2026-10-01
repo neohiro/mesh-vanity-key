@@ -33,6 +33,12 @@ jobs:
       - name: Syntax-check main inline JS
         run: node --check /tmp/inline-js/main.js
 
+      # Behaviour tests: actually EXECUTE the extracted page + worker JS so
+      # logic regressions (time formatting, pluralisation, libsodium readiness
+      # race) fail CI. `node --check` cannot catch any of those.
+      - name: Page/worker JS behaviour tests
+        run: node tools/test_page_js.mjs /tmp/inline-js/main.js /tmp/inline-js/worker.js
+
   smoke:
     runs-on: ubuntu-latest
     steps:
