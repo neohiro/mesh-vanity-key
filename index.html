@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshCore Vanity Key Generator</title>
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#161b22">
     <script src="libsodium.js"></script>
     <style>
         :root { color-scheme: dark; }
@@ -871,6 +873,17 @@ function startMining() {
             setTimeout(calibrateBenchmark, 0);
             loadHistory();
             renderHistory(false);
+            
+            // Register service worker for offline support
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('sw.js')
+                    .then((registration) => {
+                        console.log('[SW] Service Worker registered:', registration.scope);
+                    })
+                    .catch((error) => {
+                        console.error('[SW] Service Worker registration failed:', error);
+                    });
+            }
         });
 
         window.addEventListener('beforeunload', function() {
