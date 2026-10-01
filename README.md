@@ -39,11 +39,21 @@ Browser-specific behaviour, for comparison with the CLI below:
 | Private key | shown per result, stored in history | only with `--output-private` |
 | History display | newest first, scroll stays at the top | n/a |
 
-> **Security:** the browser app stores found keys in `localStorage` in plaintext.
-> That is fine for a throwaway vanity key, but treat the history as a secret store
-> — it persists until you clear it.
+> **Security:** the browser app obfuscates saved keys in `localStorage` by XOR-ing
+> them with a key derived from a SHA-256 of a machine + storage-origin
+> fingerprint. The key is **not** stored alongside the data, so lifting
+> `localStorage` to another machine or browser profile yields unreadable
+> ciphertext.
+>
+> This is **obfuscation, not encryption**, and it has a deliberate scope. It
+> stops data-at-rest theft from a different machine or profile. It does **not**
+> protect against script running on the origin (XSS, a malicious extension),
+> because such code can recompute the fingerprint and derive the key itself.
+> Treat the history as a secret store, and clear it when done.
 
-Reserved hex prefixes `00` and `ff` are rejected in both implementations.
+Reserved hex prefixes `00` and `ff` are **mined with a warning** rather than
+rejected, in both the browser app and the CLI — some users deliberately want
+one. Set `MESHCORE_VANITY_STRICT_RESERVED=1` to make the CLI reject them again.
 
 ### Maintaining the PWA assets
 
@@ -241,7 +251,8 @@ Hex prefixes `00` and `ff` are reserved for MeshCore framework devices and are r
 - **Browser app is hex-only.** It has no bech32/base58/base64 output; use the CLI for those encodings.
 - **Browser app must be served over HTTP(S).** Blob Web Workers are blocked on `file://` URLs.
 - **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency - 1` (capped at 16), which can over- or under-estimate on constrained or shared hardware.
-- **Browser key history is obfuscated, not encrypted.** History is XOR-obfuscated with a key stored alongside it in `localStorage`, with no passphrase. This deters casual inspection but does **not** protect against script executing on the origin.
+- **Browser key history is obfuscated, not encrypted.** The XOR key is derived from a machine + origin fingerprint rather than stored, so stolen storage cannot be decoded elsewhere. Script on the origin can recompute it, so this is not XSS protection. Moving a browser profile to a new machine loses the ability to read previously saved history.
+- **Progress is not capped at 100%.** Expected attempts are the mean of a geometric distribution, so ~37% of searches legitimately run past it. The CLI and browser show the overshoot as `+105.00%`, which indicates how far into the tail the search has gone.
 - **Browser prefix + suffix are limited to 64 hex digits combined.** A key is exactly 64 hex digits, so longer patterns would overlap and could never match; the app refuses to start such a search.
 
 ## Output

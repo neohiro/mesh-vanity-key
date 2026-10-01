@@ -51,6 +51,13 @@ jobs:
       - name: Worker throughput benchmark
         run: node tools/bench_worker.mjs /tmp/inline-js/worker.js
 
+      # Proves the reported (publicKey, privateKey) pair really is a usable
+      # Ed25519 keypair, pinned to RFC 8032 test vector 1. Nothing else checks
+      # this: the miner reports the 32-byte seed as the private key, and a
+      # mismatch would produce keys that match the pattern but cannot sign.
+      - name: Keypair validity (sign/verify + RFC 8032 vector)
+        run: node tools/verify_keypair.mjs
+
   smoke:
     runs-on: ubuntu-latest
     steps:

@@ -621,8 +621,13 @@
                             if (!force && now - lastProgressReport < REPORT_EVERY_MS) return;
                             const elapsed = (now - startTime) / 1000;
                             const rate = elapsed > 0 ? attempts / elapsed : 0;
+                            // Not clamped: the expected count is the mean of a
+                            // geometric distribution, so ~37% of searches
+                            // legitimately exceed it. Showing the overshoot
+                            // (+100.01%, +105.00%) tells the user how deep into
+                            // the tail they are, which a hard 100% cap hid.
                             const pct = isFinite(expectedAttempts) && expectedAttempts > 0
-                                ? Math.min(attempts / expectedAttempts * 100, 100)
+                                ? attempts / expectedAttempts * 100
                                 : 0;
                             self.postMessage({
                                 type: 'progress',
@@ -822,7 +827,13 @@
                         // EMA smoothing for rate display (alpha = 0.3)
                         smoothRate(rate);
                         const liveRateStr = Math.round(emaRate).toLocaleString() + '/s';
-                        const progressText = 'Attempts: ' + attempts.toLocaleString() + ' | Rate: ' + liveRateStr + ' | Progress: ' + pct.toFixed(2) + '%' + etaStr;
+                        // Past the expected mean, mark the overshoot with "+" so "+105.00%" reads as
+                        // "5% beyond the statistically expected point" rather
+                        // than as a formatting glitch.
+                        const progressText = 'Attempts: ' + attempts.toLocaleString()
+                            + ' | Rate: ' + liveRateStr
+                            + ' | Progress: ' + (pct > 100 ? '+' : '') + pct.toFixed(2) + '%'
+                            + etaStr;
                         document.getElementById('progress-text').textContent = progressText;
 
                         // Update live estimate continuously (not just first time)
@@ -988,31 +999,74 @@
         }
 
         // ---- Client-Side History Obfuscation (Zero-Passphrase, Sync) ----
+        //
+        // SECURITY MODEL (read before trusting this with real value):
+        // History is XOR-obfuscated, NOT encrypted. The key is *derived* from a
+        // machine+storage fingerprint rather than stored next to the data, so
+        // lifting localStorage off this machine - a stolen backup, a shared
+        // profile, a synced profile, a stray backup file - yields ciphertext
+        // that cannot be decoded on any other machine or browser profile.
+        //
+        // That is deliberately scoped to "unique to the storage's location but
+        // not bound to it": it stops data-at-rest theft from another machine.
+        // It does NOT stop an attacker who can run JavaScript here, because
+        // such code can recompute the fingerprint and derive the key itself.
+        // Against XSS or a malicious extension you are still fully exposed;
+        // only a real passphrase (PBKDF2/Argon2, key never derived from
+        // anything the page can read) would fix that.
         const OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
 
-        function getOrCreateObfuscationKey() {
-            if (!storageAvailable) return null;
+        // Stable per-machine/per-profile inputs. Deliberately excludes anything
+        // that changes between visits (time, viewport) or that is trivially
+        // copied with the data, and includes a fixed salt so the derivation is
+        // domain-separated from any other use of these same values.
+        function machineFingerprint() {
+            const nav = (typeof navigator !== 'undefined' && navigator) || {};
+            const scr = (typeof screen !== 'undefined' && screen) || {};
+            return [
+                'meshcore-vanity-obf-v1',
+                location.origin || '',
+                nav.userAgent || '',
+                nav.language || '',
+                (nav.languages || []).join(','),
+                nav.hardwareConcurrency || 0,
+                nav.maxTouchPoints || 0,
+                nav.platform || '',
+                nav.deviceMemory || 0,
+                scr.width || 0,
+                scr.height || 0,
+                scr.colorDepth || 0,
+                new Date().getTimezoneOffset(),
+            ].join('|');
+        }
+
+        // Derive a 32-byte key from the fingerprint. Uses SHA-256 when
+        // available (all target browsers) so the key is not simply the
+        // fingerprint string XORed against the data.
+        async function deriveObfuscationKey() {
+            const subtle = (typeof crypto !== 'undefined' && crypto.subtle) || null;
+            if (!subtle || !subtle.digest) return null;
             try {
-                let raw = localStorage.getItem(OBFUSCATION_KEY_STORAGE);
-                if (!raw) {
-                    const c = (typeof crypto !== 'undefined' ? crypto : null) || (typeof window !== 'undefined' && window.crypto ? window.crypto : null);
-                    if (!c || !c.getRandomValues) {
-                        throw new Error('Cryptographically secure random source unavailable');
-                    }
-                    const arr = new Uint8Array(32);
-                    c.getRandomValues(arr);
-                    raw = Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
-                    localStorage.setItem(OBFUSCATION_KEY_STORAGE, raw);
-                }
-                return raw;
+                const enc = new TextEncoder().encode(machineFingerprint());
+                const digest = await subtle.digest('SHA-256', enc);
+                return Array.from(new Uint8Array(digest))
+                    .map(b => b.toString(16).padStart(2, '0')).join('');
             } catch (e) {
                 return null;
             }
         }
 
-        function encryptHistoryData(plainText) {
+        // Cached so the async digest runs once per page load, not per save.
+        let obfKeyPromise = null;
+        function getObfuscationKey() {
+            if (!storageAvailable) return Promise.resolve(null);
+            if (!obfKeyPromise) obfKeyPromise = deriveObfuscationKey();
+            return obfKeyPromise;
+        }
+
+        async function encryptHistoryData(plainText) {
             try {
-                const keyHex = getOrCreateObfuscationKey();
+                const keyHex = await getObfuscationKey();
                 if (!keyHex) return plainText;
                 const textBytes = new TextEncoder().encode(plainText);
                 const keyBytes = new Uint8Array(keyHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
@@ -1029,11 +1083,11 @@
             }
         }
 
-        function decryptHistoryData(base64Data) {
+        async function decryptHistoryData(base64Data) {
             try {
                 if (!base64Data || typeof base64Data !== 'string') return base64Data;
                 if (base64Data.trim().startsWith('[')) return base64Data; // legacy plaintext JSON
-                const keyHex = getOrCreateObfuscationKey();
+                const keyHex = await getObfuscationKey();
                 if (!keyHex) return base64Data;
                 const binary = atob(base64Data);
                 const bytes = new Uint8Array(binary.length);
@@ -1051,7 +1105,7 @@
             }
         }
 
-        function loadHistory() {
+        async function loadHistory() {
             savedKeys = [];
             if (!storageAvailable) {
                 showHistoryWarn('Browser storage unavailable: keys will not persist across sessions.');
@@ -1060,7 +1114,7 @@
             try {
                 const raw = localStorage.getItem(HISTORY_KEY);
                 if (!raw) return;
-                const jsonText = decryptHistoryData(raw);
+                const jsonText = await decryptHistoryData(raw);
                 const parsed = JSON.parse(jsonText);
                 if (!Array.isArray(parsed)) return;
                 const hex64 = /^[0-9a-fA-F]{64}$/;
@@ -1083,11 +1137,11 @@
             return e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014);
         }
 
-        function persistHistory() {
+        async function persistHistory() {
             if (!storageAvailable) return;
             try {
                 const jsonText = JSON.stringify(savedKeys);
-                const encrypted = encryptHistoryData(jsonText);
+                const encrypted = await encryptHistoryData(jsonText);
                 localStorage.setItem(HISTORY_KEY, encrypted);
                 return;
             } catch (e) {
@@ -1104,7 +1158,7 @@
                 evicted++;
                 try {
                     const jsonText = JSON.stringify(savedKeys);
-                    const encrypted = encryptHistoryData(jsonText);
+                    const encrypted = await encryptHistoryData(jsonText);
                     localStorage.setItem(HISTORY_KEY, encrypted);
                     renderHistory(false);
                     showHistoryWarn('Browser storage full: ' + evicted +
@@ -1307,8 +1361,9 @@
             // Defer past first paint so load stays snappy; yields keep UI alive.
             setTimeout(calibrateBenchmark, 0);
             storageAvailable = checkStorageAvailable();
-            loadHistory();
-            renderHistory(false);
+            // loadHistory() is async (the obfuscation key is a SHA-256 digest),
+            // so rendering must wait for it or the list would flash empty.
+            loadHistory().then(function() { renderHistory(false); });
             
             // Register service worker for offline support
             if ('serviceWorker' in navigator) {

@@ -151,10 +151,19 @@ const sandbox = {
     Error,
     BigInt,
     Uint8Array,
-    crypto: globalThis.crypto,
-    location: { href: 'https://example.test/index.html' },
+    location: { href: 'https://example.test/index.html', origin: 'https://example.test' },
     URL: URLMock,
     Blob: class { constructor(parts) { this.parts = parts; } },
+    // History obfuscation derives its key from a SHA-256 of a machine
+    // fingerprint, so the harness must provide WebCrypto digests and the
+    // TextEncoder/TextDecoder the page uses.
+    crypto: globalThis.crypto,
+    TextEncoder,
+    TextDecoder,
+    // History obfuscation base64-encodes its payload; these are browser
+    // built-ins that the vm context does not provide.
+    btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
+    atob: (s) => Buffer.from(s, 'base64').toString('binary'),
     Worker: class {
         constructor(url) {
             this.url = url;
@@ -180,7 +189,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w) };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), machineFingerprint, deriveObfuscationKey, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -310,7 +319,16 @@ function seedHistory(entries) {
     storage.set(api.HISTORY_KEY, JSON.stringify(entries));
 }
 
-check('loadHistory: drops malformed entries and non-objects', () => {
+async function asyncCheck(name, fn) {
+    try {
+        await fn();
+        passed++;
+    } catch (e) {
+        failures.push(`${name}: ${e.message}`);
+    }
+}
+
+await asyncCheck('loadHistory: drops malformed entries and non-objects', async () => {
     seedHistory([
         null,
         'a string',
@@ -318,7 +336,7 @@ check('loadHistory: drops malformed entries and non-objects', () => {
         { publicKey: 'short', privateKey: 'also-short' },
         { publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 7, attempts: 5, elapsed: 1 },
     ]);
-    api.loadHistory();
+    await api.loadHistory();
     api.renderHistory(false);
     const rendered = getElementById('results').children;
     eq(rendered.length, 1, 'only the valid entry should render');
@@ -326,12 +344,12 @@ check('loadHistory: drops malformed entries and non-objects', () => {
         'expected the preserved sequence number in the heading');
 });
 
-check('renderHistory: never prints NaN/undefined for missing numbers', () => {
+await asyncCheck('renderHistory: never prints NaN/undefined for missing numbers', async () => {
     seedHistory([
         { publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 'not-a-number', attempts: 'x', elapsed: 'y' },
         { publicKey: 'c'.repeat(64), privateKey: 'd'.repeat(64), attempts: 1234, elapsed: 129.62 },
     ]);
-    api.loadHistory();
+    await api.loadHistory();
     api.renderHistory(false);
     const frames = getElementById('results').children;
     eq(frames.length, 2);
@@ -377,13 +395,13 @@ check('EMA smoothing: starts at first sample, then converges toward it', () => {
 // History is stored oldest-first, so the view must reverse: the newest result
 // appears at the top and the list scroll position stays at the top.
 
-check('renderHistory: newest key first, newest at the top of the list', () => {
+await asyncCheck('renderHistory: newest key first, newest at the top of the list', async () => {
     seedHistory([
         { publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1, attempts: 1, elapsed: 1 },
         { publicKey: 'c'.repeat(64), privateKey: 'd'.repeat(64), n: 2, attempts: 2, elapsed: 2 },
         { publicKey: 'e'.repeat(64), privateKey: 'f'.repeat(64), n: 3, attempts: 3, elapsed: 3 },
     ]);
-    api.loadHistory();
+    await api.loadHistory();
     api.renderHistory(false);
 
     const frames = getElementById('results').children;
@@ -399,12 +417,12 @@ check('renderHistory: newest key first, newest at the top of the list', () => {
         'storage order stays oldest-first:');
 });
 
-check('renderHistory: scrolls to the newest (first) frame, not the oldest', () => {
+await asyncCheck('renderHistory: scrolls to the newest (first) frame, not the oldest', async () => {
     seedHistory([
         { publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1, attempts: 1, elapsed: 1 },
         { publicKey: 'c'.repeat(64), privateKey: 'd'.repeat(64), n: 2, attempts: 2, elapsed: 2 },
     ]);
-    api.loadHistory();
+    await api.loadHistory();
 
     // Track which frame renderHistory asks to scroll into view.
     const list = getElementById('results');
@@ -556,6 +574,97 @@ check('csvCell: quotes and escapes correctly', () => {
     eq(api.csvCell(null), '""');
     eq(api.csvCell(undefined), '""');
     eq(api.csvCell(12), '"12"');
+});
+
+// ---- progress past 100% ----------------------------------------------------
+// The expected attempt count is the mean of a geometric distribution, so ~37%
+// of searches legitimately exceed it. Clamping at 100% hid how far into the
+// tail a long search actually was; the display must overshoot with a "+".
+
+check('formatElapsed: human units for long searches', () => {
+    eq(api.formatElapsed(0), '0.0s');
+    eq(api.formatElapsed(42.34), '42.3s');
+    eq(api.formatElapsed(60), '1m 0s');
+    eq(api.formatElapsed(130), '2m 10s');
+    eq(api.formatElapsed(3729), '1h 2m 9s');
+    eq(api.formatElapsed(-1), 'unknown');
+});
+
+// Defer: workerJsPath is only bound near the end of the file.
+if (process.argv[3]) {
+    check('worker: reports progress beyond 100% instead of clamping', () => {
+        const w = fs.readFileSync(process.argv[3], 'utf8');
+        ok(!/Math\.min\(\s*attempts\s*\/\s*expectedAttempts\s*\*\s*100\s*,\s*100\s*\)/.test(w),
+            'progress must not be clamped to 100 in the worker');
+        ok(/attempts\s*\/\s*expectedAttempts\s*\*\s*100/.test(w),
+            'raw overshoot ratio should still be computed');
+    });
+}
+
+// ---- history obfuscation key derivation ------------------------------------
+// The key must be DERIVED from a machine/storage fingerprint, not read from
+// localStorage. Storing it next to the ciphertext meant that anyone who
+// lifted the stored history also lifted the key, so the "obfuscation" bought
+// nothing against data-at-rest theft.
+
+await asyncCheck('obfuscation key is derived, never read from storage', async () => {
+    const key = await api.deriveObfuscationKey();
+    ok(/^[0-9a-f]{64}$/.test(key), `expected a 32-byte hex key, got: ${key}`);
+    // Critically: the key is not the value a previous version persisted.
+    const stored = localStorageMock.getItem('meshcoreVanityObfKey');
+    ok(stored === null,
+        `obfuscation key must not be stored in localStorage (found: ${stored})`);
+});
+
+await asyncCheck('obfuscation key is stable across calls', async () => {
+    const a = await api.deriveObfuscationKey();
+    const b = await api.deriveObfuscationKey();
+    eq(a, b, 'the same fingerprint must always derive the same key');
+});
+
+await asyncCheck('fingerprint includes the storage origin', async () => {
+    const fp = api.machineFingerprint();
+    ok(fp.includes('https://example.test'),
+        `fingerprint must bind the origin: ${fp}`);
+    ok(fp.includes('meshcore-vanity-obf-v1'),
+        'fingerprint must be domain-separated by a fixed salt');
+});
+
+await asyncCheck('history round-trips through obfuscation', async () => {
+    const plain = JSON.stringify([{ publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1 }]);
+    const encoded = await api.encryptHistoryData(plain);
+    ok(encoded !== plain, 'history must actually be transformed');
+    ok(!encoded.includes('publicKey'), 'plaintext field names must not survive');
+    eq(await api.decryptHistoryData(encoded), plain, 'round-trip must be lossless');
+});
+
+await asyncCheck('a foreign machine cannot decode stolen history', async () => {
+    // Simulate stealing the ciphertext, then reading it on another machine by
+    // forcing a different fingerprint. The stored blob must not decode.
+    const plain = JSON.stringify([{ publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1 }]);
+    const stolen = await api.encryptHistoryData(plain);
+
+    // A different machine -> different fingerprint -> different keystream.
+    // The key is cached per page load, so drop the cache to emulate a reload.
+    const origCores = navigatorMock.hardwareConcurrency;
+    const origLang = navigatorMock.language;
+    navigatorMock.hardwareConcurrency = origCores + 7;
+    navigatorMock.language = 'xx-YY';
+    api.__resetObfKeyCache();
+    const decodedElsewhere = await api.decryptHistoryData(stolen);
+
+    navigatorMock.hardwareConcurrency = origCores;
+    navigatorMock.language = origLang;
+    api.__resetObfKeyCache();
+
+    ok(decodedElsewhere !== plain,
+        'ciphertext from another machine must not decode to the history');
+});
+
+await asyncCheck('legacy plaintext history still loads', async () => {
+    const legacy = JSON.stringify([{ publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1 }]);
+    eq(await api.decryptHistoryData(legacy), legacy,
+        'pre-existing plaintext history must remain readable');
 });
 
 // ---- quota handling --------------------------------------------------------

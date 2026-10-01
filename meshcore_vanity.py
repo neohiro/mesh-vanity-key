@@ -7,7 +7,8 @@ printed to stderr only with the explicit opt-in --output-private flag.
 
 Optimizations:
 - Scalar-walk: increment private scalar directly instead of hashing per attempt
-- Early-exit: reject reserved prefixes (00, FF) for framework devices
+- Warns on reserved prefixes (00, FF) for framework devices (strict with
+  MESHCORE_VANITY_STRICT_RESERVED=1)
 - Parallel workers with optimized work distribution
 """
 
@@ -20,6 +21,7 @@ import os
 import sys
 import threading
 import time
+import warnings
 import multiprocessing as mp
 from dataclasses import dataclass
 from typing import Literal
@@ -31,8 +33,22 @@ Encoding = Literal["base64", "base64url", "base58", "hex", "bech32"]
 BASE58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 
-# Reserved prefixes for MeshCore framework devices (not consumer)
+# Reserved prefixes for MeshCore framework devices (not consumer).
+# These are skipped during mining by default, but may be explicitly requested.
 RESERVED_PREFIXES = {"00", "ff"}
+
+
+def _allow_reserved(prefix: str, encoding: str) -> bool:
+    """True when the caller deliberately asked for a reserved 00/FF prefix.
+
+    Only a hex pattern beginning with a reserved prefix can select one, so any
+    other encoding (or a non-reserved hex prefix) never opts in.
+    """
+    return (
+        encoding == "hex"
+        and len(prefix) >= 2
+        and prefix[:2].lower() in RESERVED_PREFIXES
+    )
 
 _PREFIX_VALID_CHARS = {
     "base64": set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="),
@@ -100,7 +116,12 @@ def _worker_search(args: tuple) -> tuple:
 
             if encoding == "hex":
                 encoded = _hex_encode(raw)
-                if encoded[:2].lower() in RESERVED_PREFIXES:
+                # Skip reserved prefixes unless the user explicitly asked for
+                # one (mirrors the warning-and-continue CLI behaviour).
+                if (
+                    encoded[:2].lower() in RESERVED_PREFIXES
+                    and not _allow_reserved(prefix, encoding)
+                ):
                     attempts += 1
                     counter += total_workers
                     continue
@@ -189,14 +210,22 @@ def _validate_prefix(
             f"{label} contains invalid characters: {sorted(invalid)!r}. "
             f"Allowed for {encoding}: {allowed}.{why}"
         )
-    # Reject reserved prefixes for MeshCore framework devices (00, FF)
+    # Warn (not reject) on reserved prefixes for MeshCore framework devices
+    # (00, FF). They are still mineable - some users deliberately want one -
+    # so the CLI matches the browser's behaviour of allowing it with a clear
+    # warning. Set MESHCORE_VANITY_STRICT_RESERVED=1 to restore hard rejection.
     if encoding == "hex" and len(prefix) >= 2:
         prefix_lower = prefix[:2].lower()
         if prefix_lower in RESERVED_PREFIXES:
-            raise ValueError(
-                f"{label} {prefix!r} is reserved for MeshCore framework devices "
-                f"(00 and FF prefixes are not available for consumer keys)"
+            message = (
+                f"WARNING: {label} {prefix!r} starts with a prefix reserved for "
+                f"MeshCore framework devices (00 and FF are not available for "
+                f"consumer nodes). It will still be mined, but the key may not "
+                f"work with standard MeshCore clients."
             )
+            if os.environ.get("MESHCORE_VANITY_STRICT_RESERVED"):
+                raise ValueError(message)
+            warnings.warn(message, stacklevel=2)
     # A 32-byte key encodes to 44 base64 chars with a single '=' pad at index
     # 43; '=' anywhere else can never match, so fail fast instead of searching
     # forever. (base64url strips padding, so '=' is already rejected above.)
@@ -326,20 +355,44 @@ def _expected_attempts(encoding: Encoding, prefix_len: int, both: bool) -> int:
     return alphabet_size ** prefix_len
 
 
+def format_elapsed(seconds: float) -> str:
+    """Human-readable duration: ``42.3s`` / ``2m 10s`` / ``1h 2m 9s``.
+
+    Long searches routinely run for hours, so a bare seconds figure stops
+    being readable ("127453.4s"). Matches the browser's formatElapsed().
+    """
+    if seconds != seconds or seconds in (float("inf"), float("-inf")) or seconds < 0:
+        return "unknown"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    total = int(round(seconds))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    out = ""
+    if h:
+        out += f"{h}h "
+    if h or m:
+        out += f"{m}m "
+    return (out + f"{s}s").strip()
+
+
 def _format_progress(attempts: int, elapsed: float, expected_attempts: int) -> str:
     """Single stderr progress-line format shared by all search paths.
 
-    Pct is capped at 100: the expectation is the mean of a geometric
-    distribution, so ~37% of searches legitimately run past it.
+    Progress is NOT capped at 100. The expectation is the mean of a geometric
+    distribution, so ~37% of searches legitimately run past it; showing the
+    overshoot as +100.01%, +105.00% conveys how far into the tail the search
+    has reached, which a hard 100% ceiling threw away.
     """
     rate = attempts / elapsed if elapsed > 0 else 0
     pct = (attempts / expected_attempts * 100) if expected_attempts > 0 else 0
-    pct = min(pct, 100.0)
+    # Prefix "+" once past the expected mean so the overshoot is unmistakable.
+    progress = f"+{pct:.2f}%" if pct > 100.0 else f"{pct:.2f}%"
     remaining = (expected_attempts - attempts) / rate if rate > 0 else 0
-    eta = f" eta={remaining:.0f}s" if remaining > 0 else ""
+    eta = f" eta={format_elapsed(remaining)}" if remaining > 0 else ""
     return (
-        f"  attempts={attempts:,} rate={rate:,.0f}/s elapsed={elapsed:.1f}s "
-        f"progress={pct:.2f}%{eta}"
+        f"  attempts={attempts:,} rate={rate:,.0f}/s "
+        f"elapsed={format_elapsed(elapsed)} progress={progress}{eta}"
     )
 
 
@@ -504,8 +557,12 @@ def generate_vanity_key(
 
             if is_hex:
                 encoded = _hex_encode(raw)
-                # Early reject reserved prefixes for framework devices
-                if encoded[:2].lower() in RESERVED_PREFIXES:
+                # Skip reserved prefixes unless the user explicitly asked for
+                # one (mirrors the warning-and-continue CLI behaviour).
+                if (
+                    encoded[:2].lower() in RESERVED_PREFIXES
+                    and not _allow_reserved(prefix, encoding)
+                ):
                     attempts += 1
                     if max_attempts is not None and attempts >= max_attempts:
                         raise RuntimeError(f"exceeded max_attempts={max_attempts}")
@@ -869,8 +926,8 @@ def main() -> int:
     rate = result.attempts / result.elapsed if result.elapsed > 0 else 0
     try:
         print(
-            f"Found in {result.attempts:,} attempts ({result.elapsed:.2f}s, "
-            f"{rate:,.0f} keys/s)",
+            f"Found in {result.attempts:,} attempts "
+            f"({format_elapsed(result.elapsed)}, {rate:,.0f} keys/s)",
             file=sys.stderr,
         )
     except BrokenPipeError:

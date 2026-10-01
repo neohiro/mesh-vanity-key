@@ -21,6 +21,9 @@ from pathlib import Path
 
 TCPServer = socketserver.TCPServer
 
+# Must match HISTORY_KEY in index.html.
+HISTORY_KEY = "meshcoreVanityKeys"
+
 
 def serve(repo_root: Path, port: int) -> TCPServer:
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(repo_root))
@@ -95,16 +98,57 @@ def main() -> int:
                 )
                 assert "Clear All Keys" in labels, f"unexpected button labels: {labels!r}"
 
+                # A pattern longer than a 64-hex-digit key can never match, so
+                # it must be refused rather than burning every core forever.
+                page.fill("#prefix", "ab" * 40)
+                page.fill("#suffix", "cd" * 40)
+                notice = page.text_content("#reserved-notice") or ""
+                assert "Impossible pattern" in notice, (
+                    f"over-length pattern must be flagged: {notice!r}"
+                )
+                page.click("#start-btn")
+                page.wait_for_timeout(500)
+                assert "Impossible pattern" in (page.text_content("#reserved-notice") or ""), (
+                    "start must not proceed for an impossible pattern"
+                )
+                assert "Key 2 Found!" not in (page.text_content("#results") or ""), (
+                    "an impossible search must not produce a result"
+                )
+                # Dismiss the refusal dialog so the reload below is not blocked.
+                page.fill("#prefix", "a")
+                page.fill("#suffix", "")
+
                 # Singular/plural worker count in the estimate.
                 page.fill("#prefix", "ab")
                 est = page.text_content("#estimate") or ""
                 assert re.search(r"\d+ workers?,", est), f"malformed worker label: {est!r}"
 
-                # Reload: history must survive via localStorage.
+                # Reload: history must survive via localStorage. loadHistory() is
+                # now async (it derives the obfuscation key with SHA-256), so
+                # this also proves that path resolves in a real browser.
                 page.reload(wait_until="load")
                 page.wait_for_selector(".result-frame", timeout=30_000)
                 heading = page.text_content(".result-frame h2")
                 assert heading and "Key 1 Found!" in heading, "history lost across reload"
+
+                # The derived obfuscation key must never be persisted next to
+                # the ciphertext: that would hand an attacker who lifts
+                # localStorage everything needed to decode it.
+                obf_key = page.evaluate(
+                    "() => localStorage.getItem('meshcoreVanityObfKey')"
+                )
+                assert obf_key is None, (
+                    f"obfuscation key must not be stored in localStorage: {obf_key!r}"
+                )
+
+                # The stored history must be ciphertext, not readable JSON.
+                stored = page.evaluate(
+                    f"() => localStorage.getItem('{HISTORY_KEY}')"
+                )
+                assert stored and not stored.lstrip().startswith("["), (
+                    f"history must be obfuscated at rest: {stored[:80]!r}"
+                )
+                assert "publicKey" not in stored, "history plaintext leaked to storage"
 
                 worker_errors = [e for e in errors if "Worker" in e]
                 assert not worker_errors, f"worker errors: {worker_errors!r}"

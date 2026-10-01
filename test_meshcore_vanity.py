@@ -19,6 +19,8 @@ from meshcore_vanity import (
     _expected_attempts,
     _format_progress,
     _human_duration,
+    _allow_reserved,
+    format_elapsed,
     _validate_prefix,
     _validate_seed,
     _validate_hrp,
@@ -319,13 +321,34 @@ def test_generate_vanity_key_parallel_max_attempts():
         generate_vanity_key("deadbeefcafe", encoding="hex", max_attempts=20, workers=2)
 
 
-def test_validate_prefix_reserved_hex():
-    # 00/FF prefixes are reserved for MeshCore framework devices.
+def test_validate_prefix_reserved_hex_warns_but_allows():
+    # 00/FF prefixes are reserved for MeshCore framework devices. They are
+    # still mineable, so validation warns rather than rejecting (this matches
+    # the browser's behaviour and the "allow" request).
+    with pytest.warns(UserWarning, match="reserved"):
+        _validate_prefix("00ab", "hex")
+    with pytest.warns(UserWarning, match="reserved"):
+        _validate_prefix("FF12", "hex")
+    _validate_prefix("ab", "hex")  # non-reserved passes with no warning
+
+
+def test_validate_prefix_reserved_hex_strict_env_rejects(monkeypatch):
+    # Opt-in strict mode restores the hard rejection for CI/scripted use.
+    monkeypatch.setenv("MESHCORE_VANITY_STRICT_RESERVED", "1")
     with pytest.raises(ValueError, match="reserved"):
         _validate_prefix("00ab", "hex")
-    with pytest.raises(ValueError, match="reserved"):
-        _validate_prefix("FF12", "hex")
-    _validate_prefix("ab", "hex")  # non-reserved passes
+
+
+def test_allow_reserved_only_for_explicit_hex_request():
+    # A reserved hex prefix opts in; anything else must not.
+    assert _allow_reserved("00ab", "hex")
+    assert _allow_reserved("ff12", "hex")
+    assert not _allow_reserved("ab", "hex")
+    assert not _allow_reserved("0", "hex")
+    assert not _allow_reserved("", "hex")
+    # Non-hex encodings can never target a 00/FF hex prefix.
+    assert not _allow_reserved("00ab", "base64")
+    assert not _allow_reserved("00ab", "bech32")
 
 
 def test_validate_prefix_base64_padding():
@@ -359,10 +382,35 @@ def test_format_progress():
     assert "rate=500/s" in s
     assert "elapsed=2.0s" in s
     assert "progress=10.00%" in s
-    # Pct caps at 100: overrunning the mean is statistically normal.
-    assert "progress=100.00%" in _format_progress(200000, 1.0, 65536)
+    # Past the expected mean the overshoot is shown with a "+" prefix rather
+    # than being clamped: ~37% of searches legitimately run past 100%.
+    over = _format_progress(200000, 1.0, 65536)
+    assert "progress=+305.18%" in over
     # Zero elapsed never divides by zero.
     assert "rate=0/s" in _format_progress(0, 0.0, 100)
+
+
+def test_format_elapsed_units():
+    assert format_elapsed(0.0) == "0.0s"
+    assert format_elapsed(42.34) == "42.3s"
+    assert format_elapsed(59.99) == "60.0s"
+    assert format_elapsed(60.0) == "1m 0s"
+    assert format_elapsed(130.0) == "2m 10s"
+    assert format_elapsed(3600.0) == "1h 0m 0s"
+    assert format_elapsed(3729.0) == "1h 2m 9s"
+    assert format_elapsed(127453.4) == "35h 24m 13s"
+    # Long searches must never render as raw seconds.
+    assert "s" in format_elapsed(127453.4) and "h" in format_elapsed(127453.4)
+    # Invalid input degrades gracefully.
+    assert format_elapsed(-1) == "unknown"
+    assert format_elapsed(float("nan")) == "unknown"
+    assert format_elapsed(float("inf")) == "unknown"
+
+
+def test_progress_elapsed_uses_human_units():
+    s = _format_progress(1000, 3729.0, 1000000)
+    assert "elapsed=1h 2m 9s" in s
+    assert "3729.0s" not in s
 
 
 def test_parallel_live_progress_reports(capfd):
