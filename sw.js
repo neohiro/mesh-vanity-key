@@ -108,10 +108,14 @@ self.addEventListener('fetch', (event) => {
             return response;
           })
           .catch((err) => {
-            // Offline: fall back to whatever we cached, else let the browser
-            // surface the network failure.
+            // Offline: fall back to whatever we cached, else for navigation requests
+            // fall back to index.html so offline SPAs load successfully.
             console.warn('[SW] network failed for', request.url, err);
-            return cached || Response.error();
+            if (cached) return cached;
+            if (request.mode === 'navigate') {
+              return cache.match('/').then((root) => root || cache.match('/index.html'));
+            }
+            return Response.error();
           });
 
         if (cached) {

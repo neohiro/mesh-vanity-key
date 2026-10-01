@@ -764,6 +764,13 @@ def test_service_worker_ignores_non_get_requests():
     assert "request.method !== 'GET'" in code
 
 
+def test_service_worker_has_offline_navigation_fallback():
+    sw = (_REPO_ROOT / "sw.js").read_text(encoding="utf-8")
+    code = re.sub(r"//[^\n]*", "", sw)
+    assert "request.mode === 'navigate'" in code
+    assert "index.html" in code
+
+
 def test_service_worker_precache_tolerates_partial_failure():
     """cache.addAll() is all-or-nothing; individual adds degrade gracefully."""
     sw = (_REPO_ROOT / "sw.js").read_text(encoding="utf-8")
