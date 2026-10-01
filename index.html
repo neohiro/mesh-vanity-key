@@ -321,6 +321,10 @@
         // written as 64 hex digits, so every position is a hex digit.
         const HEX_DIGITS = '0123456789abcdefABCDEF';
 
+        // An Ed25519 public key is 32 bytes = 64 hex digits. A prefix and suffix
+        // pattern together cannot exceed this, or they must overlap.
+        const PUBLIC_KEY_HEX_LENGTH = 64;
+
         function escapeHtml(s) {
             return String(s).replace(/[&<>"']/g, (c) => ({
                 '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -373,6 +377,19 @@
                 alert('Please enter at least a prefix or suffix.');
                 return false;
             }
+            // A key is 64 hex chars. If the two patterns together exceed that,
+            // they must overlap, and the overlap usually contradicts itself -
+            // the search can then never succeed and would spin on every core
+            // forever. The CLI already rejects this (its combined pattern is
+            // capped at 64); enforce the same rule here so both entry points
+            // agree.
+            const total = prefixInput.value.length + suffixInput.value.length;
+            if (total > PUBLIC_KEY_HEX_LENGTH) {
+                alert('Prefix and suffix together are ' + total + ' characters, but a '
+                    + 'MeshCore public key is only ' + PUBLIC_KEY_HEX_LENGTH
+                    + ' hex digits. Patterns this long overlap and can never match.');
+                return false;
+            }
             return true;
         }
 
@@ -410,6 +427,18 @@
 
             if (checkReservedPrefix(prefixInput)) {
                 noticeEl.innerHTML = '<strong>Notice:</strong> Prefixes starting with <code>00</code> or <code>FF</code> are reserved for MeshCore framework devices (not consumer nodes). You can still mine for them, but they may not work with standard MeshCore clients.';
+                noticeEl.style.display = 'block';
+                return;
+            }
+
+            // Warn while typing when the two patterns are longer than a key.
+            const totalLen = prefixInput.value.length + suffixInput.value.length;
+            if (totalLen > PUBLIC_KEY_HEX_LENGTH) {
+                noticeEl.innerHTML = '<strong>Impossible pattern:</strong> prefix + suffix is '
+                    + totalLen + ' hex digits, but a MeshCore public key is only '
+                    + PUBLIC_KEY_HEX_LENGTH
+                    + ' hex digits, so the two must overlap and can never both match. '
+                    + 'Shorten the patterns to ' + PUBLIC_KEY_HEX_LENGTH + ' digits or fewer in total.';
                 noticeEl.style.display = 'block';
                 return;
             }

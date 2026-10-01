@@ -241,7 +241,8 @@ Hex prefixes `00` and `ff` are reserved for MeshCore framework devices and are r
 - **Browser app is hex-only.** It has no bech32/base58/base64 output; use the CLI for those encodings.
 - **Browser app must be served over HTTP(S).** Blob Web Workers are blocked on `file://` URLs.
 - **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency - 1` (capped at 16), which can over- or under-estimate on constrained or shared hardware.
-- **Browser key history is plaintext.** `localStorage` is readable by any script on the origin and is not encrypted.
+- **Browser key history is obfuscated, not encrypted.** History is XOR-obfuscated with a key stored alongside it in `localStorage`, with no passphrase. This deters casual inspection but does **not** protect against script executing on the origin.
+- **Browser prefix + suffix are limited to 64 hex digits combined.** A key is exactly 64 hex digits, so longer patterns would overlap and could never match; the app refuses to start such a search.
 
 ## Output
 

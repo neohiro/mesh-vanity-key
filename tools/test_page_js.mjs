@@ -130,6 +130,8 @@ const sandbox = {
     navigator: navigatorMock,
     window: windowMock,
     console,
+    // Validation failures report via alert(); capture instead of blocking.
+    alert(msg) { alerts.push(String(msg)); },
     localStorage: localStorageMock,
     performance,
     setTimeout,
@@ -492,6 +494,58 @@ check('updatePatternNotice: hidden when the pattern is fine', () => {
     getElementById('suffix').value = 'cd';
     api.updatePatternNotice();
     eq(notice.style.display, 'none');
+});
+
+// ---- impossible patterns ---------------------------------------------------
+// A key is 64 hex digits. Prefix + suffix longer than that must overlap and
+// can never both match, so the search would spin on every core forever.
+// validateForm() must refuse to start one.
+
+check('updatePatternNotice: flags a pattern longer than a key', () => {
+    const notice = getElementById('reserved-notice');
+    getElementById('prefix').value = 'ab'.repeat(40);
+    getElementById('suffix').value = 'cd'.repeat(40);
+    api.updatePatternNotice();
+
+    eq(notice.style.display, 'block', 'impossible pattern is shown');
+    const html = notice.innerHTML;
+    ok(html.includes('Impossible pattern'), `must name the problem: ${html}`);
+    ok(html.includes('160'), `must give the total: ${html}`);
+    ok(html.includes('64'), 'must state the real key length');
+});
+
+check('updatePatternNotice: a 64-digit prefix alone is still allowed', () => {
+    const notice = getElementById('reserved-notice');
+    getElementById('prefix').value = 'ab'.repeat(32);
+    getElementById('suffix').value = '';
+    api.updatePatternNotice();
+    eq(notice.style.display, 'none', 'exactly 64 digits is satisfiable');
+});
+
+check('validateForm: blocks prefix+suffix longer than 64 hex digits', () => {
+    getElementById('prefix').value = 'ab'.repeat(40);
+    getElementById('suffix').value = 'cd'.repeat(40);
+    eq(api.validateForm(), false, 'an impossible search must not start');
+});
+
+check('validateForm: allows a satisfiable prefix+suffix pair', () => {
+    // 32 + 32 = 64 hex digits: exactly one full key, so it is satisfiable.
+    getElementById('prefix').value = 'ab'.repeat(16);
+    getElementById('suffix').value = 'cd'.repeat(16);
+    eq(api.validateForm(), true, '32+32 = 64 digits is fine');
+});
+
+check('validateForm: still requires some input and rejects bad hex', () => {
+    getElementById('prefix').value = '';
+    getElementById('suffix').value = '';
+    eq(api.validateForm(), false, 'empty form rejected');
+
+    getElementById('prefix').value = 'zz';
+    getElementById('suffix').value = '';
+    eq(api.validateForm(), false, 'non-hex rejected');
+
+    getElementById('prefix').value = '';
+    getElementById('suffix').value = '';
 });
 
 // ---- csv escaping ----------------------------------------------------------
