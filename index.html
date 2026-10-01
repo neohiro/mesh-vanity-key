@@ -515,24 +515,29 @@
                         }
 
                         // Scalar-walk: initialize random scalar, then increment for each attempt
-                        let seed = new Uint8Array(32);
-                        if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-                            crypto.getRandomValues(seed);
-                        } else {
-                            for (let i = 0; i < 32; i++) {
-                                seed[i] = Math.floor(Math.random() * 256);
-                            }
+                        const c = (typeof crypto !== 'undefined' ? crypto : null) || (typeof window !== 'undefined' && window.crypto ? window.crypto : null);
+                        if (!c || !c.getRandomValues) {
+                            throw new Error('Cryptographically secure random source unavailable');
                         }
+                        const seed = new Uint8Array(32);
+                        c.getRandomValues(seed);
                         let scalar = BigInt('0x' + Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join(''));
+
+                        // Helper: convert BigInt to 32-byte Uint8Array (big-endian)
+                        function bigIntToBytes(n) {
+                            const bytes = new Uint8Array(32);
+                            for (let i = 31; i >= 0; i--) {
+                                bytes[i] = Number(n & 0xFFn);
+                                n >>= 8n;
+                            }
+                            return bytes;
+                        }
 
                         while (true) {
                             for (let b = 0; b < BATCH_SIZE; b++) {
                                 // Scalar-walk: increment the scalar for each attempt
+                                const seed = bigIntToBytes(scalar);
                                 const seedHex = scalar.toString(16).padStart(64, '0');
-                                const seed = new Uint8Array(32);
-                                for (let i = 0; i < 32; i++) {
-                                    seed[i] = parseInt(seedHex.substring(i * 2, i * 2 + 2), 16);
-                                }
                                 // Derive keypair from seed
                                 const keyPair = sodium.crypto_sign_seed_keypair(seed);
                                 const publicKeyHex = Array.from(keyPair.publicKey).map(b => b.toString(16).padStart(2, '0')).join('');

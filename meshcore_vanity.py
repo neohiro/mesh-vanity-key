@@ -68,7 +68,7 @@ def _init_worker_counter(counter) -> None:
 def _worker_search(args: tuple) -> tuple:
     """Worker function for parallel search."""
     (prefix, encoding, case_insensitive, max_attempts, seed, prefix_len,
-     prefix_cmp, check_slice, both, hrp, start_offset, worker_id,
+     prefix_cmp, check_slice, both, hrp, start_offset, _worker_id,
      total_workers, is_hex, hrp_expanded) = args
 
     # NOTE: base64/hashlib/nacl are already imported at module level; under
@@ -506,7 +506,8 @@ def generate_vanity_key(
                     suff_match = encoded_suffix == prefix_cmp
                 match = pref_match and suff_match
             else:
-                encoded_part = encoded[check_slice]
+                # check_slice is always a slice here (both=False branch)
+                encoded_part = encoded[check_slice]  # type: ignore[index]
                 if case_insensitive:
                     chk = encoded_part.lower()
                 else:

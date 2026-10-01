@@ -21,6 +21,16 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+# Pillow >= 9.1.0 uses Image.Resampling.LANCZOS; older uses Image.LANCZOS
+try:
+    from PIL.Image import Resampling
+    LANCZOS = Resampling.LANCZOS
+except ImportError:
+    LANCZOS = getattr(Image, 'LANCZOS')
+    if LANCZOS is None:
+        from PIL.Image import Resampling
+        LANCZOS = Resampling.LANCZOS
+
 BG = (13, 17, 23, 255)  # #0d1117
 FG = (88, 166, 255, 255)  # #58a6ff
 
@@ -81,7 +91,7 @@ def draw_icon(size: int) -> Image.Image:
         fill=BG,
     )
     _glyph(img)
-    return img.resize((size, size), Image.LANCZOS)
+    return img.resize((size, size), LANCZOS)
 
 
 def draw_maskable(size: int) -> Image.Image:
@@ -95,9 +105,9 @@ def draw_maskable(size: int) -> Image.Image:
     glyph_size = int(scale * 0.62)
     glyph = Image.new("RGBA", (glyph_size, glyph_size), (0, 0, 0, 0))
     _glyph(glyph)
-    glyph = glyph.resize((scale, scale), Image.LANCZOS)
+    glyph = glyph.resize((scale, scale), LANCZOS)
     img.alpha_composite(glyph, ((scale - glyph_size) // 2, (scale - glyph_size) // 2))
-    return img.resize((size, size), Image.LANCZOS)
+    return img.resize((size, size), LANCZOS)
 
 
 def main() -> int:

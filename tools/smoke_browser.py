@@ -53,7 +53,10 @@ def main() -> int:
                 page.on("pageerror", lambda e: errors.append(str(e)))
                 # Worker failures surface via alert(); dismiss so the test
                 # fails fast with the message instead of hanging on a modal.
-                page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
+                def handle_dialog(d) -> None:
+                    dialogs.append(d.message)
+                    d.dismiss()
+                page.on("dialog", handle_dialog)
                 page.goto(url, wait_until="load")
 
                 # 1-char hex pattern: ~16 expected attempts, instant even headless.
