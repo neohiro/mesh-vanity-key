@@ -533,20 +533,6 @@ function startMining() {
                                 // Scalar-walk: increment by 1 for next attempt
                                 scalar = (scalar + 1n) & ((1n << 256n) - 1n);
                             }
-
-                                if (match) {
-                                    self.postMessage({
-                                        type: 'found',
-                                        publicKey: publicKeyHex,
-                                        privateKey: privateKeyHex,
-                                        attempts: attempts,
-                                        elapsed: (Date.now() - startTime) / 1000
-                                    });
-                                    return;
-                                }
-
-                                attempts++;
-                            }
                             reportProgress(false);
                             // Real yield: lets postMessage flush and keeps UI/Stop responsive.
                             // (A bare setTimeout() without await never yields inside while(true).)
