@@ -57,7 +57,6 @@ def main() -> int:
 
                 # 1-char hex pattern: ~16 expected attempts, instant even headless.
                 page.fill("#prefix", "a")
-                page.fill("#workers", "1")
                 page.click("#start-btn")
 
                 page.wait_for_selector(".result-frame", timeout=120_000)

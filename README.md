@@ -155,7 +155,7 @@ With `--workers N`, the tool spawns N processes, each searching a disjoint subse
 
 ### Reserved Prefixes
 
-Hex prefixes `00` and `FF` are reserved for MeshCore framework devices and are rejected by default.
+Hex prefixes `00` and `ff` are reserved for MeshCore framework devices and are rejected by default.
 
 ## Limitations
 
