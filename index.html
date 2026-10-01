@@ -798,12 +798,12 @@
             try {
                 let raw = localStorage.getItem(OBFUSCATION_KEY_STORAGE);
                 if (!raw) {
-                    const arr = new Uint8Array(32);
-                    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-                        crypto.getRandomValues(arr);
-                    } else {
-                        for (let i = 0; i < 32; i++) arr[i] = Math.floor(Math.random() * 256);
+                    const c = (typeof crypto !== 'undefined' ? crypto : null) || (typeof window !== 'undefined' && window.crypto ? window.crypto : null);
+                    if (!c || !c.getRandomValues) {
+                        throw new Error('Cryptographically secure random source unavailable');
                     }
+                    const arr = new Uint8Array(32);
+                    c.getRandomValues(arr);
                     raw = Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
                     localStorage.setItem(OBFUSCATION_KEY_STORAGE, raw);
                 }
