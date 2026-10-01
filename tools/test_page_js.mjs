@@ -108,6 +108,23 @@ const localStorageMock = {
     _throw: false,
 };
 
+// Worker lifecycle mock. Mining workers run an unbounded `while (true)`, so
+// the only correct way to stop one is terminate(); these counters let the tests
+// assert that every worker is actually torn down on stop/found/error.
+const workerStats = { created: 0, terminated: 0, live: 0, revokedUrls: 0 };
+
+const urlStats = { objectURLs: new Set() };
+const URLMock = {
+    createObjectURL(blob) {
+        const u = `blob:mock/${urlStats.objectURLs.size}`;
+        urlStats.objectURLs.add(u);
+        return u;
+    },
+    revokeObjectURL(u) {
+        if (urlStats.objectURLs.delete(u)) workerStats.revokedUrls++;
+    },
+};
+
 const sandbox = {
     document: documentMock,
     navigator: navigatorMock,
@@ -134,9 +151,24 @@ const sandbox = {
     Uint8Array,
     crypto: globalThis.crypto,
     location: { href: 'https://example.test/index.html' },
-    URL,
-    Blob: class {},
-    Worker: class { constructor() { throw new Error('not used in these tests'); } },
+    URL: URLMock,
+    Blob: class { constructor(parts) { this.parts = parts; } },
+    Worker: class {
+        constructor(url) {
+            this.url = url;
+            this.terminated = false;
+            workerStats.created++;
+            workerStats.live++;
+        }
+        postMessage() {}
+        terminate() {
+            if (!this.terminated) {
+                this.terminated = true;
+                workerStats.terminated++;
+                workerStats.live--;
+            }
+        }
+    },
 };
 sandbox.globalThis = sandbox;
 sandbox.self = sandbox;
@@ -146,7 +178,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w) };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -632,6 +664,51 @@ if (workerJsPath) {
         }
     })();
 }
+
+// ---- worker lifecycle -------------------------------------------------------
+// Regression for a CPU leak that shipped once: workers were returned to a reuse
+// pool on stop instead of being terminated. Because a mining worker loops on
+// `while (true)`, that meant "Stop" left every worker spinning at 100% CPU.
+// Workers must be terminated, and their blob URLs revoked, on every exit path.
+
+// Mirror what startMining() does: create the worker, then track it in the
+// module-level `workers` array that terminateAllWorkers() drains.
+function spawnTrackedWorker() {
+    const w = api.createMiningWorker('self.onmessage=null;');
+    api.__trackWorker(w);
+    return w;
+}
+
+check('createMiningWorker registers its blob URL for cleanup', () => {
+    const before = urlStats.objectURLs.size;
+    spawnTrackedWorker();
+    ok(api.liveWorkerCount() === 1, 'created worker must be tracked as live');
+    eq(urlStats.objectURLs.size, before + 1, 'blob URL should be tracked:');
+    api.terminateAllWorkers();
+});
+
+check('terminateAllWorkers terminates every live worker (no CPU leak)', () => {
+    spawnTrackedWorker();
+    spawnTrackedWorker();
+    spawnTrackedWorker();
+    eq(api.liveWorkerCount(), 3, 'three workers should be live:');
+    ok(workerStats.live >= 3, `expected >=3 live workers, saw ${workerStats.live}`);
+
+    api.terminateAllWorkers();
+
+    eq(api.liveWorkerCount(), 0, 'worker list should be empty:');
+    eq(workerStats.live, 0, `no worker may survive teardown (live=${workerStats.live}):`);
+    eq(api.initTimeoutCount(), 0, 'init timeouts must be cleared:');
+    eq(urlStats.objectURLs.size, 0,
+        `every blob URL must be revoked (leaked ${urlStats.objectURLs.size}):`);
+});
+
+check('terminateAllWorkers is idempotent', () => {
+    api.terminateAllWorkers();
+    api.terminateAllWorkers();
+    eq(workerStats.live, 0, 'repeat teardown must not resurrect workers:');
+    eq(api.liveWorkerCount(), 0, 'worker list stays empty:');
+});
 
 // ---- report ----------------------------------------------------------------
 

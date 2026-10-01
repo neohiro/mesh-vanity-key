@@ -205,36 +205,39 @@
         let initTimeouts = [];
         let blobUrls = [];
 
-        // ---- Worker Warmup Pool ----
-        // Pre-create workers to avoid creation latency on each search.
-        // Workers are returned to the pool after each search instead of being terminated.
-        let workerPool = [];
-        let poolInUse = 0;
-
-        function createPooledWorker() {
-            const blob = new Blob([workerCode], { type: 'application/javascript' });
+        // A mining worker runs an unconditional `while (true)` until it finds a
+        // match, so it has no cooperative-shutdown path: the only way to stop one
+        // is to terminate it. Worker pooling was previously attempted here and
+        // removed, because it was unsafe in three ways:
+        //   1. The pool builder was declared at module scope but referenced
+        //      `workerCode`, a const local to startMining() -> hard
+        //      ReferenceError, so no pooled worker could ever run.
+        //   2. Stopping a search returned live workers to the pool instead of
+        //      terminating them, so they kept burning CPU after "Stop".
+        //   3. Safe reuse needs a cancel/reset protocol inside the hot loop.
+        // Worker boot costs tens of milliseconds, once per search, which is
+        // negligible next to the minutes-to-hours a search actually runs.
+        function createMiningWorker(source) {
+            const blob = new Blob([source], { type: 'application/javascript' });
             const url = URL.createObjectURL(blob);
-            const w = new Worker(url);
-            // When worker finishes (found/error), return to pool instead of terminating.
-            w.onmessage = function(e) {
-                if (e.data.type === 'ready') {
-                    // Send work immediately; worker will loop and await further messages.
-                    w.postMessage({ prefix, suffix, matchPrefix, matchSuffix });
-                } else if (e.data.type === 'found' || e.data.type === 'error') {
-                    // Return worker to pool; don't terminate — reuse next search.
-                    poolInUse--;
-                    URL.revokeObjectURL(w.url);
-                    workers = workers.filter((x) => x !== w);
-                    workerPool.push(w);
+            blobUrls.push(url);
+            return new Worker(url);
+        }
+
+        // Terminate every live worker and release its blob URL. Used on stop,
+        // on found/error, on failure paths, and on unload.
+        function terminateAllWorkers() {
+            for (const w of workers) {
+                if (w) {
+                    try { w.terminate(); } catch (e) { /* ignore */ }
                 }
-            };
-            w.onerror = function() {
-                poolInUse--;
-                URL.revokeObjectURL(w.url);
-                workers = workers.filter((x) => x !== w);
-                workerPool.push(w);
-            };
-            return w;
+            }
+            workers = [];
+            revokeBlobUrls();
+            for (const t of initTimeouts) {
+                clearTimeout(t);
+            }
+            initTimeouts.length = 0;
         }
 
         function revokeBlobUrls() {
@@ -736,24 +739,13 @@
             workers = [];
             initTimeouts = [];
 
-            // Pre-warm pool: half the configured count, minimum 1.
-            const poolSize = Math.max(1, Math.floor(numWorkers / 2));
-            for (let i = 0; i < poolSize; i++) {
-                const w = createPooledWorker();
-                workerPool.push(w);
-            }
-
-            // Create any remaining workers beyond the pool.
-            for (let i = workerPool.length; i < numWorkers; i++) {
-                const blob = new Blob([workerCode], { type: 'application/javascript' });
-                const url = URL.createObjectURL(blob);
-                blobUrls.push(url);
-                const w = new Worker(url);
+            for (let i = 0; i < numWorkers; i++) {
+                const w = createMiningWorker(workerCode);
                 workers.push(w);
 
                 const initTimeout = setTimeout(() => {
                     if (mining && workers.includes(w)) {
-                        stopAllWorkers();
+                        terminateAllWorkers();
                         mining = false;
                         setFormDisabled(false);
                         document.getElementById('start-btn').disabled = false;
@@ -772,7 +764,7 @@
                     document.getElementById('stop-btn').disabled = true;
                     document.getElementById('progress').classList.add('hidden');
                     alert('Worker ' + i + ' error: ' + e.message);
-                    stopAllWorkers();
+                    terminateAllWorkers();
                 };
 
                 w.onmessage = function(e) {
@@ -832,7 +824,7 @@
                             pattern: currentPatternDesc(),
                             minedAt: new Date().toISOString()
                         });
-                        stopAllWorkers();
+                        terminateAllWorkers();
                     } else if (e.data.type === 'error') {
                         clearTimeout(initTimeouts[i]);
                         mining = false;
@@ -841,25 +833,9 @@
                         document.getElementById('stop-btn').disabled = true;
                         document.getElementById('progress').classList.add('hidden');
                         alert(e.data.message);
-                        stopAllWorkers();
+                        terminateAllWorkers();
                     }
                 };
-            }
-
-            function stopAllWorkers() {
-                for (const w of workers) {
-                    if (w) {
-                        poolInUse--;
-                        URL.revokeObjectURL(w.url);
-                        workerPool.push(w);
-                    }
-                }
-                workers = [];
-                revokeBlobUrls();
-                for (const t of initTimeouts) {
-                    clearTimeout(t);
-                }
-                initTimeouts.length = 0;
             }
 
             mining = true;
@@ -890,19 +866,7 @@
         }
 
         function stopMining() {
-            for (const t of initTimeouts) {
-                clearTimeout(t);
-            }
-            initTimeouts.length = 0;
-            for (const w of workers) {
-                if (w) {
-                    poolInUse--;
-                    URL.revokeObjectURL(w.url);
-                    workerPool.push(w);
-                }
-            }
-            workers = [];
-            revokeBlobUrls();
+            terminateAllWorkers();
             starting = false;
             mining = false;
             setFormDisabled(false);
@@ -1330,13 +1294,9 @@
         });
 
         window.addEventListener('beforeunload', function() {
-            for (const t of initTimeouts) {
-                clearTimeout(t);
-            }
-            for (const w of workers) {
-                if (w) w.terminate();
-            }
-            revokeBlobUrls();
+            // Terminate workers on unload so no orphaned miner keeps a core busy
+            // while the tab is being torn down.
+            terminateAllWorkers();
         });
     </script>
 </body>
