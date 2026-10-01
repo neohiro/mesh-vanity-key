@@ -158,8 +158,10 @@
         .result-frame button { margin-top: 16px; }
         .result-frame .copy-btn { margin-top: 0; }
         .frame-actions { display: flex; gap: 12px; }
-        .remove-btn { padding: 10px 24px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+        .remove-btn { padding: 10px 24px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; box-sizing: border-box; line-height: normal; display: inline-flex; align-items: center; justify-content: center; }
         .remove-btn:hover { background: #30363d; }
+        .clear-all-btn { padding: 10px 24px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; background: #2d1619; color: #f85149; border: 1px solid #67060c; box-sizing: border-box; line-height: normal; display: inline-flex; align-items: center; justify-content: center; }
+        .clear-all-btn:hover { background: #3b1c21; border-color: #da3633; }
         .history-bar { margin-top: 16px; display: flex; gap: 12px; align-items: center; }
         .history-note { font-size: 12px; color: #8b949e; }
         .hidden { display: none; }
@@ -214,7 +216,7 @@
         <div id="history-bar" class="history-bar hidden">
             <button class="remove-btn" onclick="exportHistory('json')">Export JSON</button>
             <button class="remove-btn" onclick="exportHistory('csv')">Export CSV</button>
-            <button class="remove-btn" onclick="clearHistory()">Clear saved keys</button>
+            <button class="clear-all-btn" onclick="clearHistory()">Clear saved keys</button>
             <span class="history-note">Keys are stored only in this browser (localStorage) and survive refresh.</span>
             <span class="history-note" id="history-warn" style="display: none; color: #f0c040;"></span>
         </div>
