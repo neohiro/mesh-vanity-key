@@ -294,18 +294,20 @@
             const rateLabel = calibratedRatePerWorker
                 ? 'calibrated'
                 : 'estimated';
-            const estSeconds = expected / totalRate;
             let timeStr;
-            if (!isFinite(estSeconds)) {
-                timeStr = 'very long (heat death of the universe first)';
-            } else if (estSeconds < 60) {
-                timeStr = estSeconds.toFixed(0) + 's';
-            } else if (estSeconds < 3600) {
-                timeStr = (estSeconds / 60).toFixed(1) + 'm';
-            } else if (estSeconds < 86400) {
-                timeStr = (estSeconds / 3600).toFixed(1) + 'h';
+            if (totalRate <= 0 || !isFinite(expected / totalRate)) {
+                timeStr = 'unknown (calibrating...)';
             } else {
-                timeStr = (estSeconds / 86400).toFixed(1) + 'd';
+                const estSeconds = expected / totalRate;
+                if (estSeconds < 60) {
+                    timeStr = estSeconds.toFixed(0) + 's';
+                } else if (estSeconds < 3600) {
+                    timeStr = (estSeconds / 60).toFixed(1) + 'm';
+                } else if (estSeconds < 86400) {
+                    timeStr = (estSeconds / 3600).toFixed(1) + 'h';
+                } else {
+                    timeStr = (estSeconds / 86400).toFixed(1) + 'd';
+                }
             }
             estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (' + numWorkers + ' workers, ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel + ')';
         }
@@ -699,11 +701,12 @@ function startMining() {
                 if (!Array.isArray(parsed)) return;
                 const hex64 = /^[0-9a-fA-F]{64}$/;
                 savedKeys = parsed.filter(e => e
+                    && typeof e === 'object'
                     && hex64.test(e.publicKey || '')
                     && hex64.test(e.privateKey || '')).slice(0, MAX_SAVED_KEYS);
                 for (const e of savedKeys) {
                     // Backfill sequence numbers for entries predating them.
-                    if (typeof e.n !== 'number') e.n = nextKeyNum++;
+                    if (typeof e.n !== 'number' || isNaN(e.n)) e.n = nextKeyNum++;
                     else if (e.n >= nextKeyNum) nextKeyNum = e.n + 1;
                 }
             } catch (e) {
@@ -756,6 +759,11 @@ function startMining() {
         }
 
         function addKeyToHistory(entry) {
+            const hex64 = /^[0-9a-fA-F]{64}$/;
+            if (!entry || !hex64.test(entry.publicKey || '') || !hex64.test(entry.privateKey || '')) {
+                console.warn('Invalid key entry rejected:', entry);
+                return;
+            }
             entry.n = nextKeyNum++;
             savedKeys.push(entry);
             if (savedKeys.length > MAX_SAVED_KEYS) savedKeys.shift();
@@ -816,7 +824,7 @@ function startMining() {
             const row = document.createElement('div');
             row.className = 'key-row';
             const code = document.createElement('code');
-            code.textContent = value;
+            code.textContent = value || '(missing)';
             const btn = document.createElement('button');
             btn.className = 'copy-btn';
             btn.textContent = 'Copy';
@@ -836,14 +844,17 @@ function startMining() {
                 const frame = document.createElement('div');
                 frame.className = 'result-frame';
                 const h2 = document.createElement('h2');
-                h2.textContent = 'Key ' + entry.n + ' Found!';
+                const keyNum = (typeof entry.n === 'number' && !isNaN(entry.n)) ? entry.n : (index + 1);
+                h2.textContent = 'Key ' + keyNum + ' Found!';
                 frame.appendChild(h2);
                 frame.appendChild(makeKeyField('Public Key (hex)', entry.publicKey, index, 'publicKey'));
                 frame.appendChild(makeKeyField('Private Key (hex)', entry.privateKey, index, 'privateKey'));
                 const stats = document.createElement('p');
                 stats.className = 'result-stats';
-                let statsText = 'Found in ' + Number(entry.attempts).toLocaleString() +
-                    ' attempts (' + Number(entry.elapsed).toFixed(2) + 's) | ' + entry.pattern;
+                const attempts = Number(entry.attempts) || 0;
+                const elapsed = Number(entry.elapsed) || 0;
+                let statsText = 'Found in ' + attempts.toLocaleString() +
+                    ' attempts (' + elapsed.toFixed(2) + 's) | ' + (entry.pattern || 'unknown pattern');
                 if (entry.minedAt) {
                     try {
                         statsText += ' | mined ' + new Date(entry.minedAt).toLocaleString();
