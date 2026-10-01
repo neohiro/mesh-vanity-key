@@ -35,6 +35,15 @@ def extract(repo_root: Path) -> dict[str, str]:
         end = html.index("`;", start)
         worker_js = html[start:end]
 
+        # Make worker.js standalone-parseable by replacing template interpolation
+        # with a valid URL literal.
+        import re
+        worker_js = re.sub(
+            r"\$\{new URL\([^)]+\)\.href\}",
+            "https://example.test/libsodium.js",
+            worker_js,
+        )
+
         # Main inline script: the <script> block without a src attribute.
         script_start = html.index("<script>", html.index("</style>")) + len("<script>")
         script_end = html.index("</script>", script_start)

@@ -3,6 +3,11 @@
 
 import base64
 import io
+import json
+import re
+import struct
+from pathlib import Path
+
 import pytest
 
 from meshcore_vanity import (
@@ -607,6 +612,205 @@ def test_generate_vanity_key_batch_verification():
     result = generate_vanity_key("ab", encoding="hex", max_attempts=100000)
     assert result.encoded.startswith("ab")
     assert result.attempts >= 0
+
+
+# --------------------------------------------------------------------------
+# PWA integrity: manifest, icons and the service worker.
+#
+# These lock in three defects that shipped unnoticed:
+#   1. manifest icons were data: URLs -> Chrome refused them, so the app was
+#      never installable;
+#   2. the service worker was cache-first on a never-bumped cache name, so
+#      returning visitors stayed on stale (including buggy) code indefinitely;
+#   3. the page advertised a SharedArrayBuffer/COEP speedup that the code never
+#      used, backed by a dead _headers file.
+# --------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).parent
+
+
+def _manifest():
+    return json.loads((_REPO_ROOT / "manifest.json").read_text(encoding="utf-8"))
+
+
+def test_manifest_icons_are_real_same_origin_files():
+    """data:/blob: manifest icons are rejected by Chrome -> PWA not installable."""
+    manifest = _manifest()
+    icons = manifest["icons"]
+    assert icons, "manifest declares no icons"
+
+    for icon in icons:
+        src = icon["src"]
+        assert not src.startswith(("data:", "blob:", "http://", "https://")), (
+            f"icon {src!r} must be a same-origin file; data:/blob: URLs and "
+            "absolute URLs break PWA installability"
+        )
+        assert ( _REPO_ROOT / src).is_file(), f"icon file missing: {src}"
+        assert icon["type"] == "image/png"
+        assert "sizes" in icon, f"icon {src!r} is missing the sizes field"
+
+
+def _png_size(path: Path) -> tuple[int, int]:
+    """Read width/height straight from the PNG IHDR chunk (stdlib only).
+
+    Keeps the icon tests dependency-free so they run anywhere; Pillow is only
+    used for the optional full-decode check below.
+    """
+    with path.open("rb") as fh:
+        data = fh.read(33)
+    if len(data) < 33:
+        raise AssertionError(f"{path.name} is too short to be a PNG")
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", f"{path.name} is not a PNG"
+    assert data[12:16] == b"IHDR", "first chunk is not IHDR"
+    width, height = struct.unpack(">II", data[16:24])
+    return width, height
+
+
+def test_manifest_icon_files_are_valid_pngs_of_declared_size():
+    for icon in _manifest()["icons"]:
+        path = _REPO_ROOT / icon["src"]
+        declared = int(icon["sizes"].split("x")[0])
+        assert _png_size(path) == (declared, declared), (
+            f"{path.name} is {_png_size(path)} but manifest declares {icon['sizes']}"
+        )
+        # Truncated files (a classic commit accident) still carry a valid
+        # header, so also require the terminating IEND chunk.
+        assert path.read_bytes().rstrip()[-8:-4] == b"IEND", (
+            f"{path.name} is truncated (no IEND chunk)"
+        )
+
+
+def test_manifest_icon_files_decode_fully():
+    """Full decode: catches corruption the header check cannot see."""
+    Image = pytest.importorskip("PIL.Image", reason="Pillow not installed")
+    for icon in _manifest()["icons"]:
+        im = Image.open(_REPO_ROOT / icon["src"])
+        im.load()
+        assert im.format == "PNG"
+        assert im.size == (int(icon["sizes"].split("x")[0]),) * 2
+
+
+def test_manifest_provides_maskable_and_any_icons():
+    """Android crops an 'any' icon badly; a maskable variant is required."""
+    purposes = set()
+    for icon in _manifest()["icons"]:
+        purposes |= set(icon.get("purpose", "any").split())
+    assert "any" in purposes
+    assert "maskable" in purposes, "no maskable icon declared"
+
+
+def test_manifest_start_url_is_relative():
+    """An absolute '/' start_url breaks hosting under a subpath (GitHub Pages)."""
+    assert _manifest()["start_url"] == "."
+    assert _manifest()["scope"] == "."
+
+
+def test_manifest_colors_match_page_theme():
+    """A mismatched theme_color repaints the browser chrome on install."""
+    manifest = _manifest()
+    html = (_REPO_ROOT / "index.html").read_text(encoding="utf-8")
+    assert manifest["background_color"] == "#0d1117"
+    assert manifest["theme_color"] == "#161b22"
+    assert f'<meta name="theme-color" content="{manifest["theme_color"]}">' in html
+
+
+def test_index_html_declares_icon_links():
+    html = (_REPO_ROOT / "index.html").read_text(encoding="utf-8")
+    # iOS ignores manifest icons for the home screen; it needs the link tag.
+    assert 'rel="apple-touch-icon"' in html
+    assert 'rel="icon"' in html
+    assert 'rel="manifest"' in html
+
+
+def test_no_sharedarraybuffer_speedup_claim_without_support():
+    """The page must not promise a SharedArrayBuffer speedup it does not use."""
+    html = (_REPO_ROOT / "index.html").read_text(encoding="utf-8")
+    assert "SharedArrayBuffer" not in html
+    assert "COOP" not in html and "COEP" not in html
+    # And there is no dead header config left behind.
+    assert not (_REPO_ROOT / "_headers").exists()
+
+
+def test_service_worker_precache_paths_all_exist():
+    """A missing precache entry makes cache.addAll() reject -> SW never installs."""
+    sw = (_REPO_ROOT / "sw.js").read_text(encoding="utf-8")
+    block = sw.split("urlsToCache", 1)[1].split("]", 1)[0]
+    urls = re.findall(r"'([^']+)'", block)
+    assert urls, "could not parse urlsToCache from sw.js"
+
+    for url in urls:
+        assert url.startswith("/"), f"{url} should be root-relative"
+        if url == "/":
+            continue  # the app root
+        assert (_REPO_ROOT / url.lstrip("/")).is_file(), (
+            f"sw.js precaches {url!r} but no such file is in the repo"
+        )
+
+
+def test_service_worker_is_not_cache_first():
+    """Regression guard: cache-first pinned users to stale code forever."""
+    sw = (_REPO_ROOT / "sw.js").read_text(encoding="utf-8")
+    assert "CACHE_VERSION" in sw, "cache version is not parameterised"
+    # Must hand back the cached copy *and* refresh in the background.
+    assert "event.waitUntil(network" in sw, (
+        "service worker no longer revalidates in the background; users would "
+        "be pinned to whatever was cached first"
+    )
+
+
+def test_service_worker_ignores_non_get_requests():
+    sw = (_REPO_ROOT / "sw.js").read_text(encoding="utf-8")
+    code = re.sub(r"//[^\n]*", "", sw)
+    assert "request.method !== 'GET'" in code
+
+
+def test_service_worker_precache_tolerates_partial_failure():
+    """cache.addAll() is all-or-nothing; individual adds degrade gracefully."""
+    sw = (_REPO_ROOT / "sw.js").read_text(encoding="utf-8")
+    # Strip line comments first: the file documents *why* addAll() is avoided,
+    # and that prose must not trip the assertion below.
+    code = re.sub(r"//[^\n]*", "", sw)
+    assert "cache.addAll" not in code, (
+        "addAll() rejects wholesale on a single failure, leaving the service "
+        "worker permanently uninstalled"
+    )
+    assert ".catch(" in code
+
+
+def test_committed_icons_match_generator():
+    """The checked-in PNGs must be reproducible from tools/make_icons.py.
+
+    Without this, editing the icon design and forgetting to re-run the script
+    would silently ship stale assets.
+    """
+    make_icons = _load_make_icons()
+
+    def render(draw_fn, size):
+        buf = io.BytesIO()
+        draw_fn(size).save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+
+    for size in make_icons.SIZES:
+        name = f"icon-{size}.png"
+        assert (_REPO_ROOT / name).read_bytes() == render(make_icons.draw_icon, size), (
+            f"{name} is out of date; re-run `python tools/make_icons.py`"
+        )
+
+    name = f"icon-maskable-{make_icons.MASKABLE_SIZE}.png"
+    assert (_REPO_ROOT / name).read_bytes() == render(
+        make_icons.draw_maskable, make_icons.MASKABLE_SIZE
+    ), f"{name} is out of date; re-run `python tools/make_icons.py`"
+
+
+def _load_make_icons():
+    import importlib.util
+
+    pytest.importorskip("PIL.Image", reason="Pillow needed to render icons")
+    path = _REPO_ROOT / "tools" / "make_icons.py"
+    spec = importlib.util.spec_from_file_location("make_icons", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 if __name__ == "__main__":

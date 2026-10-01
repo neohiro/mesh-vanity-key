@@ -5,7 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshCore Vanity Key Generator</title>
     <link rel="manifest" href="manifest.json">
+    <link rel="icon" href="icon-192.png" type="image/png">
+    <link rel="apple-touch-icon" href="icon-192.png">
     <meta name="theme-color" content="#161b22">
+    <meta name="description" content="Generate Ed25519 vanity keys with custom hex prefix/suffix patterns in your browser.">
+    <meta name="color-scheme" content="dark">
     <script src="libsodium.js"></script>
     <style>
         :root { color-scheme: dark; }
@@ -179,7 +183,7 @@
         <div class="info">
             <p><strong>How it works:</strong> This page uses Web Workers with libsodium WASM to search for Ed25519 keys in the background. Workers are auto-detected based on your CPU cores for maximum performance.</p>
             <p style="margin-top: 8px;"><strong>Tip:</strong> Shorter patterns are found faster. A 2-char prefix takes seconds; a 6-char pattern may take hours.</p>
-            <p style="margin-top: 8px;"><strong>Note:</strong> For maximum performance with SharedArrayBuffer, deploy with COOP/COEP headers (see <code>_headers</code> file for Netlify).</p>
+
             <p style="margin-top: 8px;">Inspired by <a href="https://meshcore.co.uk/">MeshCore</a>.</p>
             <p style="margin-top: 8px;"><a href="https://neohiro.github.io/">← Back to neohiro.github.io</a></p>
         </div>

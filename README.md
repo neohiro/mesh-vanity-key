@@ -1,6 +1,9 @@
 # meshcore-vanity-key
 
-A fast, MeshCore-compatible Ed25519 vanity public-key generator written in Python.
+A fast, MeshCore-compatible Ed25519 vanity public-key generator. Ships in two forms:
+
+- **`meshcore_vanity.py`** — a Python CLI with bech32/base58/base64 support and parallel multiprocessing.
+- **`index.html`** — a zero-install browser app (PWA) that mines with Web Workers + libsodium WASM.
 
 Inspired by and credited to [MeshCore](https://meshcore.co.uk/) — a decentralized mesh networking project. This tool generates Ed25519 keypairs whose encoded public keys match a user-defined pattern, suitable for use with MeshCore devices and related tooling.
 
@@ -9,6 +12,47 @@ Inspired by and credited to [MeshCore](https://meshcore.co.uk/) — a decentrali
 ## What It Does
 
 Generates Ed25519 cryptographic keypairs until the encoded public key matches a target pattern (prefix, suffix, or both). The search is optimized with a scalar-walk algorithm that avoids repeated hashing, making it significantly faster than naive approaches.
+
+## Browser Version
+
+`index.html` is a self-contained PWA — no build step, no dependencies beyond the
+checked-in `libsodium.js`. It needs to be **served over HTTP(S)**, not opened as a
+`file://` URL, because browsers refuse to create blob Web Workers from `file://`.
+
+```bash
+python -m http.server 8000
+# then open http://localhost:8000/
+```
+
+Deploy it to any static host (GitHub Pages, Netlify, Cloudflare Pages). The service
+worker precaches the app shell and serves stale-while-revalidate, so the app works
+offline and picks up new deploys on the next load.
+
+Browser-specific behaviour, for comparison with the CLI below:
+
+| | Browser app | Python CLI |
+|---|---|---|
+| Pattern matching | hex only | hex, base64, base64url, base58, bech32 |
+| Parallelism | auto-detected Web Workers (`hardwareConcurrency - 1`, capped at 16) | `--workers N` processes |
+| Key history | kept in `localStorage`, exportable as JSON/CSV | none |
+| Installable | yes (PWA with maskable icons) | n/a |
+| Private key | shown per result, stored in history | only with `--output-private` |
+
+> **Security:** the browser app stores found keys in `localStorage` in plaintext.
+> That is fine for a throwaway vanity key, but treat the history as a secret store
+> — it persists until you clear it.
+
+Reserved hex prefixes `00` and `ff` are rejected in both implementations.
+
+### Maintaining the PWA assets
+
+- `tools/make_icons.py` regenerates `icon-192.png`, `icon-512.png` and
+  `icon-maskable-512.png` from code. Run it after changing the icon design:
+  `python tools/make_icons.py`
+- When you add or remove a file from `sw.js`'s `urlsToCache`, bump `CACHE_VERSION`
+  in the same commit so returning visitors get the new app shell.
+- `node tools/test_page_js.mjs <main.js> <worker.js>` executes the page and worker
+  JS against a mock DOM; CI runs it after `tools/check_inline_js.py` extracts them.
 
 ## Quick Start
 
@@ -165,6 +209,10 @@ Hex prefixes `00` and `ff` are reserved for MeshCore framework devices and are r
 - **Private key is only shown with `--output-private`.** Without this flag, only the public key is printed. This is a safety measure.
 - **Not a MeshCore node.** This tool only generates keys. You still need MeshCore firmware or software to use them.
 - **Deterministic mode requires a seed.** Without `--seed`, each run produces different results.
+- **Browser app is hex-only.** It has no bech32/base58/base64 output; use the CLI for those encodings.
+- **Browser app must be served over HTTP(S).** Blob Web Workers are blocked on `file://` URLs.
+- **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency - 1` (capped at 16), which can over- or under-estimate on constrained or shared hardware.
+- **Browser key history is plaintext.** `localStorage` is readable by any script on the origin and is not encrypted.
 
 ## Output
 
@@ -189,6 +237,7 @@ Found in 123,456 attempts (2.75s, 44,893 keys/s)
 - **Never share your private key.** The `--output-private` flag prints it to stderr. Redirect stderr separately if you need to capture only the public key.
 - **Use a strong seed for deterministic mode.** A predictable seed means predictable keys.
 - **Verify the generated key** before using it in production.
+- **Clear the browser history when done.** `Clear All Keys` in the browser app wipes `localStorage`, but exported JSON/CSV files still contain private keys.
 
 ## License
 

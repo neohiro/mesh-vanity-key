@@ -15,7 +15,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python deps
-        run: pip install PyNaCl pytest
+        # Pillow is optional: it enables the full icon-decode test and lets CI
+        # prove the committed icons match tools/make_icons.py exactly.
+        run: pip install PyNaCl pytest Pillow
 
       - name: Python tests
         run: python -m pytest -q
