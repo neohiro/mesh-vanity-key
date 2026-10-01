@@ -41,6 +41,16 @@ jobs:
       - name: Page/worker JS behaviour tests
         run: node tools/test_page_js.mjs /tmp/inline-js/main.js /tmp/inline-js/worker.js
 
+      # Proves the mining loop's arithmetic is exactly equivalent to the
+      # BigInt/hex reference (including 2**256 carry propagation).
+      - name: Worker math equivalence
+        run: node tools/verify_worker_math.mjs
+
+      # Guards the ~1400x wrapper-overhead regression: the shipped worker used
+      # to yield per 16 candidates and rebuild hex strings per candidate.
+      - name: Worker throughput benchmark
+        run: node tools/bench_worker.mjs /tmp/inline-js/worker.js
+
   smoke:
     runs-on: ubuntu-latest
     steps:

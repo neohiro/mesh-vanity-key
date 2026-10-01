@@ -714,6 +714,51 @@ def test_manifest_colors_match_page_theme():
     assert f'<meta name="theme-color" content="{manifest["theme_color"]}">' in html
 
 
+def test_worker_wrapper_throughput_is_not_the_bottleneck():
+    """Regression guard for the mining loop's own overhead.
+
+    The shipped worker used to yield via setTimeout(0) every 16 candidates and
+    rebuilt hex strings per candidate. Browsers clamp nested timers to >=4ms, so
+    the wrapper capped a worker at a few thousand keys/s *regardless of
+    libsodium* - measured at 9,182 keys/s with a stubbed (free) keygen.
+
+    Here the keygen is stubbed too, so the number reflects wrapper cost alone.
+    A regression to per-batch timers or per-candidate string building drops this
+    by three orders of magnitude and fails the test.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    runtime = shutil.which("node") or shutil.which("bun")
+    if runtime is None:
+        pytest.skip("no node/bun runtime available")
+
+    mod = _load_check_inline_js()
+    with tempfile.TemporaryDirectory() as tmp:
+        worker = Path(tmp) / "worker.js"
+        worker.write_text(mod.extract(Path(__file__).parent)["worker.js"], encoding="utf-8")
+        proc = subprocess.run(
+            [runtime, str(Path(__file__).parent / "tools" / "bench_worker.mjs"), str(worker)],
+            capture_output=True, text=True, timeout=180,
+        )
+
+    assert proc.returncode == 0, (
+        f"worker benchmark failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    )
+    m = re.search(r"throughput: ([\d,]+) keys/s", proc.stdout)
+    assert m, f"could not parse benchmark output: {proc.stdout!r}"
+    rate = int(m.group(1).replace(",", ""))
+
+    # 200k/s leaves ~65x headroom below the measured ~12.9M/s while still
+    # failing hard (9k/s) if the per-batch yield or hex churn comes back.
+    assert rate > 200_000, (
+        f"worker wrapper overhead regressed: only {rate:,} keys/s with a stubbed "
+        "keygen; the wrapper is the bottleneck again (expected >200,000)"
+    )
+
+
 def test_index_html_declares_icon_links():
     html = (_REPO_ROOT / "index.html").read_text(encoding="utf-8")
     # iOS ignores manifest icons for the home screen; it needs the link tag.

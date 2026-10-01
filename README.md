@@ -37,6 +37,7 @@ Browser-specific behaviour, for comparison with the CLI below:
 | Key history | kept in `localStorage`, exportable as JSON/CSV | none |
 | Installable | yes (PWA with maskable icons) | n/a |
 | Private key | shown per result, stored in history | only with `--output-private` |
+| History display | newest first, scroll stays at the top | n/a |
 
 > **Security:** the browser app stores found keys in `localStorage` in plaintext.
 > That is fine for a throwaway vanity key, but treat the history as a secret store
@@ -53,6 +54,34 @@ Reserved hex prefixes `00` and `ff` are rejected in both implementations.
   in the same commit so returning visitors get the new app shell.
 - `node tools/test_page_js.mjs <main.js> <worker.js>` executes the page and worker
   JS against a mock DOM; CI runs it after `tools/check_inline_js.py` extracts them.
+
+### Mining-loop performance
+
+The browser miner spends almost all of its time inside libsodium, so the wrapper
+around each candidate must be close to free. Two things dominate it if done
+naively, and both were real defects that capped throughput at a few thousand
+keys/second **regardless of how fast the crypto was**:
+
+- **Yielding per batch.** Browsers clamp nested `setTimeout(0)` to ≥4 ms. Yielding
+  after every batch of candidates therefore throttled each worker to ~4,000
+  candidates/s. The worker now yields on a 30 ms wall-clock budget instead.
+- **Rebuilding hex strings per candidate.** Converting the candidate and public
+  key to hex and running `startsWith`/`endsWith` costs more than the keygen. The
+  walk state is now a 32-byte array incremented in place, and the pattern is
+  pre-decoded to nibbles compared directly against the raw public-key bytes — no
+  allocation and no string building in the hot loop.
+
+Regression guards:
+
+| Command | Checks |
+|---|---|
+| `node tools/verify_worker_math.mjs` | the byte-walk is arithmetically identical to the previous BigInt/hex implementation, including 2²⁵⁶ carry and wraparound |
+| `node tools/bench_worker.mjs <worker.js>` | wrapper overhead with a stubbed (free) keygen; must stay far above the keygen cost |
+
+> **Careful:** never write `if (++bytes[i] !== 0)`. Incrementing a `Uint8Array`
+> element returns the *unclamped* value (`256`, not `0`), so the carry test never
+> fires and the counter silently stops at a byte boundary. Mask explicitly:
+> `bytes[i] = (bytes[i] + 1) & 0xff;` then test `bytes[i] !== 0`.
 
 ## Quick Start
 

@@ -198,6 +198,38 @@
         let initTimeouts = [];
         let blobUrls = [];
 
+        // ---- Worker Warmup Pool ----
+        // Pre-create workers to avoid creation latency on each search.
+        // Workers are returned to the pool after each search instead of being terminated.
+        let workerPool = [];
+        let poolInUse = 0;
+
+        function createPooledWorker() {
+            const blob = new Blob([workerCode], { type: 'application/javascript' });
+            const url = URL.createObjectURL(blob);
+            const w = new Worker(url);
+            // When worker finishes (found/error), return to pool instead of terminating.
+            w.onmessage = function(e) {
+                if (e.data.type === 'ready') {
+                    // Send work immediately; worker will loop and await further messages.
+                    w.postMessage({ prefix, suffix, matchPrefix, matchSuffix });
+                } else if (e.data.type === 'found' || e.data.type === 'error') {
+                    // Return worker to pool; don't terminate — reuse next search.
+                    poolInUse--;
+                    URL.revokeObjectURL(w.url);
+                    workers = workers.filter((x) => x !== w);
+                    workerPool.push(w);
+                }
+            };
+            w.onerror = function() {
+                poolInUse--;
+                URL.revokeObjectURL(w.url);
+                workers = workers.filter((x) => x !== w);
+                workerPool.push(w);
+            };
+            return w;
+        }
+
         function revokeBlobUrls() {
             for (const u of blobUrls) {
                 try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ }
@@ -426,6 +458,7 @@
             document.getElementById('live-estimate').textContent = '';
             document.getElementById('live-estimate').style.display = 'none';
             window.liveEstimateShown = false;
+            resetRateSmoothing();
             const progressEl = document.getElementById('progress-text');
             progressEl.textContent = 'Starting...';
             progressEl.className = 'status-text';
@@ -492,7 +525,7 @@
                         // and huge patterns exceed float precision anyway (progress ~= 0%).
                         const expectedAttempts = Math.pow(16, patternLen);
 
-                        const BATCH_SIZE = 16;
+                        const BATCH_SIZE = 256;
                         const REPORT_EVERY_MS = 500;
                         let lastProgressReport = 0;
 
@@ -514,49 +547,115 @@
                             lastProgressReport = now;
                         }
 
-                        // Scalar-walk: initialize random scalar, then increment for each attempt
+                        // ---- Hot loop design ----
+                        // A cryptographically secure seed is mandatory: a weak
+                        // fallback would make every generated private key
+                        // predictable.
                         const c = (typeof crypto !== 'undefined' ? crypto : null) || (typeof window !== 'undefined' && window.crypto ? window.crypto : null);
                         if (!c || !c.getRandomValues) {
                             throw new Error('Cryptographically secure random source unavailable');
                         }
+
+                        // The walk state is a 32-byte big-endian counter mutated
+                        // in place. BigInt is deliberately avoided here: a 256-bit
+                        // BigInt costs an allocation per shift plus a very slow
+                        // toString(16), and neither is needed.
+                        //
+                        // The pattern is pre-decoded to nibble values and matched
+                        // against the raw public-key bytes, so a candidate costs
+                        // one libsodium call and a handful of integer compares -
+                        // no string building at all. Odd-length patterns work
+                        // because matching happens per nibble.
                         const seed = new Uint8Array(32);
                         c.getRandomValues(seed);
-                        let scalar = BigInt('0x' + Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join(''));
 
-                        // Helper: convert BigInt to 32-byte Uint8Array (big-endian)
-                        function bigIntToBytes(n) {
-                            const bytes = new Uint8Array(32);
-                            for (let i = 31; i >= 0; i--) {
-                                bytes[i] = Number(n & 0xFFn);
-                                n >>= 8n;
+                        const HEXNIB = new Int8Array(256).fill(-1);
+                        for (let i = 0; i < 10; i++) HEXNIB[48 + i] = i;          // 0-9
+                        for (let i = 0; i < 6; i++) HEXNIB[97 + i] = 10 + i;       // a-f
+                        const decodeNibbles = (hex) => {
+                            const out = new Uint8Array(hex.length);
+                            for (let i = 0; i < hex.length; i++) {
+                                out[i] = HEXNIB[hex.charCodeAt(i)] & 0xff;
                             }
-                            return bytes;
-                        }
+                            return out;
+                        };
+                        const prefixNib = decodeNibbles(prefixLower);
+                        const suffixNib = decodeNibbles(suffixLower);
+                        const prefixLen = prefixNib.length;
+                        const suffixLen = suffixNib.length;
+                        const PK_LEN = 32;
+
+                        // Big-endian +1 with wraparound at 2**256.
+                        //
+                        // NOTE: never write "if (++seed[i] !== 0)". Incrementing
+                        // a Uint8Array element returns the *unclamped* value
+                        // (256, not 0), so that test never fires and the carry
+                        // is silently dropped. Mask explicitly, then read back
+                        // the stored byte.
+                        const incrementSeed = () => {
+                            for (let i = seed.length - 1; i >= 0; i--) {
+                                seed[i] = (seed[i] + 1) & 0xff;
+                                if (seed[i] !== 0) return;
+                            }
+                        };
+
+                        const startsWithNibbles = (pub, nib, len) => {
+                            if (len > PK_LEN * 2) return false;
+                            for (let j = 0; j < len; j++) {
+                                const b = pub[j >> 1];
+                                if (((j & 1) ? (b & 15) : (b >> 4)) !== nib[j]) return false;
+                            }
+                            return true;
+                        };
+
+                        const endsWithNibbles = (pub, nib, len) => {
+                            if (len > PK_LEN * 2) return false;
+                            const total = PK_LEN * 2;
+                            for (let j = 0; j < len; j++) {
+                                const k = total - len + j;
+                                const b = pub[k >> 1];
+                                if (((k & 1) ? (b & 15) : (b >> 4)) !== nib[j]) return false;
+                            }
+                            return true;
+                        };
+
+                        const bytesToHex = (bytes) => {
+                            let out = '';
+                            for (let i = 0; i < bytes.length; i++) {
+                                out += bytes[i].toString(16).padStart(2, '0');
+                            }
+                            return out;
+                        };
+
+                        // Yield on a wall-clock budget rather than every batch.
+                        // A bare setTimeout(0) is clamped to >=4ms once timers
+                        // nest, so yielding per batch capped throughput at a few
+                        // thousand keys/s. 30ms keeps Stop/UI responsive while
+                        // letting each worker run thousands of candidates per
+                        // scheduler hand-off.
+                        const YIELD_EVERY_MS = 30;
+                        let lastYield = Date.now();
 
                         while (true) {
                             for (let b = 0; b < BATCH_SIZE; b++) {
-                                // Scalar-walk: increment the scalar for each attempt
-                                const seed = bigIntToBytes(scalar);
-                                const seedHex = scalar.toString(16).padStart(64, '0');
-                                // Derive keypair from seed
                                 const keyPair = sodium.crypto_sign_seed_keypair(seed);
-                                const publicKeyHex = Array.from(keyPair.publicKey).map(b => b.toString(16).padStart(2, '0')).join('');
-                                const privateKeyHex = seedHex;
+                                const pub = keyPair.publicKey;
 
                                 let match = false;
                                 if (matchPrefix && matchSuffix) {
-                                    match = publicKeyHex.startsWith(prefixLower) && publicKeyHex.endsWith(suffixLower);
+                                    match = startsWithNibbles(pub, prefixNib, prefixLen)
+                                         && endsWithNibbles(pub, suffixNib, suffixLen);
                                 } else if (matchPrefix) {
-                                    match = publicKeyHex.startsWith(prefixLower);
+                                    match = startsWithNibbles(pub, prefixNib, prefixLen);
                                 } else {
-                                    match = publicKeyHex.endsWith(suffixLower);
+                                    match = endsWithNibbles(pub, suffixNib, suffixLen);
                                 }
 
                                 if (match) {
                                     self.postMessage({
                                         type: 'found',
-                                        publicKey: publicKeyHex,
-                                        privateKey: seedHex,
+                                        publicKey: bytesToHex(pub),
+                                        privateKey: bytesToHex(seed),
                                         attempts: attempts,
                                         elapsed: (Date.now() - startTime) / 1000
                                     });
@@ -564,13 +663,14 @@
                                 }
 
                                 attempts++;
-                                // Scalar-walk: increment by 1 for next attempt
-                                scalar = (scalar + 1n) & ((1n << 256n) - 1n);
+                                incrementSeed();
                             }
                             reportProgress(false);
-                            // Real yield: lets postMessage flush and keeps UI/Stop responsive.
-                            // (A bare setTimeout() without await never yields inside while(true).)
-                            await new Promise(r => setTimeout(r, 0));
+                            const nowMs = Date.now();
+                            if (nowMs - lastYield >= YIELD_EVERY_MS) {
+                                lastYield = nowMs;
+                                await new Promise(r => setTimeout(r, 0));
+                            }
                         }
                     } catch (err) {
                         self.postMessage({ type: 'error', message: 'Worker error: ' + err.message });
@@ -581,7 +681,15 @@
             workers = [];
             initTimeouts = [];
 
-            for (let i = 0; i < numWorkers; i++) {
+            // Pre-warm pool: half the configured count, minimum 1.
+            const poolSize = Math.max(1, Math.floor(numWorkers / 2));
+            for (let i = 0; i < poolSize; i++) {
+                const w = createPooledWorker();
+                workerPool.push(w);
+            }
+
+            // Create any remaining workers beyond the pool.
+            for (let i = workerPool.length; i < numWorkers; i++) {
                 const blob = new Blob([workerCode], { type: 'application/javascript' });
                 const url = URL.createObjectURL(blob);
                 blobUrls.push(url);
@@ -635,17 +743,23 @@
                             else if (remaining < 86400) etaStr = ' | ETA: ' + (remaining / 3600).toFixed(1) + 'h';
                             else etaStr = ' | ETA: ' + (remaining / 86400).toFixed(1) + 'd';
                         }
-                        const liveRateStr = Math.round(rate).toLocaleString() + '/s';
+                        // EMA smoothing for rate display (alpha = 0.3)
+                        smoothRate(rate);
+                        const liveRateStr = Math.round(emaRate).toLocaleString() + '/s';
                         const progressText = 'Attempts: ' + attempts.toLocaleString() + ' | Rate: ' + liveRateStr + ' | Progress: ' + pct.toFixed(2) + '%' + etaStr;
                         document.getElementById('progress-text').textContent = progressText;
 
-                        // Update estimate with live data after first progress report
-                        if (attempts > 0 && !window.liveEstimateShown) {
-                            window.liveEstimateShown = true;
-                            const liveEstimateEl = document.getElementById('live-estimate');
-                            if (liveEstimateEl) {
-                                liveEstimateEl.textContent = 'Live estimate:' + (etaStr ? ' ~' + etaStr.replace(' | ETA: ', '') : '') + ' at ' + liveRateStr;
+                        // Update live estimate continuously (not just first time)
+                        const liveEstimateEl = document.getElementById('live-estimate');
+                        if (liveEstimateEl) {
+                            if (attempts > 0 && etaStr) {
+                                liveEstimateEl.textContent = 'Live estimate: ~' + etaStr.replace(' | ETA: ', '') + ' at ' + liveRateStr;
                                 liveEstimateEl.style.display = 'block';
+                            } else if (attempts > 0) {
+                                liveEstimateEl.textContent = 'Live estimate: calculating...';
+                                liveEstimateEl.style.display = 'block';
+                            } else {
+                                liveEstimateEl.style.display = 'none';
                             }
                         }
                     } else if (e.data.type === 'found') {
@@ -679,7 +793,11 @@
 
             function stopAllWorkers() {
                 for (const w of workers) {
-                    if (w) w.terminate();
+                    if (w) {
+                        poolInUse--;
+                        URL.revokeObjectURL(w.url);
+                        workerPool.push(w);
+                    }
                 }
                 workers = [];
                 revokeBlobUrls();
@@ -695,13 +813,38 @@
             document.getElementById('stop-btn').disabled = false;
         }
 
+        // Rate display smoothing. Raw per-batch rate is noisy (worker count
+        // changes, GC pauses, thermal throttling), so an EMA keeps the headline
+        // figure readable. Reset per search so runs are independent.
+        const EMA_ALPHA = 0.3;
+        let emaRate = null;
+
+        function resetRateSmoothing() {
+            emaRate = null;
+        }
+
+        function smoothRate(sample) {
+            const r = Number(sample);
+            if (!isFinite(r) || r < 0) return emaRate;
+            emaRate = emaRate === null ? r : (EMA_ALPHA * r + (1 - EMA_ALPHA) * emaRate);
+            return emaRate;
+        }
+
+        function getSmoothedRate() {
+            return emaRate;
+        }
+
         function stopMining() {
             for (const t of initTimeouts) {
                 clearTimeout(t);
             }
             initTimeouts.length = 0;
             for (const w of workers) {
-                if (w) w.terminate();
+                if (w) {
+                    poolInUse--;
+                    URL.revokeObjectURL(w.url);
+                    workerPool.push(w);
+                }
             }
             workers = [];
             revokeBlobUrls();
@@ -715,6 +858,7 @@
             document.getElementById('live-estimate').textContent = '';
             document.getElementById('live-estimate').style.display = 'none';
             window.liveEstimateShown = false;
+            resetRateSmoothing();
             updateEstimate();
         }
 
@@ -971,6 +1115,17 @@
 
         function exportHistory(format) {
             if (!savedKeys.length) return;
+            // For large exports, use a background worker to avoid blocking the UI
+            if (savedKeys.length > 100 && typeof Worker !== 'undefined') {
+                exportHistoryInWorker(format);
+                return;
+            }
+            // Small exports: run synchronously
+            doExportHistory(format);
+        }
+
+        function doExportHistory(format) {
+            if (!savedKeys.length) return;
             if (format === 'csv') {
                 const header = ['n', 'publicKey', 'privateKey', 'attempts', 'elapsed', 'pattern', 'minedAt'];
                 const lines = [header.map(csvCell).join(',')];
@@ -982,6 +1137,51 @@
                 downloadFile('meshcore-vanity-keys.json', 'application/json',
                     JSON.stringify(savedKeys, null, 2));
             }
+        }
+
+        function exportHistoryInWorker(format) {
+            // Show progress indicator
+            const progressEl = document.getElementById('progress-text');
+            const progressDiv = document.getElementById('progress');
+            progressEl.textContent = 'Preparing export...';
+            progressDiv.classList.remove('hidden');
+
+            const workerCode = `
+                self.onmessage = function(e) {
+                    const { keys, format } = e.data;
+                    const csvCell = (v) => '"' + String(v === undefined || v === null ? '' : v).replace(/"/g, '""') + '"';
+                    if (format === 'csv') {
+                        const header = ['n', 'publicKey', 'privateKey', 'attempts', 'elapsed', 'pattern', 'minedAt'];
+                        const lines = [header.map(csvCell).join(',')];
+                        for (const e of keys) {
+                            lines.push(header.map(h => csvCell(e[h])).join(','));
+                        }
+                        self.postMessage({ type: 'done', data: lines.join('\\n'), mime: 'text/csv', filename: 'meshcore-vanity-keys.csv' });
+                    } else {
+                        const json = JSON.stringify(keys, null, 2);
+                        self.postMessage({ type: 'done', data: json, mime: 'application/json', filename: 'meshcore-vanity-keys.json' });
+                    }
+                };
+            `;
+            const blob = new Blob([workerCode], { type: 'application/javascript' });
+            const url = URL.createObjectURL(blob);
+            const worker = new Worker(url);
+
+            worker.onmessage = function(e) {
+                if (e.data.type === 'done') {
+                    downloadFile(e.data.filename, e.data.mime, e.data.data);
+                    URL.revokeObjectURL(url);
+                    worker.terminate();
+                    document.getElementById('progress').classList.add('hidden');
+                }
+            };
+            worker.onerror = function(e) {
+                alert('Export failed: ' + e.message);
+                document.getElementById('progress').classList.add('hidden');
+                worker.terminate();
+                URL.revokeObjectURL(url);
+            };
+            worker.postMessage({ keys: savedKeys, format });
         }
 
         function clearHistory() {
@@ -1016,7 +1216,7 @@
             const list = document.getElementById('results');
             list.textContent = '';
             document.getElementById('history-bar').classList.toggle('hidden', savedKeys.length === 0);
-            savedKeys.forEach((entry, index) => {
+            savedKeys.slice().reverse().forEach((entry, index) => {
                 const frame = document.createElement('div');
                 frame.className = 'result-frame';
                 const h2 = document.createElement('h2');
@@ -1048,8 +1248,10 @@
                 frame.appendChild(actions);
                 list.appendChild(frame);
             });
-            if (scrollToNew && list.lastElementChild) {
-                list.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            // History renders newest-first, so a newly mined key is the FIRST child.
+            // Scrolling to lastElementChild would jump to the oldest entry.
+            if (scrollToNew && list.firstElementChild) {
+                list.firstElementChild.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             }
         }
 

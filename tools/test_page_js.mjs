@@ -49,6 +49,9 @@ function makeEl(id = '') {
         },
         appendChild(child) { this.children.push(child); return child; },
         removeChild(child) { this.children = this.children.filter((c) => c !== child); },
+        // Real DOM derives these from the child list.
+        get firstElementChild() { return this.children[0] ?? null; },
+        get lastElementChild() { return this.children[this.children.length - 1] ?? null; },
         addEventListener() {},
         getBoundingClientRect() { return { height: 40, width: 100, top: 0, left: 0 }; },
         scrollIntoView() {},
@@ -143,7 +146,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -307,6 +310,84 @@ check('renderHistory: never prints NaN/undefined for missing numbers', () => {
     ok(texts.includes('1,234'), `attempts should be grouped: ${texts}`);
     // Missing pattern falls back instead of printing "undefined".
     ok(texts.includes('unknown pattern'), `pattern fallback missing: ${texts}`);
+});
+
+// ---- rate smoothing (EMA) --------------------------------------------------
+// The headline rate must not flicker with raw per-batch samples, but it must
+// still converge on the true rate (a stuck/slow filter would hide real speed).
+
+check('EMA smoothing: starts at first sample, then converges toward it', () => {
+    api.resetRateSmoothing();
+    // First sample seeds the average (no smoothing on a cold filter).
+    api.smoothRate(1000);
+    eq(Math.round(api.getSmoothedRate()), 1000, 'first sample seeds the EMA:');
+
+    // A spike pulls the average up but not all the way -> proves smoothing.
+    api.smoothRate(9000);
+    const afterSpike = api.getSmoothedRate();
+    ok(afterSpike > 1000 && afterSpike < 9000,
+        `EMA must sit between the samples, got ${afterSpike}`);
+
+    // Repeated identical samples converge to that sample (no permanent lag).
+    for (let i = 0; i < 60; i++) api.smoothRate(5000);
+    ok(Math.abs(api.getSmoothedRate() - 5000) < 1,
+        `EMA must converge on a steady rate, got ${api.getSmoothedRate()}`);
+
+    // reset clears state so the next search starts fresh.
+    api.resetRateSmoothing();
+    eq(api.getSmoothedRate(), null, 'reset must clear the smoothed rate:');
+    api.resetRateSmoothing();
+});
+
+// ---- newest key renders on top ---------------------------------------------
+// History is stored oldest-first, so the view must reverse: the newest result
+// appears at the top and the list scroll position stays at the top.
+
+check('renderHistory: newest key first, newest at the top of the list', () => {
+    seedHistory([
+        { publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1, attempts: 1, elapsed: 1 },
+        { publicKey: 'c'.repeat(64), privateKey: 'd'.repeat(64), n: 2, attempts: 2, elapsed: 2 },
+        { publicKey: 'e'.repeat(64), privateKey: 'f'.repeat(64), n: 3, attempts: 3, elapsed: 3 },
+    ]);
+    api.loadHistory();
+    api.renderHistory(false);
+
+    const frames = getElementById('results').children;
+    eq(frames.length, 3, 'all three entries render:');
+    const headings = frames.map((f) => f.children[0].textContent);
+    eq(headings[0], 'Key 3 Found!', 'newest (Key 3) is first:');
+    eq(headings[1], 'Key 2 Found!', 'middle (Key 2) is second:');
+    eq(headings[2], 'Key 1 Found!', 'oldest (Key 1) is last:');
+
+    // The stored order must be untouched: reversing is a view concern only.
+    const stored = api.getSavedKeys().map((e) => e.n);
+    eq(JSON.stringify(stored), JSON.stringify([1, 2, 3]),
+        'storage order stays oldest-first:');
+});
+
+check('renderHistory: scrolls to the newest (first) frame, not the oldest', () => {
+    seedHistory([
+        { publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1, attempts: 1, elapsed: 1 },
+        { publicKey: 'c'.repeat(64), privateKey: 'd'.repeat(64), n: 2, attempts: 2, elapsed: 2 },
+    ]);
+    api.loadHistory();
+
+    // Track which frame renderHistory asks to scroll into view.
+    const list = getElementById('results');
+    const created = [];
+    const origAppend = list.appendChild.bind(list);
+    list.appendChild = (child) => {
+        const r = origAppend(child);
+        child.scrollIntoView = () => { created.push(child); };
+        return r;
+    };
+
+    api.renderHistory(true);
+    list.appendChild = origAppend;
+
+    eq(created.length, 1, 'exactly one frame is scrolled into view:');
+    eq(created[0].children[0].textContent, 'Key 2 Found!',
+        'must scroll to the newest key at the top of the list:');
 });
 
 // ---- csv escaping ----------------------------------------------------------

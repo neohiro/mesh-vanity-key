@@ -58,6 +58,14 @@ def extract(repo_root: Path) -> dict[str, str]:
     if "await new Promise" not in worker_js:
         raise SystemExit("FAIL: worker lost its event-loop yield (progress stalls)")
 
+    # A stray backtick inside the worker template literal silently terminates the
+    # string and corrupts the extracted source. Catch it at the source.
+    if "`" in worker_js:
+        raise SystemExit(
+            "FAIL: backtick inside the workerCode template literal "
+            "(it terminates the string); use quotes in worker comments"
+        )
+
     return {"worker.js": worker_js, "main.js": main_js}
 
 
