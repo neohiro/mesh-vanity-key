@@ -474,7 +474,7 @@ function startMining() {
                     w.postMessage({ prefix, suffix, matchPrefix, matchSuffix });
                     return;
                 }
-                    if (e.data.type === 'progress') {
+                if (e.data.type === 'progress') {
                         const attempts = Number(e.data.attempts) || 0;
                         const rate = Number(e.data.rate) || 0;
                         const expected = Number(e.data.expectedAttempts);
@@ -503,7 +503,7 @@ function startMining() {
                             }
                         }
                     } else if (e.data.type === 'found') {
-                        clearTimeout(initTimeouts[i]);
+                        clearTimeout(initTimeouts[0]);
                         mining = false;
                         setFormDisabled(false);
                         document.getElementById('start-btn').disabled = false;
@@ -519,7 +519,7 @@ function startMining() {
                         });
                         stopAllWorkers();
                     } else if (e.data.type === 'error') {
-                        clearTimeout(initTimeouts[i]);
+                        clearTimeout(initTimeouts[0]);
                         mining = false;
                         setFormDisabled(false);
                         document.getElementById('start-btn').disabled = false;
