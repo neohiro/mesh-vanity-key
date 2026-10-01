@@ -759,6 +759,38 @@ def test_worker_wrapper_throughput_is_not_the_bottleneck():
     )
 
 
+def test_invalid_character_error_explains_allowed_and_why():
+    """The rejection must teach, not just scold: what is allowed, and why."""
+    with pytest.raises(ValueError) as exc:
+        _validate_prefix("xyz", "hex")
+    msg = str(exc.value)
+    assert "invalid characters" in msg
+    assert "'x'" in msg and "'y'" in msg
+    # What is allowed...
+    assert "0-9 and a-f" in msg
+    # ...and why only those.
+    assert "64 hexadecimal digits" in msg
+    assert "can never occur" in msg
+
+    with pytest.raises(ValueError) as exc2:
+        _validate_prefix("ab!", "base64")
+    msg2 = str(exc2.value)
+    assert "Allowed for base64" in msg2
+    assert "+ and /" in msg2
+
+
+def test_suffix_mode_labels_the_argument_as_suffix():
+    with pytest.raises(ValueError, match="suffix contains invalid characters"):
+        generate_vanity_key("gg", encoding="hex", suffix=True, max_attempts=10)
+    with pytest.raises(ValueError, match="prefix contains invalid characters"):
+        generate_vanity_key("gg", encoding="hex", max_attempts=10)
+
+
+def test_suffix_mode_too_long_reports_suffix():
+    with pytest.raises(ValueError, match="suffix too long"):
+        generate_vanity_key("a" * 70, encoding="hex", suffix=True, max_attempts=10)
+
+
 def test_index_html_declares_icon_links():
     html = (_REPO_ROOT / "index.html").read_text(encoding="utf-8")
     # iOS ignores manifest icons for the home screen; it needs the link tag.

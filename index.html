@@ -88,6 +88,13 @@
             border-radius: 3px;
             font-size: 12px;
         }
+        /* Offending characters, listed inside the notice frame. */
+        .notice-bad {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #4a4020;
+            font-weight: 600;
+        }
         #progress { margin-top: 12px; }
         #estimate { margin-top: 12px; }
         #results { margin-top: 24px; display: flex; flex-direction: column; gap: 16px; max-height: 60vh; overflow-y: auto; }
@@ -148,12 +155,12 @@
         <div class="form">
             <div class="field">
                 <label for="prefix">Prefix (hex)</label>
-                <input type="text" id="prefix" placeholder="e.g., ab" maxlength="64" oninput="validateHex(this); updateEstimate(); updateReservedPrefixNotice()">
+                <input type="text" id="prefix" placeholder="e.g., ab" maxlength="64" oninput="validateHex(this); updateEstimate(); updatePatternNotice()">
                 <span class="error-msg" id="prefix-error"></span>
             </div>
 <div class="field">
                 <label for="suffix">Suffix (hex)</label>
-                <input type="text" id="suffix" placeholder="e.g., cd" maxlength="64" oninput="validateHex(this); updateEstimate(); updateReservedPrefixNotice()">
+                <input type="text" id="suffix" placeholder="e.g., cd" maxlength="64" oninput="validateHex(this); updateEstimate(); updatePatternNotice()">
                 <span class="error-msg" id="suffix-error"></span>
             </div>
 
@@ -307,10 +314,29 @@
             return (out + s + 's').trim();
         }
 
+        // The only characters an Ed25519 public key can contain: a 32-byte key is
+        // written as 64 hex digits, so every position is a hex digit.
+        const HEX_DIGITS = '0123456789abcdefABCDEF';
+
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, (c) => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+            }[c]));
+        }
+
+        // Unique non-hex characters in a field, in the order first typed.
+        function invalidHexChars(value) {
+            const bad = [];
+            for (const ch of String(value || '')) {
+                if (!HEX_DIGITS.includes(ch) && !bad.includes(ch)) bad.push(ch);
+            }
+            return bad;
+        }
+
         function validateHex(input) {
             const errorEl = document.getElementById(input.id + '-error');
             const value = input.value;
-            if (value && !/^[0-9a-fA-F]*$/.test(value)) {
+            if (value && invalidHexChars(value).length) {
                 input.classList.add('error');
                 errorEl.textContent = 'Invalid hex characters';
                 errorEl.style.display = 'block';
@@ -347,16 +373,45 @@
             return true;
         }
 
-        function updateReservedPrefixNotice() {
-            const prefixInput = document.getElementById('prefix');
+        // One shared notice frame for every pattern problem, so the explanation
+        // of "what may I type and why" is in the same place as the reserved
+        // 00/FF warning rather than hidden in a bare red line.
+        function updatePatternNotice() {
             const noticeEl = document.getElementById('reserved-notice');
+            const prefixInput = document.getElementById('prefix');
+            const suffixInput = document.getElementById('suffix');
+
+            const badPrefix = invalidHexChars(prefixInput.value);
+            const badSuffix = invalidHexChars(suffixInput.value);
+
+            if (badPrefix.length || badSuffix.length) {
+                const where = [];
+                if (badPrefix.length) where.push('Prefix');
+                if (badSuffix.length) where.push('Suffix');
+                const offenders = [...new Set([...badPrefix, ...badSuffix])]
+                    .map((c) => '<code>' + escapeHtml(c) + '</code>').join(', ');
+                noticeEl.innerHTML =
+                    '<strong>Only hexadecimal characters are allowed.</strong> ' +
+                    'An Ed25519 public key is exactly 32 bytes, written as 64 ' +
+                    'hexadecimal digits, so every character at every position ' +
+                    'must be a hex digit: <code>0 1 2 3 4 5 6 7 8 9 a b c d e f</code> ' +
+                    '(uppercase <code>A&ndash;F</code> is accepted and lowercased). ' +
+                    'Letters <code>g&ndash;z</code>, spaces and symbols such as ' +
+                    '<code>0x</code> or <code>:</code> are not hex digits, so they ' +
+                    'can never occur in a key &mdash; there is nothing to match.' +
+                    '<div class="notice-bad">Not hexadecimal in ' +
+                    escapeHtml(where.join(' and ')) + ': ' + offenders + '</div>';
+                noticeEl.style.display = 'block';
+                return;
+            }
 
             if (checkReservedPrefix(prefixInput)) {
                 noticeEl.innerHTML = '<strong>Notice:</strong> Prefixes starting with <code>00</code> or <code>FF</code> are reserved for MeshCore framework devices (not consumer nodes). You can still mine for them, but they may not work with standard MeshCore clients.';
                 noticeEl.style.display = 'block';
-            } else {
-                noticeEl.style.display = 'none';
+                return;
             }
+
+            noticeEl.style.display = 'none';
         }
 
         function updateEstimate() {

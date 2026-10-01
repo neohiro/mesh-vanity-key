@@ -146,7 +146,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -388,6 +388,78 @@ check('renderHistory: scrolls to the newest (first) frame, not the oldest', () =
     eq(created.length, 1, 'exactly one frame is scrolled into view:');
     eq(created[0].children[0].textContent, 'Key 2 Found!',
         'must scroll to the newest key at the top of the list:');
+});
+
+// ---- pattern notice: what may I type, and why -----------------------------
+// One shared orange frame explains every problem with the pattern, instead of a
+// bare red "Invalid hex characters" with no rationale.
+
+check('invalidHexChars: reports unique non-hex characters in order', () => {
+    eq(JSON.stringify(api.invalidHexChars('')), '[]');
+    eq(JSON.stringify(api.invalidHexChars('deadBEEF01')), '[]', 'valid hex is empty');
+    eq(JSON.stringify(api.invalidHexChars('abg')), '["g"]');
+    eq(JSON.stringify(api.invalidHexChars('zxy')), '["z","x","y"]', 'first-seen order');
+    eq(JSON.stringify(api.invalidHexChars('gag')), '["g"]', 'deduplicated');
+    eq(JSON.stringify(api.invalidHexChars('0x')), '["x"]', 'the 0x prefix form');
+});
+
+check('escapeHtml: neutralises markup from user input', () => {
+    eq(api.escapeHtml('<script>'), '&lt;script&gt;');
+    eq(api.escapeHtml('"'), '&quot;');
+    eq(api.escapeHtml("'"), '&#39;');
+    eq(api.escapeHtml('a&b'), 'a&amp;b');
+});
+
+check('updatePatternNotice: invalid hex shows the allowed set and the reason', () => {
+    const notice = getElementById('reserved-notice');
+    getElementById('prefix').value = 'abg';
+    getElementById('suffix').value = '';
+    api.updatePatternNotice();
+
+    eq(notice.style.display, 'block', 'notice is shown');
+    const html = notice.innerHTML;
+    ok(html.includes('Only hexadecimal characters are allowed'),
+        `must state the rule: ${html}`);
+    ok(html.includes('0 1 2 3 4 5 6 7 8 9 a b c d e f'),
+        `must list the allowed digits: ${html}`);
+    ok(html.includes('64 hexadecimal digits'),
+        `must explain why (key size): ${html}`);
+    ok(html.includes('can never occur'), `must say why it cannot match: ${html}`);
+    ok(html.includes('<code>g</code>'), `must name the offender: ${html}`);
+    ok(html.includes('Prefix'), 'must say which field is wrong');
+});
+
+check('updatePatternNotice: names both fields and escapes injected markup', () => {
+    const notice = getElementById('reserved-notice');
+    getElementById('prefix').value = 'ab<';
+    getElementById('suffix').value = 'cd!';
+    api.updatePatternNotice();
+
+    const html = notice.innerHTML;
+    ok(html.includes('Prefix') && html.includes('Suffix'), `both fields named: ${html}`);
+    ok(html.includes('<code>&lt;</code>'), `< must be escaped: ${html}`);
+    ok(html.includes('<code>!</code>'), 'offending symbol still reported');
+    ok(!html.includes('ab<'), 'raw user markup must not reach innerHTML');
+});
+
+check('updatePatternNotice: falls back to the reserved 00/FF warning', () => {
+    const notice = getElementById('reserved-notice');
+    getElementById('prefix').value = '00ab';
+    getElementById('suffix').value = '';
+    api.updatePatternNotice();
+
+    eq(notice.style.display, 'block');
+    ok(notice.innerHTML.includes('reserved'), `reserved text: ${notice.innerHTML}`);
+    ok(!notice.innerHTML.includes('Only hexadecimal'),
+        'valid-but-reserved must not claim a hex problem');
+});
+
+check('updatePatternNotice: hidden when the pattern is fine', () => {
+    const notice = getElementById('reserved-notice');
+    getElementById('prefix').value = 'ab';
+    getElementById('suffix').value = 'cd';
+    api.updatePatternNotice();
+    eq(notice.style.display, 'none');
 });
 
 // ---- csv escaping ----------------------------------------------------------

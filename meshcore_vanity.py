@@ -150,28 +150,51 @@ def _bech32_hrp_expand(hrp: str) -> list[int]:
     return [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 0x1F for c in hrp]
 
 
-def _validate_prefix(prefix: str, encoding: Encoding, case_insensitive: bool = True) -> None:
+# Human-readable description of what each encoding can contain, used to explain
+# rejections instead of just naming the offending character.
+_ALLOWED_HELP = {
+    "hex": "0-9 and a-f (uppercase A-F is also accepted)",
+    "base64": "A-Z, a-z, 0-9, + and /",
+    "base64url": "A-Z, a-z, 0-9, - and _",
+    "base58": "1-9 and A-Z (0, O, I and l are excluded)",
+    "bech32": "qpzry9x8gf2tvdw0s3jn54khce6mua7l (plus the '1' separator)",
+}
+
+_WHY_HEX = (
+    "An Ed25519 public key is exactly 32 bytes, written as 64 hexadecimal "
+    "digits, so every character at every position must be a hex digit; "
+    "letters g-z, spaces and symbols such as '0x' or ':' can never occur."
+)
+
+
+def _validate_prefix(
+    prefix: str, encoding: Encoding, case_insensitive: bool = True, label: str = "prefix"
+) -> None:
     """Validate that prefix contains only valid characters for the encoding.
 
     When matching case-insensitively, an uppercase hex/bech32 prefix is
     accepted because it is lowered before comparison.
+
+    ``label`` names the argument in the error message ("prefix" or "suffix").
     """
     if not prefix:
-        raise ValueError("prefix cannot be empty")
+        raise ValueError(f"{label} cannot be empty")
     check = prefix.lower() if case_insensitive else prefix
     valid = _PREFIX_VALID_CHARS[encoding]
     invalid = set(check) - valid
     if invalid:
+        allowed = _ALLOWED_HELP[encoding]
+        why = f" {_WHY_HEX}" if encoding == "hex" else ""
         raise ValueError(
-            f"prefix contains invalid characters for {encoding}: {sorted(invalid)!r}. "
-            f"Valid: {sorted(valid)!r}"
+            f"{label} contains invalid characters: {sorted(invalid)!r}. "
+            f"Allowed for {encoding}: {allowed}.{why}"
         )
     # Reject reserved prefixes for MeshCore framework devices (00, FF)
     if encoding == "hex" and len(prefix) >= 2:
         prefix_lower = prefix[:2].lower()
         if prefix_lower in RESERVED_PREFIXES:
             raise ValueError(
-                f"prefix {prefix!r} is reserved for MeshCore framework devices "
+                f"{label} {prefix!r} is reserved for MeshCore framework devices "
                 f"(00 and FF prefixes are not available for consumer keys)"
             )
     # A 32-byte key encodes to 44 base64 chars with a single '=' pad at index
@@ -180,7 +203,7 @@ def _validate_prefix(prefix: str, encoding: Encoding, case_insensitive: bool = T
     if encoding == "base64" and "=" in prefix:
         if not (len(prefix) == 44 and prefix.endswith("=") and prefix.count("=") == 1):
             raise ValueError(
-                f"prefix {prefix!r} can never match {encoding}: "
+                f"{label} {prefix!r} can never match {encoding}: "
                 f"'=' padding occurs only as the last character"
             )
 
@@ -369,7 +392,9 @@ def generate_vanity_key(
 
     Uses scalar-walk key derivation for performance and reproducibility.
     """
-    _validate_prefix(prefix, encoding, case_insensitive)
+    _validate_prefix(
+        prefix, encoding, case_insensitive, label="suffix" if suffix else "prefix"
+    )
     seed = _validate_seed(seed)
     if progress_interval <= 0:
         raise ValueError("progress_interval must be positive")
@@ -397,8 +422,8 @@ def generate_vanity_key(
         max_len = len(hrp) + 1 + 52 + 6
     if prefix_len > max_len:
         raise ValueError(
-            f"prefix too long for {encoding}: {prefix_len} chars, "
-            f"max is {max_len} for a 32-byte key"
+            f"{'suffix' if suffix else 'prefix'} too long for {encoding}: "
+            f"{prefix_len} chars, max is {max_len} for a 32-byte key"
         )
     # Support suffix matching: check the last prefix_len chars instead of the first.
     # Set suffix_mode=True via the suffix parameter to hunt for keys whose encoded
