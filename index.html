@@ -45,8 +45,56 @@
         input[type="text"].error { border-color: #f85149; }
         input[type="text"]:disabled { opacity: 0.5; }
         .error-msg { color: #f85149; font-size: 12px; margin-top: 4px; display: none; }
-
-        .checkbox-field { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
+        .worker-input {
+            width: calc(3ch + 30px);
+            padding: 10px 8px 10px 14px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            font-size: 16px;
+            font-family: 'SFMono-Regular', Consolas, monospace;
+            text-align: left;
+        }
+        .worker-input:focus { outline: none; border-color: #58a6ff; }
+        .worker-input:disabled { opacity: 0.5; }
+        .worker-input::-webkit-inner-spin-button,
+        .worker-input::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            appearance: none;
+            margin: 0;
+            display: none;
+        }
+        .worker-input {
+            -moz-appearance: textfield;
+            appearance: textfield;
+        }
+        .step-btn {
+            width: 36px;
+            padding: 10px 0;
+            background: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            font-size: 16px;
+            font-weight: 700;
+            line-height: 1;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .step-btn:hover:not(:disabled) { background: #30363d; }
+        .step-btn:active:not(:disabled) { background: #484f58; }
+        .step-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .worker-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .worker-hint {
+            font-size: 12px;
+            color: #8b949e;
+            white-space: nowrap;
+        }
         .checkbox-field input[type="checkbox"] { width: 18px; height: 18px; accent-color: #58a6ff; }
         .checkbox-field input[type="checkbox"]:disabled { opacity: 0.5; }
         .checkbox-field label { margin-bottom: 0; cursor: pointer; }
@@ -130,13 +178,21 @@
                 <input type="text" id="prefix" placeholder="e.g., ab" maxlength="64" oninput="validateHex(this); updateEstimate(); updateReservedPrefixNotice()">
                 <span class="error-msg" id="prefix-error"></span>
             </div>
-
-            <div class="field">
+<div class="field">
                 <label for="suffix">Suffix (hex)</label>
                 <input type="text" id="suffix" placeholder="e.g., cd" maxlength="64" oninput="validateHex(this); updateEstimate(); updateReservedPrefixNotice()">
                 <span class="error-msg" id="suffix-error"></span>
             </div>
 
+            <div class="field">
+                <label for="workers">Workers</label>
+                <div class="worker-wrapper">
+                    <button type="button" class="step-btn" id="workers-minus" aria-label="Fewer workers">−</button>
+                    <input type="number" id="workers" value="4" min="1" max="16" class="worker-input" oninput="updateEstimate()">
+                    <button type="button" class="step-btn" id="workers-plus" aria-label="More workers">+</button>
+                    <span class="worker-hint">More workers = faster search (uses more CPU)</span>
+                </div>
+            </div>
 
 
             <div class="buttons">
@@ -278,11 +334,28 @@
             estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (' + rateLabel + typicalRate.toLocaleString() + ' keys/s)';
         }
 
+        function getNumWorkers() {
+            const raw = parseInt(document.getElementById('workers').value, 10);
+            if (!Number.isFinite(raw)) return 4;
+            return Math.min(Math.max(raw, 1), 16);
+        }
+
         function setFormDisabled(disabled) {
             document.getElementById('prefix').disabled = disabled;
             document.getElementById('suffix').disabled = disabled;
+            document.getElementById('workers').disabled = disabled;
+            document.getElementById('workers-minus').disabled = disabled;
+            document.getElementById('workers-plus').disabled = disabled;
             document.getElementById('new-search-btn').disabled = disabled;
         }
+
+        function stepWorkers(delta) {
+            const el = document.getElementById('workers');
+            el.value = Math.min(16, Math.max(1, getNumWorkers() + delta));
+            updateEstimate();
+        }
+        document.getElementById('workers-minus').addEventListener('click', () => stepWorkers(-1));
+        document.getElementById('workers-plus').addEventListener('click', () => stepWorkers(1));
 
 function startMining() {
             if (mining) return;
@@ -290,7 +363,7 @@ function startMining() {
                 alert('Your browser does not support Web Workers. Please use a modern browser.');
                 return;
             }
-            if (typeof nacl === 'undefined') {
+            if (typeof sodium === 'undefined') {
                 alert('Failed to load cryptographic library. Please check your internet connection and refresh.');
                 return;
             }
@@ -300,6 +373,7 @@ function startMining() {
             const suffix = document.getElementById('suffix').value.toLowerCase();
             const matchPrefix = prefix.length > 0;
             const matchSuffix = suffix.length > 0;
+            const numWorkers = getNumWorkers();
 
             document.getElementById('estimate').textContent = '';
             document.getElementById('live-estimate').textContent = '';
@@ -421,41 +495,42 @@ function startMining() {
             workers = [];
             initTimeouts = [];
 
-            const blob = new Blob([workerCode], { type: 'application/javascript' });
-            const url = URL.createObjectURL(blob);
-            blobUrls.push(url);
-            const w = new Worker(url);
-            workers.push(w);
+            for (let i = 0; i < numWorkers; i++) {
+                const blob = new Blob([workerCode], { type: 'application/javascript' });
+                const url = URL.createObjectURL(blob);
+                blobUrls.push(url);
+                const w = new Worker(url);
+                workers.push(w);
 
-            const initTimeout = setTimeout(() => {
-                if (mining && workers.includes(w)) {
-                    stopAllWorkers();
+                const initTimeout = setTimeout(() => {
+                    if (mining && workers.includes(w)) {
+                        stopAllWorkers();
+                        mining = false;
+                        setFormDisabled(false);
+                        document.getElementById('start-btn').disabled = false;
+                        document.getElementById('stop-btn').disabled = true;
+                        document.getElementById('progress').classList.add('hidden');
+                        alert('Worker ' + i + ' failed to initialize (timeout). Check internet connection and refresh.');
+                    }
+                }, 10000);
+                initTimeouts.push(initTimeout);
+
+                w.onerror = function(e) {
+                    clearTimeout(initTimeouts[i]);
                     mining = false;
                     setFormDisabled(false);
                     document.getElementById('start-btn').disabled = false;
                     document.getElementById('stop-btn').disabled = true;
                     document.getElementById('progress').classList.add('hidden');
-                    alert('Worker failed to initialize (timeout). Check internet connection and refresh.');
-                }
-            }, 10000);
-            initTimeouts.push(initTimeout);
+                    alert('Worker ' + i + ' error: ' + e.message);
+                    stopAllWorkers();
+                };
 
-            w.onerror = function(e) {
-                clearTimeout(initTimeouts[0]);
-                mining = false;
-                setFormDisabled(false);
-                document.getElementById('start-btn').disabled = false;
-                document.getElementById('stop-btn').disabled = true;
-                document.getElementById('progress').classList.add('hidden');
-                alert('Worker error: ' + e.message);
-                stopAllWorkers();
-            };
-
-            w.onmessage = function(e) {
-                console.log('[Main] Received message:', e.data.type, e.data);
+                w.onmessage = function(e) {
+                    console.log('[Main] Received message from worker ' + i + ':', e.data.type, e.data);
                 if (e.data.type === 'ready') {
-                    clearTimeout(initTimeouts[0]);
-                    console.log('[Main] Sending work data to worker');
+                    clearTimeout(initTimeouts[i]);
+                    console.log('[Main] Sending work data to worker ' + i);
                     w.postMessage({ prefix, suffix, matchPrefix, matchSuffix });
                     return;
                 }
@@ -488,7 +563,7 @@ function startMining() {
                             }
                         }
                     } else if (e.data.type === 'found') {
-                        clearTimeout(initTimeouts[0]);
+                        clearTimeout(initTimeouts[i]);
                         mining = false;
                         setFormDisabled(false);
                         document.getElementById('start-btn').disabled = false;
@@ -504,7 +579,7 @@ function startMining() {
                         });
                         stopAllWorkers();
                     } else if (e.data.type === 'error') {
-                        clearTimeout(initTimeouts[0]);
+                        clearTimeout(initTimeouts[i]);
                         mining = false;
                         setFormDisabled(false);
                         document.getElementById('start-btn').disabled = false;
