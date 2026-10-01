@@ -45,58 +45,7 @@
         input[type="text"].error { border-color: #f85149; }
         input[type="text"]:disabled { opacity: 0.5; }
         .error-msg { color: #f85149; font-size: 12px; margin-top: 4px; display: none; }
-        .worker-input {
-            width: calc(3ch + 30px);
-            padding: 10px 8px 10px 14px;
-            background: #0d1117;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            color: #c9d1d9;
-            font-size: 16px;
-            font-family: 'SFMono-Regular', Consolas, monospace;
-            text-align: left;
-        }
-        .worker-input:focus { outline: none; border-color: #58a6ff; }
-        .worker-input:disabled { opacity: 0.5; }
-        /* Native spinners hidden: themed flanking steppers replace them,
-           so they can never overlap the digit. */
-        .worker-input::-webkit-inner-spin-button,
-        .worker-input::-webkit-outer-spin-button {
-            -webkit-appearance: none;
-            appearance: none;
-            margin: 0;
-            display: none;
-        }
-        .worker-input {
-            -moz-appearance: textfield;
-            appearance: textfield;
-        }
-        .step-btn {
-            width: 36px;
-            padding: 10px 0;
-            background: #21262d;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            color: #c9d1d9;
-            font-size: 16px;
-            font-weight: 700;
-            line-height: 1;
-            cursor: pointer;
-            transition: background 0.2s;
-        }
-        .step-btn:hover:not(:disabled) { background: #30363d; }
-        .step-btn:active:not(:disabled) { background: #484f58; }
-        .step-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .worker-wrapper {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-        .worker-hint {
-            font-size: 12px;
-            color: #8b949e;
-            white-space: nowrap;
-        }
+
         .checkbox-field { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
         .checkbox-field input[type="checkbox"] { width: 18px; height: 18px; accent-color: #58a6ff; }
         .checkbox-field input[type="checkbox"]:disabled { opacity: 0.5; }
@@ -188,15 +137,7 @@
                 <span class="error-msg" id="suffix-error"></span>
             </div>
 
-            <div class="field">
-                <label for="workers">Workers</label>
-                <div class="worker-wrapper">
-                    <button type="button" class="step-btn" id="workers-minus" aria-label="Fewer workers">−</button>
-                    <input type="number" id="workers" value="4" min="1" max="16" class="worker-input" oninput="updateEstimate()">
-                    <button type="button" class="step-btn" id="workers-plus" aria-label="More workers">+</button>
-                    <span class="worker-hint">More workers = faster search (uses more CPU)</span>
-                </div>
-            </div>
+
 
             <div class="buttons">
                 <button id="start-btn" onclick="startMining()">Start Mining</button>
@@ -294,49 +235,9 @@
             }
         }
 
-        function getNumWorkers() {
-            const raw = parseInt(document.getElementById('workers').value, 10);
-            if (!Number.isFinite(raw)) return 4;
-            return Math.min(Math.max(raw, 1), 16);
-        }
-
-        // Measured on this device at page load (keys/s for one worker).
-        // Falls back to a conservative 200 keys/s until calibration finishes
-        // (e.g. crypto library failed to load).
-        let calibratedRatePerWorker = null;
-
-        function ratePerWorker() {
-            return calibratedRatePerWorker || 200;
-        }
-
-        async function calibrateBenchmark() {
-            try {
-                if (typeof nacl === 'undefined') return;
-                const N = 48;
-                const seed = new Uint8Array(32);
-                if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-                    crypto.getRandomValues(seed);
-                }
-                const t0 = performance.now();
-                for (let i = 0; i < N; i++) {
-                    seed[0] = i & 0xff;
-                    nacl.sign.keyPair.fromSeed(seed);
-                    if (i % 8 === 7) await new Promise(r => setTimeout(r, 0));
-                }
-                const dt = (performance.now() - t0) / 1000;
-                if (dt > 0) {
-                    calibratedRatePerWorker = N / dt;
-                    updateEstimate();
-                }
-            } catch (e) {
-                // Keep the conservative default; estimate stays valid, just rough.
-            }
-        }
-
         function updateEstimate() {
             const prefix = document.getElementById('prefix').value;
             const suffix = document.getElementById('suffix').value;
-            const numWorkers = getNumWorkers();
             const estimateEl = document.getElementById('estimate');
 
             if (!prefix && !suffix) {
@@ -357,12 +258,10 @@
                 expected = Math.pow(16, suffix.length);
             }
 
-            // Per-worker rate: measured at page load when available.
-            const perWorker = ratePerWorker();
-            const typicalRate = perWorker * numWorkers;
+            const typicalRate = ratePerWorker();
             const rateLabel = calibratedRatePerWorker
-                ? 'at ' + Math.round(perWorker).toLocaleString() + ' keys/s per worker (calibrated), '
-                : 'at ~200 keys/s per worker, ';
+                ? 'at ' + Math.round(typicalRate).toLocaleString() + ' keys/s (calibrated), '
+                : 'at ~200 keys/s, ';
             const estSeconds = expected / typicalRate;
             let timeStr;
             if (!isFinite(estSeconds)) {
@@ -376,25 +275,14 @@
             } else {
                 timeStr = (estSeconds / 86400).toFixed(1) + 'd';
             }
-            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (' + rateLabel + typicalRate.toLocaleString() + ' keys/s total with ' + numWorkers + ' worker' + (numWorkers > 1 ? 's' : '') + ')';
+            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (' + rateLabel + typicalRate.toLocaleString() + ' keys/s)';
         }
 
         function setFormDisabled(disabled) {
             document.getElementById('prefix').disabled = disabled;
             document.getElementById('suffix').disabled = disabled;
-            document.getElementById('workers').disabled = disabled;
-            document.getElementById('workers-minus').disabled = disabled;
-            document.getElementById('workers-plus').disabled = disabled;
             document.getElementById('new-search-btn').disabled = disabled;
         }
-
-        function stepWorkers(delta) {
-            const el = document.getElementById('workers');
-            el.value = Math.min(16, Math.max(1, getNumWorkers() + delta));
-            updateEstimate();
-        }
-        document.getElementById('workers-minus').addEventListener('click', () => stepWorkers(-1));
-        document.getElementById('workers-plus').addEventListener('click', () => stepWorkers(1));
 
 function startMining() {
             if (mining) return;
@@ -412,8 +300,6 @@ function startMining() {
             const suffix = document.getElementById('suffix').value.toLowerCase();
             const matchPrefix = prefix.length > 0;
             const matchSuffix = suffix.length > 0;
-            const numWorkers = getNumWorkers();
-            document.getElementById('workers').value = numWorkers;
 
             document.getElementById('estimate').textContent = '';
             document.getElementById('live-estimate').textContent = '';
@@ -449,7 +335,7 @@ function startMining() {
                             return;
                         }
 
-                        const { prefix, suffix, matchPrefix, matchSuffix, workerId, totalWorkers } = e.data;
+                        const { prefix, suffix, matchPrefix, matchSuffix } = e.data;
                         const prefixLower = prefix.toLowerCase();
                         const suffixLower = suffix.toLowerCase();
 
@@ -464,9 +350,8 @@ function startMining() {
                                 seed[i] = Math.floor(Math.random() * 256);
                             }
                         }
-                        // Each worker starts at a different offset
+                        // Single worker: start at random offset
                         let scalar = BigInt('0x' + Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join(''));
-                        scalar = (scalar + BigInt(workerId)) & ((1n << 256n) - 1n);
 
                         let patternLen;
                         if (matchPrefix && matchSuffix) {
@@ -534,8 +419,8 @@ function startMining() {
                                 }
 
                                 attempts++;
-                                // Each worker steps by totalWorkers
-                                scalar = (scalar + BigInt(totalWorkers)) & ((1n << 256n) - 1n);
+                                // Single worker: step by 1
+                                scalar = (scalar + 1n) & ((1n << 256n) - 1n);
                             }
                             reportProgress(false);
                             // Real yield: lets postMessage flush and keeps UI/Stop responsive.
@@ -551,45 +436,44 @@ function startMining() {
             workers = [];
             initTimeouts = [];
 
-            for (let i = 0; i < numWorkers; i++) {
-                const blob = new Blob([workerCode], { type: 'application/javascript' });
-                const url = URL.createObjectURL(blob);
-                blobUrls.push(url);
-                const w = new Worker(url);
-                workers.push(w);
+            const blob = new Blob([workerCode], { type: 'application/javascript' });
+            const url = URL.createObjectURL(blob);
+            blobUrls.push(url);
+            const w = new Worker(url);
+            workers.push(w);
 
-                const initTimeout = setTimeout(() => {
-                    if (mining && workers.includes(w)) {
-                        stopAllWorkers();
-                        mining = false;
-                        setFormDisabled(false);
-                        document.getElementById('start-btn').disabled = false;
-                        document.getElementById('stop-btn').disabled = true;
-                        document.getElementById('progress').classList.add('hidden');
-                        alert('Worker ' + i + ' failed to initialize (timeout). Check internet connection and refresh.');
-                    }
-                }, 10000);
-                initTimeouts.push(initTimeout);
-
-                w.onerror = function(e) {
-                    clearTimeout(initTimeouts[i]);
+            const initTimeout = setTimeout(() => {
+                if (mining && workers.includes(w)) {
+                    stopAllWorkers();
                     mining = false;
                     setFormDisabled(false);
                     document.getElementById('start-btn').disabled = false;
                     document.getElementById('stop-btn').disabled = true;
                     document.getElementById('progress').classList.add('hidden');
-                    alert('Worker ' + i + ' error: ' + e.message);
-                    stopAllWorkers();
-                };
+                    alert('Worker failed to initialize (timeout). Check internet connection and refresh.');
+                }
+            }, 10000);
+            initTimeouts.push(initTimeout);
 
-                w.onmessage = function(e) {
-                    console.log('[Main] Received message from worker ' + i + ':', e.data.type, e.data);
-                    if (e.data.type === 'ready') {
-                        clearTimeout(initTimeouts[i]);
-                        console.log('[Main] Sending work data to worker ' + i);
-                        w.postMessage({ prefix, suffix, matchPrefix, matchSuffix, workerId: i, totalWorkers: numWorkers });
-                        return;
-                    }
+            w.onerror = function(e) {
+                clearTimeout(initTimeouts[0]);
+                mining = false;
+                setFormDisabled(false);
+                document.getElementById('start-btn').disabled = false;
+                document.getElementById('stop-btn').disabled = true;
+                document.getElementById('progress').classList.add('hidden');
+                alert('Worker error: ' + e.message);
+                stopAllWorkers();
+            };
+
+            w.onmessage = function(e) {
+                console.log('[Main] Received message:', e.data.type, e.data);
+                if (e.data.type === 'ready') {
+                    clearTimeout(initTimeouts[0]);
+                    console.log('[Main] Sending work data to worker');
+                    w.postMessage({ prefix, suffix, matchPrefix, matchSuffix });
+                    return;
+                }
                     if (e.data.type === 'progress') {
                         const attempts = Number(e.data.attempts) || 0;
                         const rate = Number(e.data.rate) || 0;
@@ -926,15 +810,6 @@ function startMining() {
             setTimeout(calibrateBenchmark, 0);
             loadHistory();
             renderHistory(false);
-            // Auto-cap workers based on logical cores to prevent thread contention slowdowns (max 2).
-            if (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) {
-                const optimal = Math.min(Math.max(Math.floor(navigator.hardwareConcurrency / 2), 1), 2);
-                const el = document.getElementById('workers');
-                if (el) {
-                    el.value = optimal;
-                    updateEstimate();
-                }
-            }
         });
 
         window.addEventListener('beforeunload', function() {
