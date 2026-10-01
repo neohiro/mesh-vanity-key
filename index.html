@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshCore Vanity Key Generator</title>
-    <script src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js"></script>
+    <script src="libsodium.js"></script>
     <style>
         :root { color-scheme: dark; }
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -312,15 +312,15 @@ function startMining() {
 
             const workerCode = `
                 try {
-                    importScripts('https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js');
-                    console.log('[Worker] tweetnacl loaded successfully');
+                    importScripts('libsodium.js');
+                    console.log('[Worker] libsodium loaded successfully');
                 } catch (e) {
                     console.error('[Worker] importScripts failed:', e);
                     self.postMessage({ type: 'error', message: 'Failed to load cryptographic library: ' + e.message });
                 }
 
-                if (typeof nacl === 'undefined') {
-                    console.error('[Worker] nacl is undefined after import');
+                if (typeof sodium === 'undefined') {
+                    console.error('[Worker] sodium is undefined after import');
                     self.postMessage({ type: 'error', message: 'Failed to load cryptographic library (importScripts failed).' });
                 } else {
                     console.log('[Worker] Ready to work');
@@ -330,7 +330,7 @@ function startMining() {
                 self.onmessage = async function(e) {
                     console.log('[Worker] Received message:', e.data.type || e.data);
                     try {
-                        if (typeof nacl === 'undefined') {
+                        if (typeof sodium === 'undefined') {
                             self.postMessage({ type: 'error', message: 'Failed to load cryptographic library. Please check your internet connection and refresh.' });
                             return;
                         }
@@ -341,17 +341,6 @@ function startMining() {
 
                         let attempts = 0;
                         const startTime = Date.now();
-
-                        let seed = new Uint8Array(32);
-                        if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-                            crypto.getRandomValues(seed);
-                        } else {
-                            for (let i = 0; i < 32; i++) {
-                                seed[i] = Math.floor(Math.random() * 256);
-                            }
-                        }
-                        // Single worker: start at random offset
-                        let scalar = BigInt('0x' + Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join(''));
 
                         let patternLen;
                         if (matchPrefix && matchSuffix) {
@@ -389,14 +378,12 @@ function startMining() {
 
                         while (true) {
                             for (let b = 0; b < BATCH_SIZE; b++) {
-                                const seedHex = scalar.toString(16).padStart(64, '0');
-                                const seedBytes = new Uint8Array(32);
-                                for (let i = 0; i < 32; i++) {
-                                    seedBytes[i] = parseInt(seedHex.substring(i * 2, i * 2 + 2), 16);
-                                }
-
-                                const keyPair = nacl.sign.keyPair.fromSeed(seedBytes);
+                                // Generate a random seed using libsodium's CSPRNG
+                                const seed = sodium.randombytes_buf(32);
+                                // Derive keypair from seed
+                                const keyPair = sodium.crypto_sign_seed_keypair(seed);
                                 const publicKeyHex = Array.from(keyPair.publicKey).map(b => b.toString(16).padStart(2, '0')).join('');
+                                const privateKeyHex = Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join('');
 
                                 let match = false;
                                 if (matchPrefix && matchSuffix) {
@@ -411,7 +398,7 @@ function startMining() {
                                     self.postMessage({
                                         type: 'found',
                                         publicKey: publicKeyHex,
-                                        privateKey: seedHex,
+                                        privateKey: privateKeyHex,
                                         attempts: attempts,
                                         elapsed: (Date.now() - startTime) / 1000
                                     });
@@ -419,8 +406,6 @@ function startMining() {
                                 }
 
                                 attempts++;
-                                // Single worker: step by 1
-                                scalar = (scalar + 1n) & ((1n << 256n) - 1n);
                             }
                             reportProgress(false);
                             // Real yield: lets postMessage flush and keeps UI/Stop responsive.
