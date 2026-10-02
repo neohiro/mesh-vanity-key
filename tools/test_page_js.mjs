@@ -1695,6 +1695,84 @@ await asyncCheck('cancelling during startup must not start the search', async ()
     }
 });
 
+await asyncCheck('a superseded startup does not corrupt the running search', async () => {
+    // CHARACTERISATION test, not a regression guard.
+    //
+    // Start -> New Search -> Start, all before libsodium resolves. New Search
+    // (resetForm) clears `starting` AND re-enables the buttons, so a second
+    // Start can begin while the first startMining() is still parked on
+    // libsodium.ready. When libsodium resolves, the two resume in order: the
+    // superseded call sees `starting === true`, proceeds and clears it; the
+    // legitimate second call then bails on `!starting`.
+    //
+    // That looks alarming - the wrong call survives - but it is BENIGN, and this
+    // test exists to pin why rather than to prevent it. Both bodies read the
+    // pattern from the DOM AFTER the cancellation guard (verified: guard at
+    // char ~33235, prefix read at ~33343), so whichever body proceeds mines
+    // whatever the inputs currently hold. One surviving worker set, mining the
+    // pattern on screen right now - which is what the user asked for.
+    //
+    // Asserted rather than assumed: an earlier attempt to "fix" this with a
+    // start-token guard was written, measured, and REVERTED, because removing
+    // the token changed nothing observable. So the invariant below is what the
+    // current code actually guarantees.
+    //
+    // Scope of the claim: this pins today's behaviour. It was NOT verified to
+    // catch a future refactor that captures the pattern before the guard - an
+    // attempt to simulate that failed on a scoping error in the simulation
+    // itself, so treat the "if that changes, this fails" reasoning as an
+    // expectation rather than a demonstrated result.
+    primeForm();
+    workerPool.length = 0;
+
+    const realSodium = sandbox.libsodium;
+    let release;
+    const ready = new Promise((r) => { release = r; });
+    const stub = {
+        ready,
+        crypto_sign_seed_keypair(seed) {
+            const pk = new Uint8Array(32);
+            pk[0] = (seed[0] || 0) ^ 0xab;
+            pk[31] = seed[31] & 0xff;
+            return { publicKey: pk, privateKey: new Uint8Array(64) };
+        },
+    };
+    sandbox.libsodium = stub;
+    sandbox.sodium = stub;
+
+    const first = api.startMining();          // parked on ready, pattern 'ab'
+    await new Promise((r) => setTimeout(r, 0));
+    api.resetForm();                          // New Search: cancels + re-enables
+    // resetForm clears the inputs, and a real user then types a NEW pattern.
+    // Without this the second Start fails validation and never reaches the
+    // race, which would make the check pass for the wrong reason.
+    getElementById('prefix').value = 'cd';
+    getElementById('suffix').value = '';
+    const second = api.startMining();         // a genuinely new search, pattern 'cd'
+    await new Promise((r) => setTimeout(r, 0));
+    try {
+        eq(api.startingState(), true, 'the second search should be starting');
+        release();                            // libsodium finally arrives
+        await Promise.all([first, second]);
+        await new Promise((r) => setTimeout(r, 0));
+
+        // The surviving search must mine the pattern currently on screen, not
+        // the one that was typed first. Workers receive the pattern on 'ready',
+        // so drive that and check what was actually sent.
+        ok(workerPool.length > 0, 'the surviving search should have created workers');
+        for (const w of workerPool) w.deliver({ type: 'ready' });
+        const sent = workerPool.flatMap((w) => w.posted.map((m) => m.prefix));
+        ok(sent.length > 0, 'workers should have been sent the surviving pattern');
+        ok(sent.every((p) => p === 'cd'),
+            `only the pattern currently on screen may be mined, `
+            + `got ${JSON.stringify(sent)}`);
+    } finally {
+        sandbox.libsodium = realSodium;
+        sandbox.sodium = realSodium;
+        api.stopMining();
+    }
+});
+
 check('worker init timers are per-worker, not looked up by index', () => {
     const html = fs.readFileSync(pageHtmlPath, 'utf8');
 
