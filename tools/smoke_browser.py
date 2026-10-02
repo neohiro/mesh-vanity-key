@@ -261,10 +261,17 @@ def main() -> int:
 
                 worker_errors = [e for e in errors if "Worker" in e]
                 assert not worker_errors, f"worker errors: {worker_errors!r}"
-                # The one dialog this test deliberately provokes is the Clear All Keys
-                # confirmation. Anything else means a worker or library error.
-                unexpected = [d for d in dialogs if "Delete" not in d]
+                # This test deliberately provokes two dialogs, and nothing else:
+                #   * the impossible-pattern alert (start must be refused);
+                #   * the Clear All Keys confirmation.
+                # Anything else means a worker or library error, which is what
+                # this assertion is for.
+                deliberate = ("Delete", "can never match")
+                unexpected = [d for d in dialogs if not any(k in d for k in deliberate)]
                 assert not unexpected, f"unexpected dialogs: {unexpected!r}"
+                assert any("can never match" in d for d in dialogs), (
+                    "the impossible-pattern alert should have fired"
+                )
             finally:
                 browser.close()
     finally:
