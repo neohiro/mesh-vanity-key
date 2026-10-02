@@ -16,6 +16,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
 const mainJsPath = process.argv[2];
@@ -24,6 +25,12 @@ if (!mainJsPath) {
     process.exit(2);
 }
 const source = fs.readFileSync(mainJsPath, 'utf8');
+
+// The page itself, so tests can assert on markup (event-handler wiring) that
+// never reaches the extracted JS. Resolved from this script's own location so
+// it works regardless of the caller's working directory.
+const pageHtmlPath = process.env.PAGE_HTML
+    || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'index.html');
 
 // ---- Minimal DOM mock ------------------------------------------------------
 
@@ -560,6 +567,70 @@ check('updatePatternNotice: falls back to the reserved 00/FF warning', () => {
     ok(notice.innerHTML.includes('reserved'), `reserved text: ${notice.innerHTML}`);
     ok(!notice.innerHTML.includes('Only hexadecimal'),
         'valid-but-reserved must not claim a hex problem');
+});
+
+check('updatePatternNotice: the notice retires as soon as the boxes are cleared', () => {
+    const notice = getElementById('reserved-notice');
+    const prefix = getElementById('prefix');
+    const suffix = getElementById('suffix');
+
+    // Trigger each of the three notices in turn, then clear and confirm the
+    // notice AND its text go away - not just the styling.
+    prefix.value = '00ab'; suffix.value = '';
+    api.updatePatternNotice();
+    ok(notice.style.display !== 'none', 'reserved notice shown');
+
+    prefix.value = '';
+    api.updatePatternNotice();
+    eq(notice.style.display, 'none', 'clearing the prefix retires the notice');
+    ok(notice.hidden === true, 'notice must also be hidden from assistive tech');
+    ok(!notice.innerHTML || notice.innerHTML === '',
+        `stale text must not linger: ${notice.innerHTML}`);
+
+    // Same for the impossible-pattern notice.
+    prefix.value = 'ab'.repeat(40); suffix.value = 'cd'.repeat(40);
+    api.updatePatternNotice();
+    ok(notice.style.display !== 'none', 'impossible-pattern notice shown');
+
+    prefix.value = ''; suffix.value = '';
+    api.updatePatternNotice();
+    eq(notice.style.display, 'none', 'clearing both retires it');
+    ok(!notice.innerHTML || notice.innerHTML === '', 'text cleared');
+
+    // And the invalid-hex notice.
+    prefix.value = 'zz'; suffix.value = '';
+    api.updatePatternNotice();
+    ok(notice.style.display !== 'none', 'invalid-hex notice shown');
+    prefix.value = '';
+    api.updatePatternNotice();
+    eq(notice.style.display, 'none', 'clearing retires the hex notice too');
+});
+
+check('refreshPatternUI is the single path used by both inputs', () => {
+    // The inputs used to inline validateHex/updateEstimate/updatePatternNotice.
+    // They now call refreshPatternUI() so programmatic clears cannot drift from
+    // typed ones. Assert the attribute really points at the shared helper.
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+    const inputs = html.match(/id="(prefix|suffix)"[^>]*oninput="([^"]*)"/g) || [];
+    eq(inputs.length, 2, 'both inputs declare an oninput handler:');
+    for (const el of inputs) {
+        ok(/oninput="refreshPatternUI\(\)"/.test(el),
+            `input must use refreshPatternUI(): ${el}`);
+    }
+});
+
+check('resetForm clears the notice through the shared path', () => {
+    const notice = getElementById('reserved-notice');
+    getElementById('prefix').value = '00ab';
+    getElementById('suffix').value = '';
+    api.updatePatternNotice();
+    ok(notice.style.display !== 'none', 'precondition: notice is shown');
+
+    api.resetForm();
+
+    eq(getElementById('prefix').value, '', 'resetForm clears the prefix');
+    eq(notice.style.display, 'none', 'resetForm must retire the notice');
+    ok(!notice.innerHTML || notice.innerHTML === '', 'and clear its text');
 });
 
 check('updatePatternNotice: hidden when the pattern is fine', () => {

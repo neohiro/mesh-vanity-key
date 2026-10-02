@@ -155,12 +155,12 @@
         <div class="form">
             <div class="field">
                 <label for="prefix">Prefix (hex)</label>
-                <input type="text" id="prefix" placeholder="e.g., ab" maxlength="64" oninput="validateHex(this); updateEstimate(); updatePatternNotice()">
+                <input type="text" id="prefix" placeholder="e.g., ab" maxlength="64" oninput="refreshPatternUI()">
                 <span class="error-msg" id="prefix-error"></span>
             </div>
 <div class="field">
                 <label for="suffix">Suffix (hex)</label>
-                <input type="text" id="suffix" placeholder="e.g., cd" maxlength="64" oninput="validateHex(this); updateEstimate(); updatePatternNotice()">
+                <input type="text" id="suffix" placeholder="e.g., cd" maxlength="64" oninput="refreshPatternUI()">
                 <span class="error-msg" id="suffix-error"></span>
             </div>
 
@@ -393,6 +393,34 @@
             return true;
         }
 
+        // Clearing the pattern must always retire the notice. Clearing innerHTML as
+        // well as display means no stale text can ever resurface, and the
+        // `hidden` attribute keeps the element out of the accessibility tree.
+        function hidePatternNotice() {
+            const el = document.getElementById('reserved-notice');
+            el.style.display = 'none';
+            el.hidden = true;
+            el.innerHTML = '';
+        }
+
+        function showPatternNotice(html) {
+            const el = document.getElementById('reserved-notice');
+            el.innerHTML = html;
+            el.style.display = 'block';
+            el.hidden = false;
+        }
+
+        // Single entry point for "the pattern changed". Bound to the inputs'
+        // input events AND called by resetForm(), so clearing the boxes by any
+        // route - typing, cut, paste, or programmatically - retires the notice
+        // through one code path instead of each caller remembering to.
+        function refreshPatternUI() {
+            validateHex(document.getElementById('prefix'));
+            validateHex(document.getElementById('suffix'));
+            updateEstimate();
+            updatePatternNotice();
+        }
+
         // One shared notice frame for every pattern problem, so the explanation
         // of "what may I type and why" is in the same place as the reserved
         // 00/FF warning rather than hidden in a bare red line.
@@ -410,7 +438,7 @@
                 if (badSuffix.length) where.push('Suffix');
                 const offenders = [...new Set([...badPrefix, ...badSuffix])]
                     .map((c) => '<code>' + escapeHtml(c) + '</code>').join(', ');
-                noticeEl.innerHTML =
+                showPatternNotice(
                     '<strong>Only hexadecimal characters are allowed.</strong> ' +
                     'An Ed25519 public key is exactly 32 bytes, written as 64 ' +
                     'hexadecimal digits, so every character at every position ' +
@@ -420,30 +448,37 @@
                     '<code>0x</code> or <code>:</code> are not hex digits, so they ' +
                     'can never occur in a key &mdash; there is nothing to match.' +
                     '<div class="notice-bad">Not hexadecimal in ' +
-                    escapeHtml(where.join(' and ')) + ': ' + offenders + '</div>';
-                noticeEl.style.display = 'block';
+                    escapeHtml(where.join(' and ')) + ': ' + offenders + '</div>'
+                );
                 return;
             }
 
             if (checkReservedPrefix(prefixInput)) {
-                noticeEl.innerHTML = '<strong>Notice:</strong> Prefixes starting with <code>00</code> or <code>FF</code> are reserved for MeshCore framework devices (not consumer nodes). You can still mine for them, but they may not work with standard MeshCore clients.';
-                noticeEl.style.display = 'block';
+                showPatternNotice(
+                    '<strong>Notice:</strong> Prefixes starting with <code>00</code> or '
+                    + '<code>FF</code> are reserved for MeshCore framework devices '
+                    + '(not consumer nodes). You can still mine for them, but they '
+                    + 'may not work with standard MeshCore clients.'
+                );
                 return;
             }
 
             // Warn while typing when the two patterns are longer than a key.
             const totalLen = prefixInput.value.length + suffixInput.value.length;
             if (totalLen > PUBLIC_KEY_HEX_LENGTH) {
-                noticeEl.innerHTML = '<strong>Impossible pattern:</strong> prefix + suffix is '
+                showPatternNotice(
+                    '<strong>Impossible pattern:</strong> prefix + suffix is '
                     + totalLen + ' hex digits, but a MeshCore public key is only '
                     + PUBLIC_KEY_HEX_LENGTH
                     + ' hex digits, so the two must overlap and can never both match. '
-                    + 'Shorten the patterns to ' + PUBLIC_KEY_HEX_LENGTH + ' digits or fewer in total.';
-                noticeEl.style.display = 'block';
+                    + 'Shorten the patterns to ' + PUBLIC_KEY_HEX_LENGTH
+                    + ' digits or fewer in total.'
+                );
                 return;
             }
 
-            noticeEl.style.display = 'none';
+            // Nothing is wrong: retire the notice and its text together.
+            hidePatternNotice();
         }
 
         function updateEstimate() {
@@ -1003,9 +1038,11 @@
             live.style.display = 'none';
             window.liveEstimateShown = false;
             document.getElementById('progress').classList.add('hidden');
-            document.getElementById('reserved-notice').style.display = 'none';
             starting = false;
-            updateEstimate();
+            // Clearing the boxes must retire the notice. Goes through the same
+            // entry point the inputs use, so this cannot drift from the typed
+            // path the way a hand-written style.display = 'none' did.
+            refreshPatternUI();
         }
 
         // ---- Mined-key history (localStorage-backed, survives refresh) ----
