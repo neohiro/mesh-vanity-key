@@ -251,18 +251,21 @@ def main() -> int:
                     "  return el.getBoundingClientRect().width;"
                     "})"
                 )
+                # Measured inside .eta-fields, not document.body: the probe must
+                # inherit the ETA's own monospace font, or it measures a digit
+                # from the wrong typeface and every ratio below is wrong.
                 glyph = page.evaluate(
                     "() => {"
-                    "  const el = document.getElementById('live-eta-m');"
+                    "  const host = document.querySelector('.eta-fields');"
                     "  const probe = document.createElement('span');"
                     "  probe.style.cssText = 'position:absolute;visibility:hidden;"
                     "    white-space:pre;font:inherit';"
                     "  probe.textContent = '0';"
-                    "  document.body.appendChild(probe);"
+                    "  host.appendChild(probe);"
                     "  const w = probe.getBoundingClientRect().width;"
                     "  probe.remove();"
                     "  return w;"
-                    "})"
+                    "}"
                 )
                 assert glyph > 0, "could not measure a digit width"
                 assert reserved[1] >= glyph * 1.5 and reserved[2] >= glyph * 1.5, (

@@ -970,7 +970,39 @@ def test_page_js_behaviour():
     assert proc.returncode == 0, (
         f"page JS behaviour tests failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
     )
-    assert "behaviour checks passed" in proc.stdout, proc.stdout
+
+
+def test_smoke_eval_snippets_parse():
+    """The smoke test's page.evaluate() snippets must be valid JS.
+
+    They are built from adjacent Python string literals, so a stray bracket is
+    invisible until Playwright evaluates it -- which only happens in the CI
+    browser job, where it fails a required check. That is exactly how a stray
+    closing paren got pushed once, so the parse is checked here instead.
+    """
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node") or shutil.which("bun")
+    if node is None:
+        pytest.skip("no node/bun runtime available to parse the snippets")
+
+    proc = subprocess.run(
+        [node, str(Path(__file__).parent / "tools" / "check_eval_snippets.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, (
+        f"smoke test page.evaluate() snippets do not parse:\n"
+        f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    )
+    # The extractor is regex-based, so assert it actually found something to
+    # check: silently matching zero snippets would make this test vacuous.
+    match = re.search(r"(\d+) parsed", proc.stdout)
+    assert match and int(match.group(1)) > 0, (
+        f"no page.evaluate() snippets were found to parse: {proc.stdout!r}"
+    )
+    assert "0 invalid" in proc.stdout, proc.stdout
 
 
 def test_worker_awaits_libsodium_ready():
