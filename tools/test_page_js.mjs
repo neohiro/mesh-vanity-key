@@ -122,7 +122,7 @@ const localStorageMock = {
 // assert that every worker is actually torn down on stop/found/error.
 const workerStats = { created: 0, terminated: 0, live: 0, revokedUrls: 0 };
 
-const urlStats = { objectURLs: new Set() };
+const urlStats = { objectURLs: new Set(), blobText: new Map() };
 // Callable as a constructor as well as a namespace: the page builds a real URL
 // (`new URL('libsodium.js', location.href)`) when it assembles the worker
 // source, so a plain object left `URL is not a constructor` and every
@@ -135,6 +135,12 @@ function URLMock(input, base) {
 URLMock.createObjectURL = function (blob) {
     const u = `blob:mock/${urlStats.objectURLs.size}`;
     urlStats.objectURLs.add(u);
+    // Remember the source so the Worker mock can tell the two worker kinds
+    // apart. The mining worker calls crypto_sign_seed_keypair; the export
+    // worker builds CSV. Classifying from the real source beats guessing from
+    // the URL, which is a counter in the mock.
+    const parts = (blob && blob.parts) || [];
+    urlStats.blobText.set(u, parts.map((p) => (typeof p === 'string' ? p : String(p))).join(''));
     return u;
 };
 URLMock.revokeObjectURL = function (u) {
@@ -242,23 +248,39 @@ function armTrackingTimeouts() {
 // and calls terminate(); the pool keeps them addressable so a test can deliver
 // an event to a worker the page has ALREADY terminated, which is exactly the
 // ordering that used to disarm a later search's watchdog.
+//
+// The export worker is tagged and kept in a separate list. It is NOT part of a
+// mining pool and must never be terminated by terminateAllWorkers(), so mixing
+// the two would make the mining worker-count assertions meaningless.
 const workerPool = [];
+const exportPool = [];
 const WorkerMock = class {
     constructor(url) {
         this.url = url;
         this.terminated = false;
-        this.index = workerPool.length;
         this.posted = [];
-        workerPool.push(this);
-        workerStats.created++;
-        workerStats.live++;
+        // Classify from the real worker source: the mining worker calls
+        // crypto_sign_seed_keypair, the export worker builds CSV. The export
+        // worker is not part of a mining pool and must never be torn down by
+        // terminateAllWorkers(), so mixing them would make the mining
+        // worker-count assertions meaningless.
+        const src = urlStats.blobText.get(String(url)) || '';
+        this.isExport = /csvCell|type: 'done'/.test(src) && !/crypto_sign_seed_keypair/.test(src);
+        this.index = (this.isExport ? exportPool : workerPool).length;
+        (this.isExport ? exportPool : workerPool).push(this);
+        if (!this.isExport) {
+            workerStats.created++;
+            workerStats.live++;
+        }
     }
     postMessage(msg) { this.posted.push(msg); }
     terminate() {
         if (!this.terminated) {
             this.terminated = true;
-            workerStats.terminated++;
-            workerStats.live--;
+            if (!this.isExport) {
+                workerStats.terminated++;
+                workerStats.live--;
+            }
         }
     }
     // --- test-only helpers ---
@@ -321,7 +343,7 @@ armTrackingTimeouts();
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_EXPONENT, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_EXPONENT, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -1251,6 +1273,51 @@ function primeForm() {
     getElementById('prefix').value = 'ab';
     getElementById('suffix').value = '';
     workerPool.length = 0;
+    exportPool.length = 0;
+}
+
+// Seed more than 100 keys so exportHistory takes the Worker path.
+//
+// This is hygiene, not convenience: addKeyToHistory() persists on every call,
+// and persistHistory() is async, so seeding hundreds of keys without awaiting
+// leaves writes in flight that land AFTER this test finishes and clobber the
+// storage a later test set up. Flushing here, and restoring the obfuscation
+// key cache and storage afterwards, keeps the export tests self-contained.
+async function seedHistoryForExport() {
+    api.clearHistory();
+    api.__resetObfKeyCache();
+    for (let i = 0; i < 101; i++) {
+        api.addKeyToHistory({
+            publicKey: 'ab' + String(i).padStart(62, '0'),
+            privateKey: 'c'.repeat(64),
+            attempts: i + 1,
+            elapsed: 0.1,
+            pattern: 'prefix ab',
+        });
+    }
+    // Let every queued persist settle before the test moves on.
+    await api.persistHistory();
+    await new Promise((r) => setTimeout(r, 0));
+    await api.persistHistory();
+    await new Promise((r) => setTimeout(r, 0));
+}
+
+async function teardownExportTest() {
+    api.clearHistory();
+    api.__resetObfKeyCache();
+    storage.delete(api.HISTORY_KEY);
+    // Clear the derived secret so a later test starts from the same state it
+    // would have had if this file had never seeded 100+ keys. Done against the
+    // harness's own IndexedDB mock rather than through a production hook.
+    for (const [, store] of idbData) store.clear();
+    // The export path also creates a URL for the download itself, which
+    // downloadFile() revokes on a 1s timer. Draining the mock's URL set keeps
+    // that pending revocation from perturbing later tests that snapshot
+    // urlStats.objectURLs.size.
+    urlStats.objectURLs.clear();
+    workerPool.length = 0;
+    exportPool.length = 0;
+    await new Promise((r) => setTimeout(r, 0));
 }
 
 // startMining() awaits awaitSodium(), which throws unless a libsodium global is
@@ -1446,6 +1513,78 @@ await asyncCheck('a ready event does not change the status', async () => {
         eq(api.getStatusText(), before, 'a ready event must not change the status text');
         await api.stopMining();
     });
+});
+
+await asyncCheck('an in-flight export must not hide the live mining panel', async () => {
+    // The live panel (#progress) is shared between mining and export - there is
+    // one of it. The export path is asynchronous (a Worker, for >100 keys) and
+    // the export button is not disabled while mining, so the two can overlap.
+    //
+    // Unguarded, the export's completion called clearStatusText() and hid the
+    // panel, which made the live figures vanish mid-search: the same
+    // stale-callback class of bug the mining workers are guarded against, in a
+    // second worker the earlier fix did not reach.
+    primeForm();
+    await seedHistoryForExport();
+
+    await withSodium(async () => {
+        // Export starts first and shows its own status.
+        api.exportHistory('csv');
+        const exportWorker = exportPool[exportPool.length - 1];
+        ok(exportWorker, 'the export must have spawned a worker');
+        eq(api.getStatusText(), 'Preparing export...',
+            'the export should own the status line while it runs');
+
+        // Now the user starts a search before the export finishes.
+        await api.startMining();
+        ok(api.miningState(), 'mining must be running');
+        api.setStatusText('Starting...');
+        // The point of the separate pools: the export worker must NOT have been
+        // swept into the mining pool, and mining must not have adopted it. Its
+        // count is detectOptimalWorkers(), not 1.
+        ok(workerPool.length > 0, 'mining must have created its own workers');
+        eq(exportPool.length, 1,
+            'the export worker must live in its own pool, not the mining one');
+        ok(exportPool[0] !== workerPool[0],
+            'the export worker and a mining worker must be distinct objects');
+
+        // The export completes. It must deliver the file and clean up its own
+        // worker, but must leave the mining panel exactly as it found it.
+        exportWorker.deliver({
+            type: 'done',
+            filename: 'keys.csv',
+            mime: 'text/csv',
+            data: 'a,b',
+        });
+
+        ok(exportWorker.terminated, 'the export worker must still be terminated');
+        ok(!getElementById('progress').classList.contains('hidden'),
+            'the live mining panel must stay visible after an export completes');
+        eq(api.miningState(), true,
+            'a completing export must not stop the running search');
+
+        await api.stopMining();
+    });
+    await teardownExportTest();
+});
+
+await asyncCheck('an export that finishes on its own clears the panel', async () => {
+    // The other half: with no mining running, the export does own the panel and
+    // must clean it up, exactly as before. Guards against "fixing" the overlap
+    // by simply never touching the panel again.
+    primeForm();
+    await seedHistoryForExport();
+    api.exportHistory('json');
+    const w = exportPool[exportPool.length - 1];
+    ok(w, 'the export must have spawned a worker');
+    ok(!getElementById('progress').classList.contains('hidden'),
+        'the panel should be visible while the export runs');
+    w.deliver({ type: 'done', filename: 'k.json', mime: 'application/json', data: '[]' });
+    ok(getElementById('progress').classList.contains('hidden'),
+        'a standalone export must hide the panel when it finishes');
+    eq(api.getStatusText(), '', 'and clear its status text');
+    ok(w.terminated, 'and terminate its worker');
+    await teardownExportTest();
 });
 
 check('worker init timers are per-worker, not looked up by index', () => {
