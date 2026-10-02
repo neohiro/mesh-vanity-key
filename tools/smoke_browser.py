@@ -245,29 +245,40 @@ def main() -> int:
                 # actually takes. That is what makes the reservation meaningful:
                 # the hour slot must fit many more digits than the 2ch slots, so
                 # it stays put while the minutes and seconds tick over.
-                reserved = page.evaluate(
-                    "() => ['live-eta-h', 'live-eta-m', 'live-eta-s'].map((id) => {"
-                    "  const el = document.getElementById(id);"
-                    "  return el.getBoundingClientRect().width;"
-                    "})"
-                )
-                # Measured inside .eta-fields, not document.body: the probe must
-                # inherit the ETA's own monospace font, or it measures a digit
-                # from the wrong typeface and every ratio below is wrong.
-                glyph = page.evaluate(
+                metrics = page.evaluate(
                     "() => {"
+                    "  const panel = document.getElementById('progress');"
+                    "  const wasHidden = panel.classList.contains('hidden');"
+                    # Reserved widths only mean anything once the panel is laid
+                    # out, and #progress is display:none until mining starts, so
+                    # every box would measure 0. Reveal it, measure, then put
+                    # the page back exactly as it was.
+                    "  if (wasHidden) panel.classList.remove('hidden');"
+                    "  const widths = ['live-eta-h', 'live-eta-m', 'live-eta-s']"
+                    "    .map((id) => document.getElementById(id)"
+                    "      .getBoundingClientRect().width);"
+                    # Probe inside .eta-fields so it inherits the ETA's own
+                    # monospace font; measured against document.body it would
+                    # compare the reserved widths to a digit of another face.
                     "  const host = document.querySelector('.eta-fields');"
                     "  const probe = document.createElement('span');"
                     "  probe.style.cssText = 'position:absolute;visibility:hidden;"
                     "    white-space:pre;font:inherit';"
                     "  probe.textContent = '0';"
                     "  host.appendChild(probe);"
-                    "  const w = probe.getBoundingClientRect().width;"
+                    "  const glyph = probe.getBoundingClientRect().width;"
                     "  probe.remove();"
-                    "  return w;"
+                    "  if (wasHidden) panel.classList.add('hidden');"
+                    "  return { widths, glyph };"
                     "}"
                 )
-                assert glyph > 0, "could not measure a digit width"
+                reserved, glyph = metrics["widths"], metrics["glyph"]
+                assert glyph > 0, (
+                    f"could not measure a digit width: {metrics!r}"
+                )
+                assert all(w > 0 for w in reserved), (
+                    f"ETA slots must be laid out, got {reserved!r}"
+                )
                 assert reserved[1] >= glyph * 1.5 and reserved[2] >= glyph * 1.5, (
                     f"2ch slots must fit two digits: minute/second reserved "
                     f"{reserved[1]}/{reserved[2]} for a {glyph}px glyph"
