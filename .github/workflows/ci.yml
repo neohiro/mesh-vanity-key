@@ -65,10 +65,16 @@ jobs:
         run: python tools/bench_mining.py
 
       # The browser side of the same question, using the real libsodium.wasm the
-      # page loads rather than a stub. Also informational, not a gate: absolute
-      # keys/s varies by runner, so a fixed threshold here would be flaky.
+      # page loads rather than a stub. Runs under `node` like every other JS
+      # step here - `bun` is not present on GitHub runners, so a bun invocation
+      # would fail with "command not found".
+      #
+      # continue-on-error because this step is informational: absolute keys/s
+      # varies by runner and this measures nothing about correctness. A runner
+      # quirk here should not turn the build red.
       - name: Browser keygen rate (real libsodium.wasm)
-        run: bun tools/bench_real_browser.mjs
+        run: node tools/bench_real_browser.mjs
+        continue-on-error: true
 
   # REQUIRED GATE, not advisory.
   #

@@ -432,6 +432,113 @@ def test_hot_loop_keygen_matches_pynacl_over_random_seeds():
         ), f"seed {seed.hex()}: keys differ"
 
 
+def test_ci_workflow_only_uses_provisioned_runtimes():
+    """A `run:` step must invoke a runtime the workflow actually installs.
+
+    Regression: a step was added invoking `bun`, which is not present on GitHub
+    runners, while the workflow only installs Node via setup-node. That step
+    would have failed with "command not found" - and CI had never run, so
+    nothing would have caught it locally.
+
+    This asserts each interpreter named in a `run:` line is either the runner's
+    built-in default (python) or is explicitly set up in the same workflow.
+    """
+    yaml = pytest.importorskip("yaml")
+
+    wf = Path(__file__).resolve().parent / ".github" / "workflows" / "ci.yml"
+    assert wf.exists(), f"missing workflow: {wf}"
+    doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
+    assert doc.get("jobs"), "workflow defines no jobs"
+
+    # Runtimes a bare ubuntu-latest runner provides without any setup step.
+    builtin = {"python", "python3"}
+
+    for job_name, job in doc["jobs"].items():
+        steps = job.get("steps", [])
+        # What this job provisions.
+        provisioned = set(builtin)
+        for s in steps:
+            uses = s.get("uses", "")
+            if "actions/setup-node" in uses:
+                provisioned.add("node")
+                provisioned.add("npx")
+            if "actions/setup-python" in uses:
+                provisioned.update({"python", "python3", "pip"})
+            if "setup-bun" in uses or "oven-sh/setup-bun" in uses:
+                provisioned.add("bun")
+
+        for s in steps:
+            run = s.get("run")
+            if not run:
+                continue
+            first = run.strip().split()[0] if run.strip() else ""
+            # Only judge invocations that look like a bare interpreter.
+            if first in ("python", "python3", "node", "npx", "bun", "npm"):
+                assert first in provisioned, (
+                    f"job {job_name!r} step {s.get('name', run)!r} invokes "
+                    f"{first!r}, which the job never installs. "
+                    f"provisioned: {sorted(provisioned)}"
+                )
+
+
+def test_ci_smoke_job_is_a_required_gate():
+    """The Playwright job must stay required, not advisory.
+
+    Every other check runs the page inside a Node vm against mocks, so this is
+    the only job that proves the app works in a real browser. A green `test`
+    job on its own means nothing about that.
+    """
+    yaml = pytest.importorskip("yaml")
+
+    wf = Path(__file__).resolve().parent / ".github" / "workflows" / "ci.yml"
+    doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
+    jobs = doc["jobs"]
+
+    assert "smoke" in jobs, "the browser smoke job was removed"
+    smoke = jobs["smoke"]
+    steps = " ".join(str(s.get("run", "")) for s in smoke.get("steps", []))
+    assert "smoke_browser.py" in steps, "smoke job no longer runs the browser test"
+
+    # `needs: test` is fine (faster), but the job must not be soft-failing.
+    for s in smoke.get("steps", []):
+        assert not s.get("continue-on-error"), (
+            f"smoke step {s.get('name')!r} is marked continue-on-error; the "
+            "browser gate must be able to fail the build"
+        )
+    assert not smoke.get("continue-on-error"), "smoke job must not be soft-failing"
+
+
+def test_ci_referenced_repo_files_exist():
+    """Every repo file a CI step names must actually exist.
+
+    A renamed or deleted tool that CI still references is the classic way a
+    pipeline rots: the step passes locally (where nobody runs it) and fails the
+    moment CI executes. This checks the file paths in `run:` lines resolve.
+    """
+    yaml = pytest.importorskip("yaml")
+
+    root = Path(__file__).resolve().parent
+    wf = root / ".github" / "workflows" / "ci.yml"
+    doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
+
+    missing = []
+    for job_name, job in doc["jobs"].items():
+        for s in job.get("steps", []):
+            run = s.get("run")
+            if not run:
+                continue
+            for token in run.replace("|", " ").split():
+                token = token.strip("'\"`;")
+                if not token.startswith(("tools/", "meshcore_vanity.py",
+                                         "test_meshcore_vanity.py", "index.html",
+                                         "sw.js", "libsodium.js", "manifest.json")):
+                    continue
+                if not (root / token).exists():
+                    missing.append(f"{job_name}/{s.get('name', '?')}: {token}")
+
+    assert not missing, f"CI references files that do not exist: {missing}"
+
+
 def test_hot_loops_have_no_dead_local_bindings():
     """The hot loops bind module-level functions to locals for speed.
 
