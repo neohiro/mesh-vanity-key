@@ -270,7 +270,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, getLiveEtaText: () => document.getElementById('live-eta').textContent, getEstimateText: () => document.getElementById('estimate').textContent };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -889,6 +889,134 @@ check('workerScale: concave and sublinear', () => {
         `per-worker efficiency must fall: ${eff2.toFixed(2)} > ${eff8.toFixed(2)} > ${eff32.toFixed(2)}`);
 });
 
+// ---- Live ETA layout ------------------------------------------------------
+// As one string the ETA reflowed whenever a field changed digit count, so the
+// figures visibly hopped. It is now split into slots that each reserve their
+// width.
+check('live ETA: slots reserve their width so the digits cannot shift', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+
+    // Every slot is a real element rather than part of one text blob.
+    for (const id of ['live-eta-days', 'live-eta-h', 'live-eta-m', 'live-eta-s']) {
+        ok(html.includes(`id="${id}"`), `missing ETA slot #${id}`);
+    }
+
+    // Tabular figures are what stop a digit changing width at all.
+    ok(/\.eta-fields\s*\{[^}]*font-variant-numeric:\s*tabular-nums/.test(html),
+        'the ETA must use tabular figures, or digit widths still vary');
+
+    // Hours get the wide reserved slot; minutes and seconds exactly two.
+    ok(/\.eta-num\s*\{[^}]*min-width:\s*2\d\s*ch/.test(html),
+        'hours must reserve 20+ digits for multi-week runs');
+    // Narrow screens cannot afford 20ch without overflowing, but must stay
+    // fixed-width there too -- proportional space would reintroduce reflow.
+    const narrow = html.slice(html.indexOf('@media (max-width: 420px)'));
+    ok(/@media \(max-width: 420px\)[\s\S]*?\.eta-num\s*\{[^}]*min-width:\s*\d+\s*ch/.test(narrow),
+        'narrow screens must keep a fixed hour slot, just a smaller one');
+    ok(/\.eta-num-2\s*\{[^}]*min-width:\s*2ch/.test(html),
+        'minutes and seconds must reserve exactly two digits');
+
+    // The day estimate sits in front of the hours.
+    const days = html.indexOf('id="live-eta-days"');
+    const hours = html.indexOf('id="live-eta-h"');
+    ok(days !== -1 && hours !== -1 && days < hours,
+        'the day estimate must come before the hours');
+
+    // Its own full-width row, so the slots are not cramped into one column.
+    ok(/\.live-cell-eta\s*\{[^}]*grid-column:\s*1 \/ -1/.test(html),
+        'the ETA must span the full width of the panel');
+});
+
+check('etaParts: splits a duration into padded display fields', () => {
+    eq(api.etaParts(0).hours, 0);
+    eq(api.etaParts(0).minutes, 0);
+    eq(api.etaParts(0).seconds, 0);
+
+    // 116h 27m 22s -- the multi-week case this layout exists for.
+    let p = api.etaParts(116 * 3600 + 27 * 60 + 22);
+    eq(p.hours, 116);
+    eq(p.minutes, 27);
+    eq(p.seconds, 22);
+    ok(/\(~5 days\)/.test(p.dayHint), 'the day estimate is still attached');
+
+    // Single digits must be padded, or "05m" is one glyph narrower than "15m".
+    eq(api.pad2(0), '00');
+    eq(api.pad2(7), '07');
+    eq(api.pad2(42), '42');
+    eq(api.pad2(60), '60');
+    for (const n of [0, 7, 42, 59]) {
+        eq(api.pad2(n).length, 2, `${n} must render as exactly two digits`);
+    }
+
+    // Degenerate input must not produce NaN in the DOM.
+    const bad = api.etaParts(NaN);
+    eq(bad.hours, 0, 'NaN hours');
+    eq(bad.minutes, 0, 'NaN minutes');
+    eq(bad.seconds, 0, 'NaN seconds');
+    eq(api.etaParts(-5).hours, 0, 'negative input clamps to zero');
+});
+
+check('renderEta: writes padded digits into the slots', () => {
+    api.renderEta(116 * 3600 + 7 * 60 + 5);
+    eq(api.getLiveEtaText('live-eta-h'), '116');
+    eq(api.getLiveEtaText('live-eta-m'), '07', 'minutes padded to two');
+    eq(api.getLiveEtaText('live-eta-s'), '05', 'seconds padded to two');
+
+    // A message state blanks the slots but must not leave stale digits behind.
+    api.setEtaMessage('sampling...');
+    eq(api.getLiveEtaText('live-eta-days'), 'sampling...');
+    eq(api.getLiveEtaText('live-eta-h'), '');
+    eq(api.getLiveEtaText('live-eta-m'), '');
+    eq(api.getLiveEtaText('live-eta-s'), '');
+
+    // ...and switching back to a real duration must restore them.
+    api.renderEta(65);
+    eq(api.getLiveEtaText('live-eta-h'), '0');
+    eq(api.getLiveEtaText('live-eta-m'), '01');
+    eq(api.getLiveEtaText('live-eta-s'), '05');
+});
+
+check('visitor counter: static image badge, centred under the info frame', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+
+    // No script: a counter must not add JS to a page that mines with every core.
+    ok(!/freevisitorcounters\.com/.test(html),
+        'the retired JS-dependent counter must not come back');
+    ok(/api\.visitorbadge\.io\/api\/visitors\?path=github\.com%2Fneohiro%2Fmeshcore-vanity-key/.test(html),
+        'the badge must point at this repo visitor-counter path');
+    ok(/visitorbadge\.io\/status\?path=github\.com%2Fneohiro%2Fmeshcore-vanity-key/.test(html),
+        'the badge must link to the stats page for this repo');
+    ok(/referrerpolicy="no-referrer"/.test(html),
+        'the badge must not leak the referring URL');
+
+    // Placed after the info frame, and centred.
+    const info = html.indexOf('class="info"');
+    const badge = html.indexOf('class="visitor-counter"');
+    ok(info !== -1 && badge !== -1 && badge > info,
+        'the counter must come after the info frame');
+    ok(/\.visitor-counter\s*\{[^}]*text-align:\s*center/.test(html),
+        'the counter must be centred');
+    ok(/\.visitor-counter\s*\{[^}]*margin-top:/.test(html),
+        'the counter needs spacing so it reads as a footer');
+});
+
+check('background: subtle gradient and rare star flickers, reduced-motion safe', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+
+    ok(/radial-gradient/.test(html), 'the backdrop should use a subtle gradient');
+    // The starfield must be decorative only, and must not animate for anyone
+    // who asked for reduced motion.
+    ok(/class="starfield" aria-hidden="true"/.test(html),
+        'the starfield must be hidden from assistive tech');
+    ok(/@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.starfield[\s\S]*?display:\s*none/.test(html),
+        'the starfield must be disabled under prefers-reduced-motion');
+    // A fixed layer that spans the viewport needs to stay out of the way.
+    ok(/\.starfield\s*\{[^}]*pointer-events:\s*none/.test(html),
+        'the starfield must not intercept clicks');
+    ok(/z-index:\s*0/.test(html) && /\.container, \.info\s*\{[^}]*z-index:\s*1/.test(html),
+        'content must sit above the starfield');
+});
+
 check('estimate: states the measured scale instead of hedging', () => {
     const html = fs.readFileSync(pageHtmlPath, 'utf8');
     ok(/scale derived from 2\.3x at 8 threads/.test(html),
@@ -966,7 +1094,12 @@ check('resetLiveLogs clears every cell for a new search', () => {
     eq(getElementById('live-attempts').textContent, '0', 'attempts reset');
     eq(getElementById('live-rate').textContent, '0/s', 'rate reset');
     eq(getElementById('live-progress').textContent, '0.00%', 'progress reset');
-    eq(getElementById('live-eta').textContent, '-', 'eta reset');
+    // The ETA resets through renderEta(0) rather than a single string, so it is
+// rendered at its reserved slot widths from the first frame of a new search
+// instead of snapping wider once a real duration arrives.
+eq(api.getLiveEtaText('live-eta-h'), '0', 'eta hours reset');
+eq(api.getLiveEtaText('live-eta-m'), '00', 'eta minutes reset');
+eq(api.getLiveEtaText('live-eta-s'), '00', 'eta seconds reset');
     eq(getElementById('live-workers').textContent, '0', 'workers reset');
     eq(getElementById('live-cores').textContent, '-', 'cores reset');
 });

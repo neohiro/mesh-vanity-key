@@ -228,6 +228,85 @@ def main() -> int:
                     ".textAlign"
                 ) == "right", "live title must be right-aligned with the metrics"
 
+                # The ETA is split into digit slots, each reserving its width so
+                # the figures cannot hop as a field gains or loses a digit.
+                # Asserted against a real layout engine, which is the only place
+                # the reserved widths actually mean anything.
+                for slot in ("live-eta-days", "live-eta-h", "live-eta-m", "live-eta-s"):
+                    assert page.query_selector(f"#{slot}"), f"missing ETA slot #{slot}"
+                assert page.evaluate(
+                    "() => getComputedStyle(document.querySelector('.eta-fields'))"
+                    ".fontVariantNumeric"
+                ).replace(" ", "") == "tabular-nums", (
+                    "ETA must use tabular figures or digit widths vary"
+                )
+
+                # Compare reserved widths against the width a single glyph
+                # actually takes. That is what makes the reservation meaningful:
+                # the hour slot must fit many more digits than the 2ch slots, so
+                # it stays put while the minutes and seconds tick over.
+                reserved = page.evaluate(
+                    "() => ['live-eta-h', 'live-eta-m', 'live-eta-s'].map((id) => {"
+                    "  const el = document.getElementById(id);"
+                    "  return el.getBoundingClientRect().width;"
+                    "})"
+                )
+                glyph = page.evaluate(
+                    "() => {"
+                    "  const el = document.getElementById('live-eta-m');"
+                    "  const probe = document.createElement('span');"
+                    "  probe.style.cssText = 'position:absolute;visibility:hidden;"
+                    "    white-space:pre;font:inherit';"
+                    "  probe.textContent = '0';"
+                    "  document.body.appendChild(probe);"
+                    "  const w = probe.getBoundingClientRect().width;"
+                    "  probe.remove();"
+                    "  return w;"
+                    "})"
+                )
+                assert glyph > 0, "could not measure a digit width"
+                assert reserved[1] >= glyph * 1.5 and reserved[2] >= glyph * 1.5, (
+                    f"2ch slots must fit two digits: minute/second reserved "
+                    f"{reserved[1]}/{reserved[2]} for a {glyph}px glyph"
+                )
+                # Hours must hold far more than minutes/seconds: that headroom is
+                # what keeps a multi-week ETA from shifting as it grows.
+                assert reserved[0] >= glyph * 8, (
+                    f"hour slot must reserve 20+ digits, got {reserved[0]} "
+                    f"for a {glyph}px glyph"
+                )
+                assert page.evaluate(
+                    "() => getComputedStyle(document.querySelector('.live-cell-eta'))"
+                    ".gridColumnStart"
+                ).startswith("1"), "the ETA must span the full panel width"
+
+                # The day estimate must actually precede the hours in the DOM,
+                # or the multi-week reading appears after the digit it qualifies.
+                eta_order = page.evaluate(
+                    "() => [...document.querySelectorAll('#live-eta > span')]"
+                    ".map((el) => el.id || el.className)"
+                )
+                assert eta_order and "live-eta-days" in eta_order[0], (
+                    f"the day estimate must come first, got {eta_order}"
+                )
+                assert eta_order.index("live-eta-days") < eta_order.index("live-eta-h"), (
+                    f"days must precede hours, got {eta_order}"
+                )
+
+                # The counter badge is a third-party image, so its presence and
+                # URL are asserted but the fetch is NOT: CI runners can be
+                # offline or blocked, and a flaky assertion about someone
+                # else's uptime would take the whole build down for it.
+                badge = page.query_selector(".visitor-counter img")
+                assert badge, "visitor counter badge is missing"
+                assert "visitorbadge.io/api/visitors" in (badge.get_attribute("src") or ""), (
+                    "the badge must use the visitorbadge.io endpoint"
+                )
+                assert page.evaluate(
+                    "() => getComputedStyle(document.querySelector('.visitor-counter'))"
+                    ".textAlign"
+                ) == "center", "the counter badge must be centred"
+
                 # A single transient status line, above the panel. Two of these
                 # is what left 'Starting...' stranded under the figures.
                 assert page.eval_on_selector_all(

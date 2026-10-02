@@ -83,6 +83,39 @@ one. Set `MESHCORE_VANITY_STRICT_RESERVED=1` to make the CLI reject them again.
 - `node tools/test_page_js.mjs <main.js> <worker.js>` executes the page and worker
   JS against a mock DOM; CI runs it after `tools/check_inline_js.py` extracts them.
 
+### The live panel
+
+Six figures are shown while mining: attempts, rate, progress, workers actually
+running, cores, and ETA.
+
+**The ETA is split into fixed digit slots.** Rendered as one string it reflowed
+every time a field changed digit count — `9h 5m 3s` becoming `9h 5m 13s` moved
+everything after it, so the row visibly hopped. Instead the duration is written
+into separate elements, each reserving its width:
+
+| Slot | Reserved | Why |
+|---|---|---|
+| days | `8ch` | the `(~5 days)` estimate leads, so the hours never shift under it |
+| hours | `20ch` | a multi-week run reaches 4-5 figures; reserve the widest case so the layout is identical from the first minute to the last |
+| minutes | `2ch` | always two digits, zero-padded |
+| seconds | `2ch` | as above |
+
+The panel also sets `font-variant-numeric: tabular-nums`, which is what actually
+stops a digit changing width — the reserved `min-width`s then hold the columns.
+On screens under 420px the hour slot drops to `10ch`: still far more than a
+three-week ETA needs (~500h), and still fixed rather than proportional, which is
+the part that matters. Minutes and seconds are always padded to two digits, so
+`05m` is exactly as wide as `15m`.
+
+**The ETA is also smoothed over time.** It is the most eye-catching number on the
+page and the least stable, being an instantaneous rate divided by a large
+remaining count. Shown raw it hopped several times a second, which reads as
+instability and trains people to ignore the one figure they came for. It is now
+withheld until four samples exist — the opening batches are always slower while
+WASM warms up, so a figure derived from them would be misleading — and then eased
+in with an EMA at `alpha = 0.12`. A 10x spike in the underlying rate moves the
+displayed ETA by well under half, instead of tracking it linearly.
+
 ### Mining-loop performance
 
 The browser miner spends almost all of its time inside libsodium, so the wrapper
@@ -182,6 +215,22 @@ factor in and prints the multiplier inline instead of hedging:
 > The multiplier is **hardware-specific** — 2.3x encodes *this* host's 2:1 SMT
 > ratio. A machine with 8 physical cores would scale very differently and must be
 > re-measured rather than reusing 2.3x.
+
+## Privacy and third-party requests
+
+The miner runs entirely in the browser. Keys are generated, compared and stored
+locally; nothing about a search is transmitted.
+
+The page makes **no script requests to third parties**. The one external request
+is a visitor-counter badge — a plain `<img>` from `visitorbadge.io`, served as a
+static SVG, with `referrerpolicy="no-referrer"` so the referring URL is not sent.
+It is the same counter used on the author's other sites. No cookies, no
+fingerprinting, no analytics, and it cannot execute. If it fails to load the page
+is otherwise unaffected, which is why the browser smoke test asserts the badge's
+presence and URL but deliberately does **not** assert that the image loads: a
+flaky assertion about a third party's uptime should not be able to fail the build.
+
+The service worker caches only same-origin files. The counter is never cached.
 
 ## Quick Start
 
