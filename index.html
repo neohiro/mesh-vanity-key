@@ -1809,7 +1809,12 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 combined[0] = 0x01; // AES-GCM version marker
                 combined.set(nonce, 1);
                 combined.set(new Uint8Array(ciphertext), 13);
-                return btoa(String.fromCharCode.apply(null, combined));
+                // Chunked base64 to avoid call stack limits on large arrays
+                let b64 = '';
+                for (let i = 0; i < combined.length; i += 0x8000) {
+                    b64 += String.fromCharCode.apply(null, combined.subarray(i, i + 0x8000));
+                }
+                return btoa(b64);
             } catch (e) {
                 return null;
             }
