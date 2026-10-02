@@ -76,7 +76,8 @@ def main() -> int:
                 # once it has finished there must be no stale status text left
                 # in the DOM. Waiting for the clear DURING the run would be
                 # wrong - a 1-char pattern can match inside the first batch and
-                # finish before any progress report fires.
+                # finish before any progress report fires. The result frame
+                # appearing is the signal that the search has finished.
                 page.click("#start-btn")
                 page.wait_for_selector(".result-frame", timeout=120_000)
                 assert page.evaluate(
@@ -126,7 +127,6 @@ def main() -> int:
                     f"the rate graph must not intercept clicks, got {graph['pointerEvents']}"
                 )
 
-                page.wait_for_selector(".result-frame", timeout=120_000)
                 heading = page.text_content(".result-frame h2")
                 assert heading and "Key 1 Found!" in heading, f"unexpected heading: {heading!r}"
 
