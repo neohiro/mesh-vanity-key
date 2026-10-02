@@ -23,12 +23,12 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Python tests
-        run: |
-          python -m pytest -q
-          # A test that skipped on a missing optional dependency would let the
-          # icon check silently stop proving anything. Fail loudly instead.
-          python -m pytest -q -rs -k "icons_match" | tee /dev/stderr | grep -q "1 passed" \
-            || { echo "::error::icon reproducibility test did not run"; exit 1; }
+        # The icon-reproducibility test must not SKIP. An earlier version guarded
+        # that with a `pytest | tee | grep -q` pipeline, which is broken under
+        # GitHub's default `-o pipefail`: grep exits on first match, SIGPIPE
+        # kills the pipeline, and the guard always fired. Making the test itself
+        # fail loudly when Pillow is absent is simpler and cannot be defeated.
+        run: python -m pytest -q
 
       - uses: actions/setup-node@v4
         with:

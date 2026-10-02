@@ -432,6 +432,32 @@ def test_hot_loop_keygen_matches_pynacl_over_random_seeds():
         ), f"seed {seed.hex()}: keys differ"
 
 
+def test_require_fails_loudly_for_missing_test_dependency():
+    """_require must FAIL, never skip, when a declared dep is absent.
+
+    This is the property that keeps the icon and workflow-integrity guards from
+    silently going inert while the build stays green. A CI run on this repo was
+    red with `1 failed, 89 passed, 3 skipped`, where the three skips were these
+    guards themselves, because CI lacked PyYAML.
+    """
+    with pytest.raises(BaseException) as exc:
+        _require("definitely_not_installed_xyz", "FakePackage")
+    assert "FakePackage" in str(exc.value)
+    assert "requirements.txt" in str(exc.value)
+
+
+def test_declared_test_dependencies_are_importable():
+    # Guards the environment itself: Pillow and PyYAML are declared in
+    # requirements.txt, so a bare environment that lacks them is broken.
+    import importlib
+
+    for mod, pkg in (("PIL.Image", "Pillow"), ("yaml", "PyYAML")):
+        try:
+            importlib.import_module(mod)
+        except ImportError as e:
+            pytest.fail(f"{pkg} is declared in requirements.txt but missing: {e}")
+
+
 def test_ci_workflow_only_uses_provisioned_runtimes():
     """A `run:` step must invoke a runtime the workflow actually installs.
 
@@ -443,7 +469,7 @@ def test_ci_workflow_only_uses_provisioned_runtimes():
     This asserts each interpreter named in a `run:` line is either the runner's
     built-in default (python) or is explicitly set up in the same workflow.
     """
-    yaml = pytest.importorskip("yaml")
+    yaml = _require("yaml", "PyYAML")
 
     wf = Path(__file__).resolve().parent / ".github" / "workflows" / "ci.yml"
     assert wf.exists(), f"missing workflow: {wf}"
@@ -488,7 +514,7 @@ def test_ci_smoke_job_is_a_required_gate():
     the only job that proves the app works in a real browser. A green `test`
     job on its own means nothing about that.
     """
-    yaml = pytest.importorskip("yaml")
+    yaml = _require("yaml", "PyYAML")
 
     wf = Path(__file__).resolve().parent / ".github" / "workflows" / "ci.yml"
     doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
@@ -515,7 +541,7 @@ def test_ci_referenced_repo_files_exist():
     pipeline rots: the step passes locally (where nobody runs it) and fails the
     moment CI executes. This checks the file paths in `run:` lines resolve.
     """
-    yaml = pytest.importorskip("yaml")
+    yaml = _require("yaml", "PyYAML")
 
     root = Path(__file__).resolve().parent
     wf = root / ".github" / "workflows" / "ci.yml"
@@ -1283,10 +1309,31 @@ def test_index_html_has_history_obfuscation():
     assert "0xef" in html  # obfuscation marker
 
 
+def _require(module: str, package: str):
+    """Import a declared test dependency, failing loudly if it is absent.
+
+    Deliberately NOT pytest.importorskip. A skip is reported as a pass-ish
+    green build, so a missing Pillow or PyYAML would leave the icon check and
+    the workflow-integrity guards silently inert - exactly the failure they
+    exist to catch. Both are declared in requirements.txt, so their absence is
+    a broken environment and should say so.
+    """
+    import importlib
+
+    try:
+        return importlib.import_module(module)
+    except ImportError as e:
+        pytest.fail(
+            f"{package} is a declared test dependency (see requirements.txt). "
+            f"Run `pip install -r requirements.txt`. Original error: {e}"
+        )
+
+
 def _load_make_icons():
+    """Load the icon generator, failing loudly when Pillow is missing."""
     import importlib.util
 
-    pytest.importorskip("PIL.Image", reason="Pillow needed to render icons")
+    _require("PIL.Image", "Pillow")
     path = _REPO_ROOT / "tools" / "make_icons.py"
     spec = importlib.util.spec_from_file_location("make_icons", path)
     mod = importlib.util.module_from_spec(spec)
