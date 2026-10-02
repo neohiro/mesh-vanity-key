@@ -1,11 +1,13 @@
 # Runtime dependency for the miner itself.
 PyNaCl>=1.5.0
 
-# Test-only. Pillow lets the suite prove the committed icons are reproducible
-# from tools/make_icons.py; PyYAML lets it parse and assert on .github/workflows
-# so a CI step cannot reference an uninstalled runtime or a renamed file.
-# Both are absent from a bare install, and the tests that need them skip
-# visibly rather than failing, so they are listed here to make a complete
-# development environment reproducible.
+# Test-only. Pytest is the runner. Pillow lets the suite prove the committed
+# icons are reproducible from tools/make_icons.py; PyYAML lets it parse and
+# assert on .github/workflows so a CI step cannot reference an uninstalled
+# runtime or a renamed file.
+# These are absent from a bare install, and the tests that need them fail loudly
+# rather than skipping, so they are listed here to make a complete development
+# environment reproducible - including for CI, which installs this file.
+pytest>=7.0.0
 Pillow>=10.0.0
 PyYAML>=6.0

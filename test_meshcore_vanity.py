@@ -432,6 +432,72 @@ def test_hot_loop_keygen_matches_pynacl_over_random_seeds():
         ), f"seed {seed.hex()}: keys differ"
 
 
+def test_third_party_imports_are_declared_in_requirements():
+    """Every non-stdlib module imported by our code must be in requirements.txt.
+
+    Regression: CI was switched to `pip install -r requirements.txt` while that
+    file listed only PyNaCl/Pillow/PyYAML, so pytest - installed explicitly
+    before - was missing and every run died with "No module named pytest". A
+    dependency used by the suite but absent from the manifest is invisible until
+    CI runs, and CI is not the place to discover it.
+    """
+    import ast
+    import sys
+
+    root = Path(__file__).resolve().parent
+    sources = [root / "meshcore_vanity.py", root / "test_meshcore_vanity.py"]
+    sources += sorted((root / "tools").glob("*.py"))
+
+    stdlib = set(sys.stdlib_module_names)
+    imported = set()
+    for src in sources:
+        if not src.exists():
+            continue
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    imported.add(a.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.level == 0 and node.module:
+                    imported.add(node.module.split(".")[0])
+
+    third_party = {
+        m for m in imported
+        if m not in stdlib
+        # Local helper modules loaded by path, not installed packages.
+        and m not in {"meshcore_vanity", "check_inline_js", "make_icons",
+                      "smoke_browser", "bench_mining"}
+    }
+
+    declared = {
+        line.split(">=")[0].split("==")[0].split("~=")[0].split("[")[0].strip()
+        for line in (root / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+    # Distribution name -> import name. Several distributions are importable
+    # under a different name, so normalise both sides before comparing.
+    import_name = {"pillow": "PIL", "pynacl": "nacl", "pyyaml": "yaml"}
+    provided = set(declared)
+    provided.update(
+        import_name[d.lower()] for d in declared if d.lower() in import_name
+    )
+
+    # Deliberately NOT in requirements.txt, each for a reason:
+    #   cryptography - optional; only tools/bench_mining.py compares backends,
+    #     inside a try/except that skips the comparison when it is absent.
+    #   playwright   - optional; only tools/smoke_browser.py needs it, and the
+    #     smoke CI job installs it in its own step.
+    # Listed explicitly so a NEW undeclared import still fails this test.
+    optional = {"cryptography", "playwright"}
+
+    missing = sorted(m for m in third_party if m not in optional and m not in provided)
+    assert not missing, (
+        f"imported but not declared in requirements.txt: {missing}. "
+        f"provided: {sorted(provided)}; explicitly-optional: {sorted(optional)}"
+    )
+
+
 def test_require_fails_loudly_for_missing_test_dependency():
     """_require must FAIL, never skip, when a declared dep is absent.
 
