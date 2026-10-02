@@ -111,7 +111,11 @@ jobs:
         run: |
           pip install playwright
           playwright install chromium
-          sudo -n playwright install-deps chromium
+          # `sudo` resets PATH, so the pip-installed `playwright` entrypoint is
+          # invisible to it and this failed with "sudo: playwright: command not
+          # found". Passing the caller's PATH through env fixes that without
+          # hard-coding ~/.local/bin, which differs between runner images.
+          sudo -n env "PATH=$PATH" playwright install-deps chromium
 
       - name: Browser smoke test
         run: python tools/smoke_browser.py
