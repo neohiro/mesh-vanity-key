@@ -842,9 +842,12 @@
         //
         // Only the 8-thread end point was measured directly, so intermediate
         // points come from a power-law fit anchored to that measurement:
-        //     scale(n) = n ** (log(2.3) / log(8))   -> exponent ~0.457
-        // giving ~1.37x at 2 threads, ~1.87x at 4, and 2.3x at 8: concave, and
-        // never above the measured ceiling.
+        //     scale(n) = n ** (log(2.3) / log(8))   -> exponent ~0.4005
+        // giving ~1.32x at 2 threads, ~1.74x at 4, and 2.3x at 8: concave, and
+        // never above the measured ceiling. (These figures were previously
+        // recorded as ~0.457 / 1.37x / 1.87x, which correspond to a DIFFERENT
+        // anchor - log(2.3)/log(8) is 0.4005, and the interpolation follows from
+        // it. The values above are the ones the code actually produces.)
         //
         // To re-measure on different hardware, update WORKER_SCALE_MEASURED and
         // the exponent together; nothing else needs to change.
@@ -1507,6 +1510,12 @@ function detectOptimalWorkers() {
         // Append one sample and redraw. A no-op once the buffer is full, so the
         // graph keeps a fixed time window instead of stretching to the whole
         // run (which would make the last hour indistinguishable from the first).
+        //
+        // Deliberately NOT suppressed under prefers-reduced-motion, unlike the
+        // starfield. That is decoration; this is a data readout. The trace only
+        // changes when the miner reports a new measurement, it never animates on
+        // a timer, and it is the only way to see rate variance at all - hiding
+        // it would remove information rather than remove motion.
         function pushRateGraphSample(rate) {
             const r = Number(rate);
             if (!isFinite(r) || r < 0) return;

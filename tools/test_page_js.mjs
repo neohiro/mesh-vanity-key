@@ -271,7 +271,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.slice(), RATE_GRAPH_POINTS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_EXPONENT, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.slice(), RATE_GRAPH_POINTS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -888,6 +888,43 @@ check('workerScale: concave and sublinear', () => {
     const eff32 = api.workerScale(32) / 32;
     ok(eff2 > eff8 && eff8 > eff32,
         `per-worker efficiency must fall: ${eff2.toFixed(2)} > ${eff8.toFixed(2)} > ${eff32.toFixed(2)}`);
+});
+
+check('workerScale: the documented exponent matches the code', () => {
+    // The page's comment block spells out the exponent and the interpolated
+    // multipliers. Those went stale unnoticed for a long time (they claimed
+    // ~0.457 / 1.37x / 1.87x while the code computes 0.4005 / 1.32x / 1.74x),
+    // because every other test here checks SHAPE - concave, sublinear, anchored
+    // - and shape is identical whichever exponent you fit. This pins the actual
+    // values, and cross-checks them against the comment text, so a comment that
+    // drifts from the code fails the build instead of misleading the next
+    // person who re-measures.
+    const expected = Math.log(api.WORKER_SCALE_MEASURED[8]) / Math.log(8);
+    eq(api.WORKER_SCALE_EXPONENT.toFixed(4), expected.toFixed(4),
+        'the exponent is exactly log(measured)/log(8)');
+
+    // Recompute from first principles rather than trusting the constant.
+    for (const n of [2, 4, 8, 16, 32]) {
+        eq(api.workerScale(n).toFixed(3), Math.pow(n, expected).toFixed(3),
+            `workerScale(${n}) must follow the documented power law`);
+    }
+
+    // The figures the page's comment quotes, asserted against the code. These
+    // are the exact numbers stated in the MEASUREMENT BASIS comment block.
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+    const exp = api.WORKER_SCALE_EXPONENT.toFixed(4);
+    // The comment writes the exponent with a leading '~' (it is an approximation).
+    ok(html.includes(`exponent ~${exp}`) || html.includes(`exponent ${exp}`),
+        `the comment must state the real exponent (~${exp})`);
+    ok(!/exponent ~0\.457/.test(html),
+        'the stale 0.457 exponent must not come back');
+    ok(!/1\.37x at 2 threads/.test(html) && !/1\.87x at 4/.test(html),
+        'the stale interpolated figures must not come back');
+
+    // And the README quotes the same exponent; keep the two in agreement.
+    const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+    ok(readme.includes(expected.toFixed(4)),
+        `the README must state the same exponent (${expected.toFixed(4)})`);
 });
 
 // ---- Live ETA layout ------------------------------------------------------
