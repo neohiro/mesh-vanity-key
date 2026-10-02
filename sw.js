@@ -1,18 +1,25 @@
 // Service worker for the MeshCore vanity key generator.
 //
-// Caching strategy: stale-while-revalidate.
-//   - Respond from cache immediately when available (keeps the app instant and
-//     usable offline), while fetching a fresh copy in the background.
-//   - The next load therefore picks up deploys automatically. An earlier
-//     cache-first worker pinned to 'meshcore-vanity-v1' had no way to ship a
-//     fix: users stayed on the old libsodium/index.html indefinitely, because
-//     a cache name only changes when someone remembers to bump it.
+// Caching strategy, split by request type:
+//   - Navigation (the HTML document): NETWORK-FIRST, cache as offline fallback.
+//   - Static assets (libsodium.js, worker.js, icons): cache-first, revalidating
+//     in the background so repeat loads are instant and deploys land next load.
+//
+// This started as stale-while-revalidate for everything, which turned out to be
+// wrong for the document. An earlier cache-first worker pinned to
+// 'meshcore-vanity-v1' had no way to ship a fix at all: users stayed on the old
+// libsodium/index.html indefinitely, because a cache name only changes when
+// someone remembers to bump it. Bumping it fixed that but left a subtler version
+// of the same bug -- with the cached document handed back first, every deploy
+// stayed invisible until the SECOND reload. For a single-page app whose entire
+// UI, validation and estimation live in that one file, running stale code while
+// appearing current is worse than the extra round trip.
 //
 // Bump CACHE_VERSION when the set of precached files changes so old caches are
 // garbage collected on activate.
 
 // Incremented whenever urlsToCache changes shape.
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 const CACHE_NAME = `meshcore-vanity-v${CACHE_VERSION}`;
 
 const urlsToCache = [
@@ -76,6 +83,18 @@ self.addEventListener('message', (event) => {
   if (event.data === 'SKIP_WAITING') self.skipWaiting();
 });
 
+// Navigation requests (the HTML document) are NETWORK-FIRST, deliberately.
+//
+// They used to be served cache-first with a background refresh, which made
+// every deploy invisible until the SECOND reload: the first load handed back
+// the previously cached index.html and only refreshed it for next time. For an
+// app whose whole UI lives in that one document, that means running stale
+// validation and stale markup while appearing current. HTML is a single small
+// file, so fetching it first costs little, and the cache is still the offline
+// fallback.
+//
+// Static assets below stay cache-first: they change rarely, so repeat loads
+// stay instant and offline-capable.
 self.addEventListener('fetch', (event) => {
   const { request } = event;
 
@@ -92,41 +111,46 @@ self.addEventListener('fetch', (event) => {
 
   if (!isCacheable(url)) return;
 
-  event.respondWith(
-    caches.open(CACHE_NAME).then((cache) =>
-      // 1. Try the cache first so repeat loads are instant and work offline.
-      cache.match(request).then((cached) => {
-        // 2. Kick off a background refresh regardless of cache hit. Await this
-        //    via waitUntil() so the worker stays alive long enough to store it,
-        //    but the cached response is handed back immediately.
-        const network = fetch(request)
-          .then((response) => {
-            // Opaque (status 0) and error responses are not storable.
-            if (response && response.status === 200 && response.type === 'basic') {
-              return cache.put(request, response.clone()).then(() => response);
-            }
-            return response;
-          })
-          .catch((err) => {
-            // Offline: fall back to whatever we cached, else for navigation requests
-            // fall back to index.html so offline SPAs load successfully.
-            console.warn('[SW] network failed for', request.url, err);
-            if (cached) return cached;
-            if (request.mode === 'navigate') {
-              return cache.match('/').then((root) => root || cache.match('/index.html'));
-            }
-            return Response.error();
-          });
+  // Fetch, and store a fresh copy for next time.
+  const fromNetwork = async () => {
+    const response = await fetch(request);
+    // Opaque (status 0) and error responses are not storable.
+    if (response && response.status === 200 && response.type === 'basic') {
+      const copy = response.clone();
+      event.waitUntil(
+        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy))
+      );
+    }
+    return response;
+  };
 
-        if (cached) {
-          event.waitUntil(network.catch(() => {}));
-          return cached;
-        }
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE_NAME);
 
-        // Cold cache: the user waits for the network, but still gets an
-        // offline page if that fails.
-        return network;
-      })
-    )
-  );
+    if (request.mode === 'navigate') {
+      try {
+        return await fromNetwork();
+      } catch (err) {
+        // Offline: fall back to the cached document so the app still loads.
+        const cached = await cache.match(request)
+          || await cache.match('/index.html')
+          || await cache.match('/');
+        if (cached) return cached;
+        return Response.error();
+      }
+    }
+
+    const cached = await cache.match(request);
+    if (cached) {
+      event.waitUntil(fromNetwork().catch(() => {}));
+      return cached;
+    }
+
+    try {
+      return await fromNetwork();
+    } catch (err) {
+      console.warn('[SW] network failed for', request.url, err);
+      return Response.error();
+    }
+  })());
 });

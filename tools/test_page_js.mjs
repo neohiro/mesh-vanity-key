@@ -270,7 +270,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, getLiveEtaText: () => document.getElementById('live-eta').textContent, getEstimateText: () => document.getElementById('estimate').textContent };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -807,6 +807,118 @@ check('formatEta: human duration with the day hint appended', () => {
     eq(api.formatEta(3600), '1h 0m 0s', 'sub-day gets no hint');
 });
 
+// ---- ETA smoothing ---------------------------------------------------------
+// The ETA is the most eye-catching number on the page and the least stable, so
+// it must not chase every per-batch rate sample.
+check('smoothEta: withheld until enough samples, then eased in', () => {
+    api.resetEtaSmoothing();
+    // Early batches are slower while WASM warms up; showing an ETA off them
+    // would be misleading, so the first few samples produce nothing at all.
+    for (let i = 1; i < api.ETA_MIN_SAMPLES; i++) {
+        eq(api.smoothEta(1000), null,
+            `sample ${i} should still be withheld`);
+    }
+    const first = api.smoothEta(1000);
+    ok(first !== null, 'the ETA appears once enough samples exist');
+    eq(first, 1000, 'the first shown value is the first sample, unmodified');
+});
+
+check('smoothEta: damps a spike instead of tracking it linearly', () => {
+    api.resetEtaSmoothing();
+    for (let i = 0; i < api.ETA_MIN_SAMPLES; i++) api.smoothEta(1000);
+    const before = api.smoothEta(1000);
+    // A 10x jump in the underlying rate must NOT move the ETA by 10x; that
+    // hopping is exactly what this smoothing exists to remove. The EMA moves a
+    // fraction of the way toward the new sample, so compare against the linear
+    // response it is deliberately not giving.
+    const after = api.smoothEta(10000);
+    ok(after > before, 'the ETA does respond, just gently');
+    ok(after < before * 10,
+        `ETA tracked the spike linearly (${before} -> ${after})`);
+    ok(after < before * 3,
+        `ETA still moved too eagerly (${before} -> ${after})`);
+});
+
+check('smoothEta: converges toward the true value without overshooting', () => {
+    api.resetEtaSmoothing();
+    for (let i = 0; i < api.ETA_MIN_SAMPLES; i++) api.smoothEta(0);
+    let v = 0;
+    for (let i = 0; i < 40; i++) {
+        v = api.smoothEta(1000);
+        ok(v <= 1000, 'must not overshoot the target');
+    }
+    ok(v > 990, `after 40 samples should be near 1000, got ${v}`);
+});
+
+check('smoothEta: rejects non-finite and non-positive input', () => {
+    api.resetEtaSmoothing();
+    for (let i = 0; i < api.ETA_MIN_SAMPLES; i++) api.smoothEta(1000);
+    const stable = api.smoothEta(1000);
+    eq(api.smoothEta(NaN), null, 'NaN is rejected, not folded in');
+    eq(api.smoothEta(Infinity), null, 'Infinity is rejected');
+    eq(api.smoothEta(0), null, 'zero is rejected');
+    eq(api.smoothEta(-5), null, 'negative is rejected');
+    // Rejected samples must be dropped, not folded in as NaN/0/Infinity.
+    eq(api.smoothEta(1000), stable, 'rejected samples leave the held value unchanged');
+});
+
+// ---- Worker scaling model --------------------------------------------------
+check('workerScale: anchored to the measured 8-thread ceiling', () => {
+    eq(api.WORKER_SCALE_MEASURED[8], 2.3, 'the measurement is recorded');
+    eq(Math.round(api.workerScale(8) * 100) / 100, 2.3,
+        '8 workers must reproduce the measured 2.3x');
+    eq(api.workerScale(1), 1, 'one worker is 1x');
+    eq(api.workerScale(0), 1, 'zero workers is 1x');
+});
+
+check('workerScale: concave and sublinear', () => {
+    // Linear scaling (speedup == workers) is the bug being fixed.
+    for (const n of [2, 4, 8, 16, 32]) {
+        ok(api.workerScale(n) < n,
+            `${n} workers scaled ${api.workerScale(n)}x; expected less than ${n}x`);
+        ok(api.workerScale(n) > 1,
+            `${n} workers should still be faster than one`);
+    }
+    // Per-worker efficiency must fall as workers are added; that is precisely
+    // what "workers share cores" means. (A power law has a *constant* gain per
+    // doubling, so the giveaway is efficiency, not diminishing doublings.)
+    const eff2 = api.workerScale(2) / 2;
+    const eff8 = api.workerScale(8) / 8;
+    const eff32 = api.workerScale(32) / 32;
+    ok(eff2 > eff8 && eff8 > eff32,
+        `per-worker efficiency must fall: ${eff2.toFixed(2)} > ${eff8.toFixed(2)} > ${eff32.toFixed(2)}`);
+});
+
+check('estimate: states the measured scale instead of hedging', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+    ok(/scale derived from 2\.3x at 8 threads/.test(html),
+        'the estimate must disclose where the scaling factor came from');
+    ok(/improvement is only ~/.test(html),
+        'the estimate must state the improvement multiplier');
+    ok(!/so actual will be lower/.test(html),
+        'the vague "actual will be lower" caveat must be gone');
+});
+
+check('progress: no duplicate id and no stale status under the panel', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+    const ids = [...html.matchAll(/id="progress-text"/g)];
+    eq(ids.length, 1,
+        'id="progress-text" must appear exactly once; duplicates made the stale status line linger under the live logs');
+
+    // The transient status must sit ABOVE the live panel. It used to render
+    // below it, so "Starting..." remained on screen underneath the figures.
+    const status = html.indexOf('id="progress-text"');
+    const panel = html.indexOf('id="live-logs"');
+    ok(status !== -1 && panel !== -1, 'both the status line and the panel must exist');
+    ok(status < panel,
+        'the transient status must be above the live panel, not lingering under it');
+
+    // The live panel is what a screen reader should announce now that the
+    // status line no longer updates during mining.
+    ok(/id="live-logs"[^>]*aria-live="polite"/.test(html),
+        'the live panel must be aria-live, or mining updates are silent');
+});
+
 check('live logs: a titled 2x2 grid carries the four figures', () => {
     const html = fs.readFileSync(pageHtmlPath, 'utf8');
 
@@ -824,9 +936,22 @@ check('live logs: a titled 2x2 grid carries the four figures', () => {
     ok(/\.live-logs-grid\s*\{[^}]*grid-template-columns:\s*1fr 1fr/.test(html),
         'live logs must be a 2x2 grid');
 
-    // Green styling.
-    ok(/\.live-v\s*\{[^}]*color:\s*#7ee787/.test(html),
-        'live values should be green');
+    // Green styling, in two distinct brights: a readable green for the metric
+    // names and a hotter one for the live values so the figures pop.
+    ok(/\.live-k\s*\{[^}]*color:\s*#56d364/.test(html),
+        'live labels should be green');
+    ok(/\.live-v\s*\{[^}]*color:\s*#7ef7a0/.test(html),
+        'live values should be a brighter green');
+
+    // The title is styled as a header, right-aligned with the figures below it,
+    // and scales with the viewport instead of using a fixed size.
+    ok(/\.live-logs-title\s*\{[^}]*font-family:[^;]*monospace/.test(html)
+        && /\.live-logs-title\s*\{[^}]*text-align:\s*right/.test(html),
+    'live-logs title should be monospace and right-aligned with the metrics');
+    ok(/\.live-logs-title\s*\{[^}]*font-size:\s*clamp\(/.test(html),
+        'live-logs title font size should scale with the viewport');
+    ok(/\.live-v\s*\{[^}]*font-size:\s*clamp\(/.test(html),
+        'live value font size should scale with the viewport');
 
     // The redundant "Live estimate: ... at .../s" line is gone: it repeated
     // the rate and ETA the grid already shows. Asserted against rendered

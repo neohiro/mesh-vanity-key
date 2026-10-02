@@ -1341,13 +1341,38 @@ def test_service_worker_precache_paths_all_exist():
 
 
 def test_service_worker_is_not_cache_first():
-    """Regression guard: cache-first pinned users to stale code forever."""
+    """Regression guard: a cached document must not pin users to stale code.
+
+    Originally this asserted stale-while-revalidate for every request. That is
+    not good enough for an app whose whole UI, validation and estimation logic
+    lives in one HTML file: serving the cached document first means every deploy
+    is invisible until the *second* reload, so users run old code while the page
+    appears current.
+
+    The document is now NETWORK-FIRST (cache only as the offline fallback), and
+    only the rarely-changing static assets stay cache-first. Both properties are
+    asserted so neither half can silently regress.
+    """
     sw = (_REPO_ROOT / "sw.js").read_text(encoding="utf-8")
     assert "CACHE_VERSION" in sw, "cache version is not parameterised"
-    # Must hand back the cached copy *and* refresh in the background.
-    assert "event.waitUntil(network" in sw, (
-        "service worker no longer revalidates in the background; users would "
-        "be pinned to whatever was cached first"
+
+    code = re.sub(r"//[^\n]*", "", sw)
+
+    # Navigation requests must fetch before consulting the cache.
+    assert "request.mode === 'navigate'" in code, (
+        "navigation requests are no longer special-cased; the cached document "
+        "will be served first and users will stay on stale code"
+    )
+    nav = code[code.index("request.mode === 'navigate'"):]
+    assert "await fromNetwork()" in nav, (
+        "navigation must try the network before falling back to the cache"
+    )
+
+    # Static assets stay cache-first, and still revalidate in the background so
+    # a redeploy of an asset is picked up on the following load.
+    assert "event.waitUntil(fromNetwork()" in code, (
+        "cached assets no longer revalidate in the background; a redeployed "
+        "asset would be pinned to whatever was cached first"
     )
 
 

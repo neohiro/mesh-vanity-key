@@ -838,6 +838,35 @@ def serialize_public_key(key: nacl.signing.VerifyKey) -> bytes:
 _PARALLEL_MIN_SECONDS = 1.0
 
 
+# Aggregate throughput multiplier vs. worker count.
+#
+# The benchmark measures ONE worker on ONE core, but the pool then runs
+# `workers` processes concurrently, so a flat multiplication overstates the
+# result. Measured on the reference host (8 logical CPUs / 4 physical cores):
+# pure-CPU keygen saturated at ~2.3x the single-worker rate across 8 threads,
+# not 8x -- SMT siblings share one core's execution units, and the processes
+# contend for memory bandwidth.
+#
+# Only the 8-thread end point was measured directly, so intermediate points use
+# a power-law fit anchored to it: scale(n) = n ** (log(2.3) / log(8)). The fit
+# is concave and capped at the measured ceiling, so it cannot predict more
+# speedup than was observed.
+#
+# Kept in sync with WORKER_SCALE_MEASURED / WORKER_SCALE_EXPONENT in
+# index.html. See README "Worker scaling: 2 -> 8 threads". The value is
+# hardware-specific: re-measure before trusting it elsewhere.
+_WORKER_SCALE_MEASURED = {8: 2.3}
+_WORKER_SCALE_EXPONENT = math.log(_WORKER_SCALE_MEASURED[8]) / math.log(8)
+
+
+def _worker_scale(workers: int) -> float:
+    """Aggregate speedup vs. one worker, for `workers` concurrent workers."""
+    n = int(workers)
+    if n <= 1:
+        return 1.0
+    return float(n) ** _WORKER_SCALE_EXPONENT
+
+
 def _default_workers() -> int:
     """Worker count used when --workers is not given.
 
@@ -992,10 +1021,15 @@ def main() -> int:
             if expected / measured < _PARALLEL_MIN_SECONDS:
                 workers_n = 1
         if measured > 0:
-            rate = measured * workers_n
+            # Scale through the measured curve rather than assuming linear, so
+            # the quoted rate is one the user can plan around.
+            scale = _worker_scale(workers_n)
+            rate = measured * scale
             rate_str = (
                 f"~{rate:,.0f} keys/s "
-                f"(single-worker measurement x {workers_n})"
+                f"(single-worker measurement x {scale:.1f} "
+                f"for {workers_n} worker{'' if workers_n == 1 else 's'}; "
+                f"scale derived from 2.3x at 8 threads)"
             )
         else:
             rate = 0.0

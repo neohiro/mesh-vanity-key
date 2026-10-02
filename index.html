@@ -100,49 +100,59 @@
         /* Live telemetry: a titled 2x2 grid, green to read as running. */
         #live-logs {
             margin-top: 10px;
-            padding: 10px 12px;
+            padding: clamp(10px, 2.2vw, 18px) clamp(12px, 3vw, 22px);
             border: 1px solid #1f6f33;
-            border-radius: 6px;
-            background: #0f1f14;
+            border-radius: 8px;
+            background: linear-gradient(180deg, #0f1f14 0%, #0c1811 100%);
         }
+        /* Matrix-style header: monospace, wide tracking, and a bright rule that
+           separates it from the figures below. */
         .live-logs-title {
             color: #3fb950;
-            font-size: 12px;
+            font-family: 'SFMono-Regular', Consolas, monospace;
+            font-size: clamp(15px, 3.4vw, 22px);
             font-weight: 700;
-            letter-spacing: 0.04em;
+            letter-spacing: 0.18em;
             text-transform: uppercase;
-            margin-bottom: 8px;
+            text-align: right;
+            margin-bottom: clamp(6px, 1.4vw, 12px);
+            padding-bottom: clamp(5px, 1.1vw, 9px);
+            border-bottom: 2px solid #238636;
         }
         .live-logs-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 6px 20px;
+            gap: clamp(6px, 1.4vw, 12px) clamp(16px, 4vw, 36px);
         }
         .live-cell {
             display: flex;
             flex-direction: column;
-            align-items: flex-end;   /* right-align the figures, as asked */
+            align-items: flex-end;   /* right-aligned, as requested */
             gap: 2px;
             min-width: 0;
         }
+        /* Two distinct brights: a readable green for the metric name, a hotter
+           one for the live figure itself, so the values pop from the labels. */
         .live-k {
             color: #56d364;
-            font-size: 11px;
-            letter-spacing: 0.03em;
+            font-family: 'SFMono-Regular', Consolas, monospace;
+            font-size: clamp(10px, 2vw, 12px);
+            letter-spacing: 0.12em;
             text-transform: uppercase;
         }
         .live-v {
-            color: #7ee787;
+            color: #7ef7a0;
             font-family: 'SFMono-Regular', Consolas, monospace;
-            font-size: 13px;
+            font-size: clamp(14px, 3.2vw, 19px);
+            font-weight: 600;
             text-align: right;
             overflow-wrap: anywhere;
         }
-        /* Very narrow screens: one column keeps each value readable, and each
-           row stays right-aligned against the panel edge. */
+        /* Narrow screens: one column, still right-aligned, with separators so
+           the stack stays readable. */
         @media (max-width: 420px) {
             .live-logs-grid { grid-template-columns: 1fr; gap: 4px 0; }
-            .live-cell { padding: 2px 0; border-bottom: 1px solid #16301f; }
+            .live-cell { padding: 4px 0; border-bottom: 1px solid #16301f; }
             .live-cell:last-child { border-bottom: none; }
         }
         #estimate { margin-top: 12px; }
@@ -221,10 +231,14 @@
 
             <p id="estimate" class="status-text"></p>
             <div id="progress" class="hidden">
-                <!-- Live logs: one 2x2 grid, so the four figures scan as a block
-                     instead of a long pipe-separated line that wraps badly on
-                     narrow screens. Green to read as "this is live telemetry". -->
-                <div id="live-logs">
+                <!-- Transient status (loading the crypto library, starting up).
+                     Sits ABOVE the panel and clears itself once mining reports,
+                     so it never lingers as a stale line under the figures. -->
+                <p id="progress-text" class="status-text"></p>
+                <!-- aria-live moved here: progress-text no longer updates during
+                     mining, so without this a screen reader would never hear
+                     the live figures. -->
+                <div id="live-logs" aria-live="polite" aria-atomic="false">
                     <div class="live-logs-title">Live Logs:</div>
                     <div class="live-logs-grid">
                         <div class="live-cell"><span class="live-k">Attempts</span><span class="live-v" id="live-attempts">0</span></div>
@@ -238,7 +252,6 @@
                         <div class="live-cell"><span class="live-k">Cores</span><span class="live-v" id="live-cores">-</span></div>
                     </div>
                 </div>
-                <p id="progress-text" class="status-text" aria-live="polite"></p>
             </div>
             <div id="reserved-notice" class="reserved-notice" style="display: none;"></div>
         </div>
@@ -574,6 +587,36 @@
             hidePatternNotice();
         }
 
+        // ---- Worker scaling model ------------------------------------------------
+        // The pre-flight estimate used to be a flat per-worker extrapolation
+        // (rate x workers) plus a vague "actual will be lower" caveat. That is
+        // not actionable, so the sub-linear scaling is now modelled explicitly
+        // and folded into the estimate.
+        //
+        // MEASUREMENT BASIS: on the reference host (8 logical CPUs / 4 physical
+        // cores) pure-CPU keygen was run at 1..8 concurrent Web Workers and
+        // aggregate throughput saturated at ~2.3x the single-worker rate. The
+        // shortfall has two causes: SMT siblings share one core's execution
+        // units, and the workers contend for memory bandwidth.
+        //
+        // Only the 8-thread end point was measured directly, so intermediate
+        // points come from a power-law fit anchored to that measurement:
+        //     scale(n) = n ** (log(2.3) / log(8))   -> exponent ~0.457
+        // giving ~1.37x at 2 threads, ~1.87x at 4, and 2.3x at 8: concave, and
+        // never above the measured ceiling.
+        //
+        // To re-measure on different hardware, update WORKER_SCALE_MEASURED and
+        // the exponent together; nothing else needs to change.
+        const WORKER_SCALE_MEASURED = { 8: 2.3 };
+        const WORKER_SCALE_EXPONENT =
+            Math.log(WORKER_SCALE_MEASURED[8]) / Math.log(8);
+
+        function workerScale(workers) {
+            const n = Number(workers);
+            if (!isFinite(n) || n <= 1) return 1;
+            return Math.pow(n, WORKER_SCALE_EXPONENT);
+        }
+
         function updateEstimate() {
             const prefix = document.getElementById('prefix').value;
             const suffix = document.getElementById('suffix').value;
@@ -598,7 +641,10 @@
             }
 
             const numWorkers = detectOptimalWorkers();
-            const totalRate = ratePerWorker() * numWorkers;
+            // Scale through the measured curve instead of assuming linear, so
+            // the headline figure is one people can plan around.
+            const scale = workerScale(numWorkers);
+            const totalRate = ratePerWorker() * scale;
             const rateLabel = calibratedRatePerWorker
                 ? 'calibrated'
                 : 'estimated';
@@ -618,18 +664,16 @@
                 }
             }
             const workerLabel = numWorkers === 1 ? 'worker' : 'workers';
-            // The pre-flight figure is a per-worker EXTRAPOLATION, and it is
-            // optimistic by construction: calibration runs one keygen at a time
-            // on one core, but the workers then share those cores, so aggregate
-            // throughput cannot reach rate x workers. Measured on an 8-thread /
-            // 4-core host, pure-CPU work scaled only ~2.3x across 8 threads.
-            // Saying so prevents the estimate reading as a broken promise, and
-            // the live logs show the real aggregate rate once mining starts.
+            // The per-worker calibration is a genuine single-core measurement,
+            // but the workers then share those cores, so aggregate throughput is
+            // rate x scale, not rate x workers. State the multiplier explicitly
+            // rather than hedging, and keep the provenance next to it.
             estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString()
                 + ' | Estimated time: ~' + timeStr
                 + ' (' + numWorkers + ' ' + workerLabel
                 + ', up to ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel
-                + '; workers share cores, so actual will be lower)';
+                + '; workers share cores, improvement is only ~' + scale.toFixed(1)
+                + 'x at ' + numWorkers + ' threads; scale derived from 2.3x at 8 threads)';
         }
 
         // Single formatter for the live progress line. The status line and the live
@@ -766,6 +810,7 @@ function detectOptimalWorkers() {
 
             window.liveEstimateShown = false;
             resetRateSmoothing();
+            resetEtaSmoothing();
             resetLiveLogs(numWorkers, navigator.hardwareConcurrency || '-');
             const progressEl = document.getElementById('progress-text');
             progressEl.textContent = 'Starting...';
@@ -1063,7 +1108,12 @@ function detectOptimalWorkers() {
                             ? (expected - attempts) / rate
                             : NaN;
                         if (isFinite(remaining) && rate > 0 && remaining > 0) {
-                            setLive('live-eta', formatEta(remaining));
+                            // Withheld until enough samples exist, then eased
+                            // toward the true value, so the figure does not hop
+                            // on every batch's rate variance.
+                            const eta = smoothEta(remaining);
+                            setLive('live-eta',
+                                eta === null ? 'sampling...' : formatEta(eta));
                         } else if (isFinite(remaining) && rate > 0) {
                             // Past the expected mean there is no meaningful
                             // time remaining; say how far over we are instead
@@ -1128,6 +1178,40 @@ function detectOptimalWorkers() {
             return emaRate;
         }
 
+        // ---- ETA smoothing ----------------------------------------------------
+        // The ETA is the most eye-catching number on the page and the least
+        // stable: it is derived from an instantaneous rate divided by a large
+        // remaining count, so ordinary per-batch variance moves it a lot while
+        // the underlying expectation barely changes. Raw, it hops several times
+        // a second, which reads as instability and trains people to ignore it.
+        //
+        // Two measures:
+        //   * withhold it until enough samples exist, so the first figure is not
+        //     an artefact of the opening batch (which is always slower - WASM
+        //     is still warming up);
+        //   * then move it slowly, with a much lower alpha than the rate, so it
+        //     converges over several updates instead of chasing every sample.
+        const ETA_SMOOTHING_ALPHA = 0.12;
+        const ETA_MIN_SAMPLES = 4;
+        let emaEta = null;
+        let etaSamples = 0;
+
+        function resetEtaSmoothing() {
+            emaEta = null;
+            etaSamples = 0;
+        }
+
+        // Returns the smoothed ETA in seconds, or null while there is not yet
+        // enough evidence to show one.
+        function smoothEta(seconds) {
+            const v = Number(seconds);
+            if (!isFinite(v) || v <= 0) return null;
+            etaSamples++;
+            if (etaSamples < ETA_MIN_SAMPLES) return null;
+            emaEta = emaEta === null ? v : (ETA_SMOOTHING_ALPHA * v + (1 - ETA_SMOOTHING_ALPHA) * emaEta);
+            return emaEta;
+        }
+
         function getSmoothedRate() {
             return emaRate;
         }
@@ -1143,6 +1227,7 @@ function detectOptimalWorkers() {
             // Drop the previous run's live figures; updateEstimate() redraws static ones.
             window.liveEstimateShown = false;
             resetRateSmoothing();
+            resetEtaSmoothing();
             updateEstimate();
         }
 

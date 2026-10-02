@@ -111,6 +111,78 @@ Regression guards:
 > fires and the counter silently stops at a byte boundary. Mask explicitly:
 > `bytes[i] = (bytes[i] + 1) & 0xff;` then test `bytes[i] !== 0`.
 
+### Why libsodium.js, and what else was considered
+
+The hot loop is one operation repeated tens of millions of times: derive an
+Ed25519 keypair, then match the target pattern against the public key's bytes.
+Everything else in the wrapper is cheap in comparison, so the choice of crypto
+implementation *is* the throughput ceiling. Candidates evaluated:
+
+| Option | Verdict | Reason |
+|---|---|---|
+| **libsodium.js (WASM)** | **chosen** | The reference C implementation compiled to WebAssembly. Measured at **~13.5k keys/s/core** in this app's worker. WASM avoids the per-operation type checks and boxing that dominate pure-JS scalar arithmetic. |
+| WebCrypto `Ed25519` | unusable | The API only returns a public key as a `CryptoKey`. A non-extractable key exposes no bytes at all, so there is nothing to pattern-match; making it extractable to read the bytes would leak exactly the value being mined for. A structural blocker, not a speed trade-off. |
+| tweetnacl.js | rejected | Pure JS. Correct and small, but its scalar loop loses to the WASM path at this call rate. |
+| noble-ed25519 | rejected | Pure JS and well maintained, but again slower than WASM on raw scalar-multiply throughput — the only metric that matters when it is called millions of times. |
+| Hand-rolled JS bigint | rejected | This was the original approach and the baseline that WASM beats. Far slower, and a large correctness risk in hand-rolled curve arithmetic. |
+
+Two caveats, stated plainly rather than buried:
+
+- **The ~13.5k keys/s/core figure measures the chosen path only**, not a
+  controlled head-to-head benchmark against every row above. The tweetnacl and
+  noble-ed25519 rejections rest on them being pure-JS scalar loops against a
+  WASM one, plus spot checks — not on a rigorous sweep on identical hardware.
+- **There is no faster primitive to reach for.** WASM SIMD would not help: Ed25519
+  scalar multiplication is inherently serial field arithmetic, and libsodium
+  exposes no batched or vectorised `scalarmult` entry point to call. No such
+  primitive was found in the available builds, so the loop stays where it is.
+
+### Worker scaling: 2 → 8 threads
+
+Calibration measures **one** worker on **one** core, but the search then runs
+`navigator.hardwareConcurrency` workers concurrently. Multiplying the
+single-worker rate by the worker count overstates the result, because the
+workers do not each get a core to themselves. This was measured rather than
+assumed:
+
+- Reference host: **8 logical CPUs on 4 physical cores**.
+- Pure-CPU keygen was run at 1–8 concurrent workers, measuring aggregate
+  throughput.
+- Aggregate throughput **saturated at ≈2.3x the single-worker rate at 8 threads**,
+  not the 8x that linear scaling predicts.
+
+Two effects explain the shortfall: SMT siblings sharing one physical core do not
+get independent execution units (so 4→8 threads buys far less than 2x), and the
+workers contend for memory bandwidth.
+
+| Workers | Aggregate speedup | Basis |
+|---|---|---|
+| 1 | 1.00x | baseline |
+| 2 | 1.32x | fitted |
+| 3 | 1.55x | fitted |
+| 4 | 1.74x | fitted |
+| 6 | 2.05x | fitted |
+| **8** | **2.30x** | **measured** |
+
+Only the 8-thread end point was measured directly; the intermediate points come
+from a power-law fit anchored to that measurement:
+
+    scale(n) = n ** (log(2.3) / log(8))     # exponent ~= 0.4005
+
+The curve is concave and capped at the measured ceiling, so it cannot predict
+more speedup than was actually observed. The browser estimate now folds this
+factor in and prints the multiplier inline instead of hedging:
+
+    workers share cores, improvement is only ~2.3x at 8 threads; scale derived from 2.3x at 8 threads
+
+**To re-measure on different hardware**, update `WORKER_SCALE_MEASURED` and
+`WORKER_SCALE_EXPONENT` in `index.html` together; nothing else needs to change.
+`tools/bench_real_browser.mjs` measures real-browser keygen throughput.
+
+> The multiplier is **hardware-specific** — 2.3x encodes *this* host's 2:1 SMT
+> ratio. A machine with 8 physical cores would scale very differently and must be
+> re-measured rather than reusing 2.3x.
+
 ## Quick Start
 
 ### Prerequisites
@@ -157,7 +229,7 @@ measured keygen rate, and an ETA — and asks for confirmation on interactive
 terminals:
 
 ```
-Estimate: 65,536 expected attempts (~38,400 keys/s (single-worker measurement x 2)) | ETA ~2s
+Estimate: 65,536 expected attempts (~35,062 keys/s (single-worker measurement x 1.7 for 4 workers; scale derived from 2.3x at 8 threads)) | ETA ~2s
 Continue? [y/N]:
 ```
 

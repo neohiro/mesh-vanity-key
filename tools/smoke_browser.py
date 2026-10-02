@@ -202,10 +202,42 @@ def main() -> int:
                     ".gridTemplateColumns.split(' ').length"
                 )
                 assert cols == 2, f"live logs must be 2 columns, got {cols}"
-                colour = page.evaluate(
+
+                # Two distinct brights: the labels one green, the live values a
+                # hotter one so the figures read as the important half.
+                value_colour = page.evaluate(
                     "() => getComputedStyle(document.querySelector('#live-rate')).color"
                 )
-                assert colour == "rgb(126, 231, 135)", f"live values should be green: {colour}"
+                assert value_colour == "rgb(126, 247, 160)", (
+                    f"live values should be the brighter green: {value_colour}"
+                )
+                label_colour = page.evaluate(
+                    "() => getComputedStyle(document.querySelector('.live-k')).color"
+                )
+                assert label_colour == "rgb(86, 211, 100)", (
+                    f"live labels should be their own green: {label_colour}"
+                )
+                assert label_colour != value_colour, (
+                    "labels and values must be visually distinguishable"
+                )
+
+                # The title scales with the viewport and is right-aligned with
+                # the figures beneath it.
+                assert page.evaluate(
+                    "() => getComputedStyle(document.querySelector('.live-logs-title'))"
+                    ".textAlign"
+                ) == "right", "live title must be right-aligned with the metrics"
+
+                # A single transient status line, above the panel. Two of these
+                # is what left 'Starting...' stranded under the figures.
+                assert page.eval_on_selector_all(
+                    "#progress-text", "els => els.length"
+                ) == 1, "there must be exactly one status line"
+                assert page.evaluate(
+                    "() => document.querySelector('#progress-text')"
+                    ".compareDocumentPosition(document.querySelector('#live-logs'))"
+                    " & Node.DOCUMENT_POSITION_FOLLOWING"
+                ), "the status line must sit above the live panel"
 
                 # An undecodable stored history must not be silently overwritten by the
                 # next mined key: that blob may be the only copy of the user's
