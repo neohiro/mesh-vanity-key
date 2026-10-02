@@ -203,10 +203,15 @@ from a power-law fit anchored to that measurement:
     scale(n) = n ** (log(2.3) / log(8))     # exponent ~= 0.4005
 
 The curve is concave and capped at the measured ceiling, so it cannot predict
-more speedup than was actually observed. The browser estimate now folds this
-factor in and prints the multiplier inline instead of hedging:
+more speedup than was actually observed. The browser estimate folds this factor
+in and prints the multiplier inline instead of hedging:
 
-    workers share cores, improvement is only ~2.3x at 8 threads; scale derived from 2.3x at 8 threads
+    workers share cores, improvement is only ~2.3x at 8 threads
+
+The provenance of the factor (which host it was measured on, and the fit) is
+documented here and in `WORKER_SCALE_MEASURED` in `index.html` rather than
+printed on every page load — the inline clause was long enough to wrap the
+estimate line on a narrow screen.
 
 **To re-measure on different hardware**, update `WORKER_SCALE_MEASURED` and
 `WORKER_SCALE_EXPONENT` in `index.html` together; nothing else needs to change.
@@ -278,7 +283,7 @@ measured keygen rate, and an ETA — and asks for confirmation on interactive
 terminals:
 
 ```
-Estimate: 65,536 expected attempts (~35,062 keys/s (single-worker measurement x 1.7 for 4 workers; scale derived from 2.3x at 8 threads)) | ETA ~2s
+Estimate: 65,536 expected attempts (~35,062 keys/s (single-worker measurement x 1.7 for 4 workers)) | ETA ~2s
 Continue? [y/N]:
 ```
 

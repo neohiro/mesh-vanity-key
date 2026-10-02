@@ -1028,8 +1028,7 @@ def main() -> int:
             rate_str = (
                 f"~{rate:,.0f} keys/s "
                 f"(single-worker measurement x {scale:.1f} "
-                f"for {workers_n} worker{'' if workers_n == 1 else 's'}; "
-                f"scale derived from 2.3x at 8 threads)"
+                f"for {workers_n} worker{'' if workers_n == 1 else 's'})"
             )
         else:
             rate = 0.0

@@ -69,7 +69,31 @@ def main() -> int:
 
                 # 1-char hex pattern: ~16 expected attempts, instant even headless.
                 page.fill("#prefix", "a")
+
+                # 'Starting...' was written once and never cleared, so it sat
+                # above the figures for the whole run. Drive the real mining path
+                # and assert the line is retired as soon as figures arrive.
                 page.click("#start-btn")
+                page.wait_for_function(
+                    "() => { const el = document.getElementById('progress-text');"
+                    " if (!el) return false;"
+                    " return el.hidden && (el.textContent || '') === ''; }",
+                    timeout=60_000,
+                )
+
+                # The rate graph is a backdrop on the ETA row: it must have a
+                # real box and a painted backing store, not just exist in markup.
+                assert page.evaluate(
+                    "() => { const c = document.getElementById('rate-graph');"
+                    " if (!c) return false;"
+                    " const r = c.getBoundingClientRect();"
+                    " return r.width > 0 && r.height > 0 && c.width > 0 && c.height > 0; }"
+                ), "the rate graph must be laid out with a sized backing store"
+                # ...and must not sit in flow, or it would push the panel taller.
+                assert page.evaluate(
+                    "() => getComputedStyle(document.getElementById('rate-graph'))"
+                    ".position === 'absolute'"
+                ), "the rate graph must be taken out of flow"
 
                 page.wait_for_selector(".result-frame", timeout=120_000)
                 heading = page.text_content(".result-frame h2")
@@ -323,6 +347,16 @@ def main() -> int:
                     "() => getComputedStyle(document.querySelector('.visitor-counter'))"
                     ".textAlign"
                 ) == "center", "the counter badge must be centred"
+                # The badge was declared 120x20 for a ~123.5x28 SVG, stretching
+                # it wide and squashing it short. Assert the RENDERED box keeps
+                # the SVG's own proportions, not merely the declared attributes.
+                badge_ratio = page.evaluate(
+                    "() => { const r = document.querySelector('.visitor-counter img')"
+                    ".getBoundingClientRect(); return r.height ? r.width / r.height : 0; }"
+                )
+                assert 4.0 < badge_ratio < 5.0, (
+                    f"the badge should keep its ~4.4:1 aspect ratio, rendered {badge_ratio:.2f}:1"
+                )
 
                 # A single transient status line, above the panel. Two of these
                 # is what left 'Starting...' stranded under the figures.

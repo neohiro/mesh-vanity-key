@@ -112,6 +112,13 @@
         #stop-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
         #new-search-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
         .status-text { font-size: 14px; color: #8b949e; font-family: 'SFMono-Regular', Consolas, monospace; }
+        /* The transient status line is shown/hidden via the `hidden` property
+           (see setStatusText). Emptying the text alone was not enough: the <p>
+           kept its line box, so a retired "Starting..." still reserved a blank
+           row under the figure. `hidden` removes it from the box tree and the
+           accessibility tree together. The class is kept in the rule below so
+           the two never drift. */
+        .status-text[hidden] { display: none; }
         /* Centred below the info frame with breathing room above it, so it reads
            as a quiet footer rather than competing with the tool itself. */
         .visitor-counter {
@@ -123,6 +130,12 @@
             display: inline-block;
             opacity: 0.75;
             transition: opacity 0.2s;
+            /* Defend the badge's own proportions. The SVG is ~4.4:1; without
+               this the box is free to stretch it again, which is exactly the
+               smeared look this replaced. `auto` height follows the rendered
+               width, so the two can never disagree. */
+            height: auto;
+            max-width: 100%;
         }
         .visitor-counter a:hover img,
         .visitor-counter a:focus-visible img { opacity: 1; }
@@ -186,13 +199,36 @@
             min-width: 0;
         }
         /* The ETA gets its own full-width row so the digit slots have room to
-           stay put no matter how large the duration grows. */
+           stay put no matter how large the duration grows. It is also the
+           positioning context for the rate graph drawn behind the digits. */
         .live-cell-eta {
+            position: relative;   /* anchor for the absolutely-placed rate graph */
             grid-column: 1 / -1;
             align-items: flex-start;
             margin-top: 2px;
             padding-top: clamp(6px, 1.4vw, 10px);
             border-top: 1px solid #16301f;
+        }
+        /* Rate-over-time trace, as a backdrop on the ETA row.
+           Absolute + pointer-events:none so it never intercepts clicks or
+           affects layout, and z-index 0 keeps it under the digit slots. The
+           digits carry z-index 1 and a text-shadow, so the trace stays legible
+           where it passes behind them instead of fighting the figures. */
+        .rate-graph {
+            position: absolute;
+            left: 0;
+            bottom: 0;
+            width: 100%;
+            height: clamp(26px, 6vw, 40px);
+            z-index: 0;
+            pointer-events: none;
+            opacity: 0.9;
+        }
+        /* Once a trace exists, push the digits above it. */
+        .live-cell-eta .eta-fields,
+        .live-cell-eta .live-k {
+            position: relative;
+            z-index: 1;
         }
         .eta-fields {
             /* Tabular figures are what actually stop the digits from changing
@@ -230,6 +266,10 @@
             font-weight: 600;
             text-align: right;
             overflow-wrap: anywhere;
+            /* The rate trace is painted behind the ETA row, so the digits get a
+               matching dark halo. Without it the line crossing a glyph makes the
+               figure harder to read than the plain text it replaced. */
+            text-shadow: 0 0 4px #0c1811, 0 0 4px #0c1811;
         }
         /* Narrow screens: one column, still right-aligned, with separators so
            the stack stays readable. */
@@ -362,6 +402,15 @@
                              changes slowly. -->
                         <div class="live-cell live-cell-eta">
                             <span class="live-k">ETA</span>
+                            <!-- Rate-over-time trace, drawn BEHIND the ETA digits.
+                                 The plot is absolutely positioned and the digits sit
+                                 above it (z-index), so the trace reads as a backdrop
+                                 on the ETA row rather than a separate chart block
+                                 that pushes the panel taller. It is decorative and
+                                 hidden from assistive tech: the numbers it shows
+                                 are already announced by the live region. -->
+                            <canvas class="rate-graph" id="rate-graph"
+                                    aria-hidden="true"></canvas>
                             <span class="live-v eta-fields" id="live-eta">
                                 <span class="eta-days" id="live-eta-days"></span>
                                 <span class="eta-unit"><span class="eta-num" id="live-eta-h"></span>h</span>
@@ -397,7 +446,13 @@
              workspace: a plain <img>, no script, no cookies, and it survives
              GitHub's image proxy. A shields.io endpoint cannot count visits
              (it only proxies JSON/metrics), so the same visitorbadge.io path
-             is used here for consistency. -->
+             is used here for consistency.
+
+             The width/height below match the badge's own aspect ratio (~4.4:1).
+             It was declared 120x20 - a 6:1 box for a 123.5x28 SVG - so the image
+             was stretched wide and squashed short, which is what made it look
+             horizontally smeared. Intrinsic size also reserves layout, so the
+             footer does not reflow when the badge loads. -->
         <div class="visitor-counter">
             <a href="https://visitorbadge.io/status?path=github.com%2Fneohiro%2Fmeshcore-vanity-key" rel="noopener noreferrer nofollow">
                 <img
@@ -405,7 +460,7 @@
                     alt="Visitors"
                     referrerpolicy="no-referrer"
                     loading="lazy"
-                    width="120"
+                    width="88"
                     height="20">
             </a>
         </div>
@@ -853,13 +908,17 @@
             // The per-worker calibration is a genuine single-core measurement,
             // but the workers then share those cores, so aggregate throughput is
             // rate x scale, not rate x workers. State the multiplier explicitly
-            // rather than hedging, and keep the provenance next to it.
+            // rather than hedging. The provenance of the scaling factor
+            // (WORKER_SCALE_MEASURED above, and the README's "Worker scaling"
+            // section) is deliberately NOT repeated here: the parenthetical was
+            // long enough to wrap the whole line on a narrow screen, and the
+            // number that matters is the multiplier, which stays.
             estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString()
                 + ' | Estimated time: ~' + timeStr
                 + ' (' + numWorkers + ' ' + workerLabel
                 + ', up to ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel
                 + '; workers share cores, improvement is only ~' + scale.toFixed(1)
-                + 'x at ' + numWorkers + ' threads; scale derived from 2.3x at 8 threads)';
+                + 'x at ' + numWorkers + ' threads)';
         }
 
         // Single formatter for the live progress line. The status line and the live
@@ -927,6 +986,31 @@
             renderEta(0);
         }
 
+        // Clear the transient status line (the "Loading crypto library..." /
+        // "Starting..." messages) by hiding the ELEMENT, not just emptying it.
+        //
+        // Emptied text alone still left a rendered line box: the <p> kept its
+        // font size and line-height, so the panel showed a blank gap that
+        // pushed the figures down, and because the element stayed in the
+        // accessibility tree a screen reader still announced an empty status.
+        // Toggling `hidden` removes it from both the box tree and the a11y tree,
+        // and the space it occupied collapses with it.
+        //
+        // Every transient status is set through setStatusText(), so anything
+        // that shows one hides it again on the same path.
+        function setStatusText(text) {
+            const el = document.getElementById('progress-text');
+            if (!el) return;
+            el.textContent = text || '';
+            el.hidden = !text;
+        }
+
+        // Hide the transient status line. Called as soon as mining reports
+        // real figures, so "Starting..." cannot survive into the running state.
+        function clearStatusText() {
+            setStatusText('');
+        }
+
         // Report how many workers actually started, not how many were planned.
         // A short search may create fewer than requested if the browser cannot
         // spawn them all, and silently reporting the plan would hide it.
@@ -973,8 +1057,7 @@ function detectOptimalWorkers() {
             const startBtn = document.getElementById('start-btn');
             starting = true;
             startBtn.disabled = true;
-            const progressEl0 = document.getElementById('progress-text');
-            progressEl0.textContent = 'Loading crypto library...';
+            setStatusText('Loading crypto library...');
             document.getElementById('progress').classList.remove('hidden');
             try {
                 await awaitSodium();
@@ -1000,10 +1083,12 @@ function detectOptimalWorkers() {
             window.liveEstimateShown = false;
             resetRateSmoothing();
             resetEtaSmoothing();
+            resetRateGraph();
             resetLiveLogs(numWorkers, navigator.hardwareConcurrency || '-');
-            const progressEl = document.getElementById('progress-text');
-            progressEl.textContent = 'Starting...';
-            progressEl.className = 'status-text';
+            // Only a genuinely transient state. clearStatusText() drops this the
+            // moment the first worker reports, so it can never sit on screen for
+            // the whole run the way it used to.
+            setStatusText('Starting...');
             document.getElementById('progress').classList.remove('hidden');
 
             const workerCode = `
@@ -1268,6 +1353,13 @@ function detectOptimalWorkers() {
                     return;
                 }
                 if (e.data.type === 'progress') {
+                        // The panel is live from this point on, so the transient
+                        // startup status is retired here. This is the fix for
+                        // "Starting..." outliving the startup it described: it was
+                        // written once and nothing ever cleared it, so it sat
+                        // above the figures for the entire run.
+                        clearStatusText();
+
                         const attempts = Number(e.data.attempts) || 0;
                         const rate = Number(e.data.rate) || 0;
                         const expected = Number(e.data.expectedAttempts);
@@ -1287,6 +1379,11 @@ function detectOptimalWorkers() {
                         };
                         setLive('live-attempts', attempts.toLocaleString());
                         setLive('live-rate', liveRateStr);
+                        // Trace the raw per-batch rate, not the EMA: the graph's
+                        // job is to make variance visible, and smoothing is what
+                        // the headline number is for. Smoothing the trace would
+                        // hide the droops the user is looking for.
+                        pushRateGraphSample(rate);
 
                         const haveExpected = isFinite(expected) && expected > 0;
                         const pct = haveExpected ? attempts / expected * 100 : 0;
@@ -1366,6 +1463,137 @@ function detectOptimalWorkers() {
             return emaRate;
         }
 
+        // ---- Rate-over-time graph --------------------------------------------
+        // A trace of keys/s over the life of the current search, painted as a
+        // backdrop behind the ETA digits. It answers a question the other
+        // figures cannot: not "how fast are we now" (the Rate cell says that)
+        // but "has the rate been steady, or is it collapsing?". A browser
+        // throttling a background tab, a thermal dip or a GC pause all show up
+        // as a visible droop in the line.
+        //
+        // Drawn on a <canvas> rather than as SVG/DOM nodes because it is
+        // repainted on every progress event (several times a second). A polyline
+        // of N DOM elements would thrash layout for no benefit; one canvas
+        // clear+stroke is a single cheap op.
+        //
+        // The vertical scale is fitted to the data rather than pinned to a
+        // nominal rate, so a slow machine still gets a full-height trace. The
+        // axis is NOT zero-based: a zero baseline would flatten every real
+        // variation into a straight line, which is the opposite of what the
+        // graph is for. The min/max are padded so the trace never touches the
+        // top or bottom edge.
+        const RATE_GRAPH_POINTS = 90;   // samples retained in the window
+        const RATE_GRAPH_PAD = 0.12;    // fraction of range left headroom
+        let rateGraph = [];
+
+        function resetRateGraph() {
+            rateGraph = [];
+            const canvas = document.getElementById('rate-graph');
+            if (canvas) drawRateGraph();
+        }
+
+        // Append one sample and redraw. A no-op once the buffer is full, so the
+        // graph keeps a fixed time window instead of stretching to the whole
+        // run (which would make the last hour indistinguishable from the first).
+        function pushRateGraphSample(rate) {
+            const r = Number(rate);
+            if (!isFinite(r) || r < 0) return;
+            if (rateGraph.length >= RATE_GRAPH_POINTS) {
+                // Drop every other point and halve the effective resolution
+                // rather than shifting the array on each push. A shift is O(n)
+                // per event; this is O(1) and the trace still covers the same
+                // span, just with a coarser time step.
+                const kept = [];
+                for (let i = 0; i < rateGraph.length; i += 2) kept.push(rateGraph[i]);
+                rateGraph = kept;
+            }
+            rateGraph.push(r);
+            drawRateGraph();
+        }
+
+        function drawRateGraph() {
+            const canvas = document.getElementById('rate-graph');
+            if (!canvas) return;
+            const ctx = typeof canvas.getContext === 'function'
+                ? canvas.getContext('2d') : null;
+            // A 2d context is unavailable in some environments (and in the
+            // Node test harness). The graph is decoration; never let it throw
+            // into the progress handler and stall the live figures.
+            if (!ctx) return;
+
+            // Match the backing store to the CSS box, accounting for devicePixel
+            // ratio. Without the DPR scaling the line is drawn at CSS-pixel
+            // size into a device-pixel canvas and comes out half-size/blurry on
+            // any HiDPI display.
+            const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+            const w = canvas.clientWidth;
+            const h = canvas.clientHeight;
+            if (!w || !h) return;   // not laid out yet; nothing to draw into
+            const pw = Math.round(w * dpr);
+            const ph = Math.round(h * dpr);
+            if (canvas.width !== pw || canvas.height !== ph) {
+                canvas.width = pw;
+                canvas.height = ph;
+            }
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, w, h);
+
+            if (rateGraph.length < 2) return;   // a single point is not a trend
+
+            // Fit to the observed range with padding. Guard the degenerate
+            // flat-line case: a range of 0 would divide by zero and produce NaN
+            // coordinates, which silently draw nothing.
+            let min = Infinity, max = -Infinity;
+            for (const v of rateGraph) {
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+            if (!isFinite(min) || !isFinite(max)) return;
+            let span = max - min;
+            if (span <= 0) {
+                // Flat: centre a straight line rather than dividing by zero.
+                min = min * 0.98;
+                span = (max - min) || 1;
+            }
+            const pad = span * RATE_GRAPH_PAD;
+            const lo = min - pad;
+            const hi = max + pad;
+            const range = (hi - lo) || 1;
+
+            const xAt = (i) => (i / (rateGraph.length - 1)) * w;
+            const yAt = (v) => h - ((v - lo) / range) * h;
+
+            // Filled area under the trace first, so the stroke reads as an edge
+            // on top of a soft mass rather than a bare line.
+            ctx.beginPath();
+            ctx.moveTo(0, h);
+            for (let i = 0; i < rateGraph.length; i++) {
+                ctx.lineTo(xAt(i), yAt(rateGraph[i]));
+            }
+            ctx.lineTo(w, h);
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(63, 185, 80, 0.16)';
+            ctx.fill();
+
+            ctx.beginPath();
+            for (let i = 0; i < rateGraph.length; i++) {
+                const x = xAt(i);
+                const y = yAt(rateGraph[i]);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.strokeStyle = 'rgba(126, 247, 160, 0.85)';
+            ctx.lineWidth = 1.5;
+            ctx.lineJoin = 'round';
+            ctx.stroke();
+
+            // A dot on the newest sample, so "now" is identifiable on the trace.
+            ctx.beginPath();
+            ctx.arc(w, yAt(rateGraph[rateGraph.length - 1]), 2, 0, Math.PI * 2);
+            ctx.fillStyle = '#7ef7a0';
+            ctx.fill();
+        }
+
         // ---- ETA smoothing ----------------------------------------------------
         // The ETA is the most eye-catching number on the page and the least
         // stable: it is derived from an instantaneous rate divided by a large
@@ -1416,6 +1644,11 @@ function detectOptimalWorkers() {
             window.liveEstimateShown = false;
             resetRateSmoothing();
             resetEtaSmoothing();
+            // The trace belongs to the run that just ended. Leaving it would show
+            // the stopped run's history if the panel were ever reopened before a
+            // new resetRateGraph() runs.
+            resetRateGraph();
+            clearStatusText();
             updateEstimate();
         }
 
