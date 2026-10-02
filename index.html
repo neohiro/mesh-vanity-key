@@ -1106,9 +1106,18 @@ function detectOptimalWorkers() {
                     + ' Check your internet connection and refresh.');
                 return;
             }
+            // The user may have cancelled while we waited for libsodium - the
+            // Stop button and the new-search button both clear `starting` while
+            // leaving `mining` false, so `starting` is the cancellation signal.
+            //
+            // This used to read `if (mining) return;`, which could never fire:
+            // `mining` is not set true until the workers are created, well
+            // below this point, and the Stop button is disabled for the whole
+            // startup window. The comment described a guard the code did not
+            // implement, and the flag it checked was not the one a cancellation
+            // would move.
+            if (!starting) return;
             starting = false;
-            // The user may have hit Stop while we waited.
-            if (mining) return;
 
             const prefix = document.getElementById('prefix').value.toLowerCase();
             const suffix = document.getElementById('suffix').value.toLowerCase();

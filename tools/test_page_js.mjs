@@ -343,7 +343,7 @@ armTrackingTimeouts();
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_EXPONENT, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, resetForm, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_EXPONENT, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -1640,6 +1640,59 @@ await asyncCheck('an export must not hide the panel while a search is STARTING',
         api.stopMining();
     }
     await teardownExportTest();
+});
+
+await asyncCheck('cancelling during startup must not start the search', async () => {
+    // The guard `if (mining) return;` that used to sit here could never fire -
+    // `mining` is only set true once the workers exist, below the check - and it
+    // was checking the wrong flag anyway: Stop and the new-search button both
+    // clear `starting`, not `mining`. The check is now `if (!starting) return;`.
+    primeForm();
+    workerPool.length = 0;
+
+    const realSodium = sandbox.libsodium;
+    let release;
+    // The stub must satisfy sodiumIsUsable(), which requires a real
+    // crypto_sign_seed_keypair. Without it awaitSodium() THROWS before the guard
+    // under test is ever reached, and the check passes for the wrong reason -
+    // which is exactly what happened the first time this was written.
+    const ready = new Promise((r) => { release = r; });
+    const stub = {
+        ready,
+        crypto_sign_seed_keypair(seed) {
+            const pk = new Uint8Array(32);
+            pk[0] = (seed[0] || 0) ^ 0xab;
+            pk[31] = seed[31] & 0xff;
+            return { publicKey: pk, privateKey: new Uint8Array(64) };
+        },
+    };
+    sandbox.libsodium = stub;
+    sandbox.sodium = stub;
+    const inFlight = api.startMining();
+    await new Promise((r) => setTimeout(r, 0));
+    try {
+        eq(api.startingState(), true, 'the search should be waiting on libsodium');
+        eq(workerPool.length, 0, 'and must not have created workers yet');
+
+        // The user cancels: Stop (or New Search) clears `starting` while the
+        // await is still pending.
+        api.stopMining();
+        eq(api.startingState(), false, 'cancelling must clear the starting flag');
+
+        // Now libsodium finally resolves. The search must NOT proceed.
+        release();
+        await inFlight;
+        await new Promise((r) => setTimeout(r, 0));
+
+        eq(workerPool.length, 0,
+            'a cancelled startup must not create workers after the await resolves');
+        eq(api.miningState(), false, 'and must not end up mining');
+        eq(api.liveWorkerCount(), 0, 'no worker may be registered');
+    } finally {
+        sandbox.libsodium = realSodium;
+        sandbox.sodium = realSodium;
+        api.stopMining();
+    }
 });
 
 check('worker init timers are per-worker, not looked up by index', () => {
