@@ -633,6 +633,98 @@ def test_ci_referenced_repo_files_exist():
     assert not missing, f"CI references files that do not exist: {missing}"
 
 
+def test_required_status_check_contexts_match_real_job_names():
+    """Branch protection must not require a check that can never be reported.
+
+    This bit, and it is invisible to every other test in this file. Branch
+    protection on `main` requires a status check context named `ci`, but
+    GitHub reports check runs named after each JOB's `name:`, not after the
+    workflow's `name:`. ci.yml declares `name: ci` while its jobs report as
+    `test` and `Browser smoke (required)`, so no check run is ever called `ci`
+    and the required context can never be satisfied. Every PR to this repo is
+    therefore permanently unmergeable, review or not - it reads as "awaiting
+    review" when the real blocker is unsatisfiable.
+
+    The fix belongs in the repo, not in a test-only workaround, so this asserts
+    the invariant: every required context must equal some job's reported name
+    (its `name:` if set, otherwise the YAML key).
+
+    Reads live branch protection when a token is available, since that is the
+    authoritative source. Skips otherwise - it is a network-dependent check and
+    must never be the reason a local run fails.
+    """
+    import os
+    import urllib.error
+    import urllib.request
+
+    yaml = _require("yaml", "PyYAML")
+
+    root = Path(__file__).resolve().parent
+    doc = yaml.safe_load(
+        (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    )
+    jobs = doc.get("jobs") or {}
+    # A check run is named after the job's `name:`, falling back to the YAML key.
+    reported = {job.get("name") or key for key, job in jobs.items()}
+
+    protection = None
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/neohiro/meshcore-vanity-key"
+            "/branches/main/protection",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                protection = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError):
+            protection = None
+    else:
+        # Fall back to the gh CLI, which handles its own auth.
+        import shutil
+        import subprocess
+
+        if shutil.which("gh"):
+            try:
+                proc = subprocess.run(
+                    ["gh", "api",
+                     "repos/neohiro/meshcore-vanity-key/branches/main/protection"],
+                    capture_output=True, text=True, timeout=60,
+                )
+            except (OSError, subprocess.SubprocessError):
+                proc = None
+            if proc is not None and proc.returncode == 0:
+                try:
+                    protection = json.loads(proc.stdout)
+                except ValueError:
+                    protection = None
+
+    if protection is None:
+        pytest.skip(
+            "no GitHub API access (no GH_TOKEN/GITHUB_TOKEN and no working "
+            "`gh api`); cannot read branch protection"
+        )
+
+    required = ((protection.get("required_status_checks") or {}).get("contexts")) or []
+    if not required:
+        pytest.skip("no required status checks configured")
+
+    unsatisfiable = [c for c in required if c not in reported]
+    assert not unsatisfiable, (
+        f"branch protection requires status check(s) {unsatisfiable}, but ci.yml "
+        f"only ever reports {sorted(reported)}. A required context that no check "
+        "run can ever satisfy makes EVERY pull request permanently unmergeable. "
+        "Fix by setting the required contexts to the real job names (or renaming "
+        "a job), via: gh api --method PUT "
+        "repos/neohiro/meshcore-vanity-key/branches/main/protection"
+    )
+
+
 def test_hot_loops_have_no_dead_local_bindings():
     """The hot loops bind module-level functions to locals for speed.
 
