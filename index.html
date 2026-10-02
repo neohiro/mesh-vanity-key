@@ -1535,15 +1535,17 @@ function detectOptimalWorkers() {
             while (drop < rateGraph.length - 1 && rateGraph[drop].t < cutoff) drop++;
             if (drop > 0) rateGraph = rateGraph.slice(drop);
 
-            // Still too many to resolve: halve in place, keeping the newer of
-            // each adjacent pair so the most recent reading always survives.
+            // Still too many to resolve: halve in place, keeping the NEWER of
+            // each adjacent pair (i + 1, not i). Keeping the older would make
+            // every decimated reading up to one sample stale, so the trace
+            // would lag a real rate change instead of showing it.
             while (rateGraph.length > RATE_GRAPH_POINTS) {
                 const kept = [];
-                for (let i = 0; i < rateGraph.length; i += 2) {
+                for (let i = 1; i < rateGraph.length; i += 2) {
                     kept.push(rateGraph[i]);
                 }
-                // The last element can be lost by the halving above when the
-                // length was odd, so re-append the true newest sample.
+                // Halving an odd length cannot land on the final element, so
+                // re-append the true newest sample and keep the newest.
                 const newest = rateGraph[rateGraph.length - 1];
                 if (kept[kept.length - 1] !== newest) kept.push(newest);
                 rateGraph = kept;

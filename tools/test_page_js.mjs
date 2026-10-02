@@ -1291,6 +1291,80 @@ check('rate graph: the window is a fixed span of time, not the whole run', () =>
     }
 });
 
+check('rate graph: decimation keeps the newer of each pair, and terminates', () => {
+    // The halving loop once kept index i (the OLDER of each adjacent pair)
+    // while its comment claimed the newer, so every decimated reading was up
+    // to one sample stale and the trace lagged real rate changes. Exercised
+    // across every length from 1 to 400 so both parities and every shrink
+    // step are covered, not just one convenient size.
+    const cap = api.RATE_GRAPH_POINTS;
+    const t0 = Date.now();
+    const realNow = Date.now;
+    let clock = 0;
+    try {
+        Date.now = () => t0 + clock * 1000;
+        for (let n = 1; n <= 400; n++) {
+            api.resetRateGraph();
+            for (let i = 0; i < n; i++) {
+                // Distinct, increasing, and identifiable by value.
+                api.pushRateGraphSample(1000 + i);
+                clock++;
+            }
+            const st = api.rateGraphState();
+            ok(st.length >= 1, `n=${n}: the buffer must not be emptied`);
+            ok(st.length <= cap, `n=${n}: must stay within the cap (${st.length} > ${cap})`);
+            // The newest reading must always survive, since the dot marking
+            // "now" is drawn from it.
+            eq(st[st.length - 1].v, 1000 + n - 1,
+                `n=${n}: the newest sample must survive decimation`);
+            // Timestamps must stay strictly increasing: no reordering, and no
+            // duplicated point from the re-append.
+            let ordered = true;
+            for (let i = 1; i < st.length; i++) {
+                if (st[i].t <= st[i - 1].t) { ordered = false; break; }
+            }
+            ok(ordered, `n=${n}: timestamps must stay strictly increasing`);
+        }
+    } finally {
+        Date.now = realNow;
+        api.resetRateGraph();
+    }
+
+    // The specific defect: halving (0,1),(2,3),... and keeping the older of
+    // each pair instead of the newer. This is only observable on data where
+    // the choice matters: on a uniform ramp both choices give a stride of 2,
+    // so an arithmetic series cannot tell them apart. Here every sample is
+    // either a low or a high value, and the survivors must be the HIGH one of
+    // each pair, because those are the readings closer to the real rate at the
+    // moment they were kept.
+    const CAP = api.RATE_GRAPH_POINTS;
+    api.resetRateGraph();
+    let c = 0;
+    Date.now = () => t0 + c * 1000;
+    try {
+        for (let i = 0; i < CAP; i++) {
+            // Strictly increasing within a pair, and the second of each pair is
+            // always the larger value, so index parity is observable.
+            api.pushRateGraphSample(i % 2 === 0 ? 1000 : 2000);
+            c++;
+        }
+        api.pushRateGraphSample(1000);   // overflows by one, forcing one halving
+        c++;
+        const st = api.rateGraphState();
+        eq(st[st.length - 1].v, 1000, 'the newest sample survives the halving');
+        const body = st.slice(0, -1);
+        ok(body.length > 0, 'expected retained samples to inspect');
+        // Every survivor from a (low, high) pair must be the high one.
+        const wrong = body.filter((s) => s.v !== 2000);
+        ok(wrong.length === 0,
+            `decimation must keep the newer (higher) of each pair, but retained `
+            + `${wrong.length} stale reading(s) of 1000 in ${JSON.stringify(body.map((s) => s.v))}`);
+    } finally {
+        Date.now = realNow;
+        api.resetRateGraph();
+    }
+});
+
 check('estimate omits the scaling provenance clause', () => {
     getElementById('prefix').value = 'ab';
     getElementById('suffix').value = '';
