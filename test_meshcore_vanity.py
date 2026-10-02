@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import multiprocessing
+import os
 import re
 import struct
 import sys
@@ -393,6 +394,42 @@ def test_reserved_warning_is_emitted_once(monkeypatch):
         counts.append(len(caught))
     assert counts == [1, 0, 0, 0, 0], f"warned on every call: {counts}"
     assert len(meshcore_vanity._warned_reserved) == 1
+
+
+def test_hot_loop_keygen_matches_pynacl_exactly():
+    """The hot loop calls libsodium's seed_keypair; PyNaCl wraps it elsewhere.
+
+    These must agree exactly, or the miner would report a public key that does
+    not correspond to the private seed it hands back - a key that matches the
+    pattern and cannot be used. This is the correctness invariant behind the
+    hot loop bypassing the PyNaCl objects, so it is asserted directly rather
+    than inferred from the surrounding tests.
+    """
+    from nacl import bindings
+
+    seeds = [
+        bytes(32),                          # all zero
+        b"\xff" * 32,                      # all ones
+        bytes([0xFF] * 31 + [0x80]),       # high bit set (clamping territory)
+        bytes([0xFF] * 32),                # counter wrap case
+        os.urandom(32),
+    ]
+    for seed in seeds:
+        via_pynacl = bytes(nacl.signing.SigningKey(seed).verify_key)
+        via_hot_loop = bindings.crypto_sign_seed_keypair(seed)[0]
+        assert via_pynacl == via_hot_loop, f"seed {seed.hex()}: keys differ"
+        assert len(via_hot_loop) == 32, "public key must be 32 bytes"
+
+
+def test_hot_loop_keygen_matches_pynacl_over_random_seeds():
+    from nacl import bindings
+
+    for _ in range(50):
+        seed = os.urandom(32)
+        assert (
+            bytes(nacl.signing.SigningKey(seed).verify_key)
+            == bindings.crypto_sign_seed_keypair(seed)[0]
+        ), f"seed {seed.hex()}: keys differ"
 
 
 def test_default_workers_uses_all_cores():
