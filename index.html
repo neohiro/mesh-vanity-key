@@ -1087,6 +1087,33 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
             ].join('|');
         }
 
+        // Which derivation mode this install uses. Recorded on first run and then
+        // never changed, because switching modes changes the key and would
+        // orphan every key already stored. Without this the 2s IndexedDB
+        // timeout below could pick the fingerprint for one slow load and the
+        // secret for the next - a silent, timing-dependent loss of history.
+        const OBFUSCATION_MODE_STORAGE = 'meshcoreVanityObfMode';
+        const MODE_SECRET = 'idb';
+        const MODE_FINGERPRINT = 'fp';
+
+        function readObfuscationMode() {
+            try {
+                return localStorage.getItem(OBFUSCATION_MODE_STORAGE);
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function recordObfuscationMode(mode) {
+            try {
+                localStorage.setItem(OBFUSCATION_MODE_STORAGE, mode);
+            } catch (e) {
+                // Cannot record: fall back to re-deciding every load, which is
+                // the pre-existing behaviour and still round-trips within a
+                // load. Only matters when storage is partially broken.
+            }
+        }
+
         // Read (or create) the install-scoped secret from IndexedDB.
         // Resolves to a hex string, or null when IndexedDB is unavailable
         // (private mode, disabled storage) - in which case callers fall back
@@ -1114,44 +1141,54 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 openReq.onblocked = () => done(null);
                 openReq.onsuccess = () => {
                     const db = openReq.result;
+                    // Release the connection once the read/write settles.
+                    // Every call opens a new one, and browsers cap concurrent
+                    // connections, so leaking them would eventually make
+                    // getOrCreateObfuscationSecret fail on a healthy install.
+                    const closeDb = () => { try { db.close(); } catch (e) { /* ignore */ } };
                     let store;
                     try {
                         db.onversionchange = () => db.close();
                         store = db.transaction(OBFUSCATION_SECRET_STORE, 'readwrite')
                             .objectStore(OBFUSCATION_SECRET_STORE);
                     } catch (e) {
+                        closeDb();
                         return done(null);
                     }
 
                     const readReq = store.get('secret');
-                    readReq.onerror = () => done(null);
+                    readReq.onerror = () => { closeDb(); done(null); };
                     readReq.onsuccess = () => {
                         const existing = readReq.result;
                         if (existing && /^[0-9a-f]{64}$/.test(existing)) {
+                            closeDb();
                             return done(existing);
                         }
                         // First run: mint one and persist it. getRandomValues is
                         // mandatory - a weak secret would undermine the whole
                         // point, so fail closed rather than fall back.
                         const c = (typeof crypto !== 'undefined' ? crypto : null);
-                        if (!c || !c.getRandomValues) return done(null);
+                        if (!c || !c.getRandomValues) { closeDb(); return done(null); }
                         const bytes = new Uint8Array(32);
                         c.getRandomValues(bytes);
                         const hex = Array.from(bytes)
                             .map(b => b.toString(16).padStart(2, '0')).join('');
                         try {
                             const putReq = store.put(hex, 'secret');
-                            putReq.onsuccess = () => done(hex);
+                            putReq.onsuccess = () => { closeDb(); done(hex); };
                             // A failed write would silently orphan history on
                             // the next load, so report failure instead.
-                            putReq.onerror = () => done(null);
+                            putReq.onerror = () => { closeDb(); done(null); };
                         } catch (e) {
+                            closeDb();
                             done(null);
                         }
                     };
                 };
                 // Never hang the caller: history must load even if IndexedDB
                 // stalls (some privacy modes open but never fire events).
+                // The chosen mode is recorded before this can fire, so a
+                // timeout can never cause the derivation to change later.
                 setTimeout(() => done(null), 2000);
             });
         }
@@ -1162,7 +1199,25 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
             const subtle = (typeof crypto !== 'undefined' && crypto.subtle) || null;
             if (!subtle || !subtle.digest) return null;
             try {
-                const secret = await getOrCreateObfuscationSecret();
+                // Once a mode is recorded, honour it forever. Re-deciding could
+                // flip the mode on a slow load and change the key, which would
+                // make previously stored history undecodable.
+                const recorded = readObfuscationMode();
+                let secret = null;
+                if (recorded !== MODE_FINGERPRINT) {
+                    secret = await getOrCreateObfuscationSecret();
+                    if (!secret && recorded === MODE_SECRET) {
+                        // Pinned to IndexedDB but the secret is temporarily
+                        // unreachable. Do NOT silently switch to the fingerprint
+                        // derivation: that would change the key and orphan every
+                        // stored key. Report "no key" so the caller keeps the
+                        // existing ciphertext and refuses to write, which is
+                        // recoverable, unlike a changed key.
+                        return null;
+                    }
+                }
+                if (!recorded) recordObfuscationMode(secret ? MODE_SECRET : MODE_FINGERPRINT);
+
                 // Primary: the install-scoped secret, so the key is stable
                 // across every environment change. `origin` keeps the key bound
                 // to this site rather than shared across origins.
@@ -1187,10 +1242,16 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
             return obfKeyPromise;
         }
 
+        // Returns the obfuscated payload, or null when no key could be derived.
+        // It deliberately does NOT fall back to returning the plaintext: a
+        // silently-degraded path here would write saved private keys to
+        // localStorage in the clear whenever IndexedDB or WebCrypto is
+        // unavailable, which is exactly the exposure this scheme exists to
+        // prevent. Refusing to write is the safe failure.
         async function encryptHistoryData(plainText) {
             try {
                 const keyHex = await getObfuscationKey();
-                if (!keyHex) return plainText;
+                if (!keyHex) return null;
                 const textBytes = new TextEncoder().encode(plainText);
                 const keyBytes = new Uint8Array(keyHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
                 const xored = new Uint8Array(textBytes.length);
@@ -1202,7 +1263,7 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 combined.set(xored, 1);
                 return btoa(String.fromCharCode.apply(null, combined));
             } catch (e) {
-                return plainText;
+                return null;
             }
         }
 
@@ -1317,6 +1378,17 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
             try {
                 const jsonText = JSON.stringify(savedKeys);
                 const encrypted = await encryptHistoryData(jsonText);
+                if (encrypted === null) {
+                    // No key could be derived. Writing the plaintext here would
+                    // silently expose every saved private key, so keep whatever
+                    // is already stored and tell the user instead.
+                    showHistoryWarn(
+                        'Could not derive the storage key, so new keys are NOT '
+                        + 'being saved. Anything already stored is left untouched. '
+                        + 'This can happen in private mode or with storage disabled.'
+                    );
+                    return;
+                }
                 localStorage.setItem(HISTORY_KEY, encrypted);
                 return;
             } catch (e) {
@@ -1334,6 +1406,10 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 try {
                     const jsonText = JSON.stringify(savedKeys);
                     const encrypted = await encryptHistoryData(jsonText);
+                    if (encrypted === null) {
+                        // Same reasoning as above: never write plaintext.
+                        return;
+                    }
                     localStorage.setItem(HISTORY_KEY, encrypted);
                     renderHistory(false);
                     showHistoryWarn('Browser storage full: ' + evicted +

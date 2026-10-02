@@ -61,6 +61,13 @@ Browser-specific behaviour, for comparison with the CLI below:
 >
 > If IndexedDB is unavailable (private mode, storage disabled) the key falls back
 > to `SHA-256(fingerprint)`, so history still round-trips rather than being lost.
+> The chosen mode is recorded on first run and never re-decided, because
+> switching modes would change the key and orphan every stored key.
+>
+> If no key can be derived at all, the page **refuses to save** rather than
+> writing plaintext. A silently-degraded path would put saved private keys in
+> `localStorage` in the clear, which is the exact exposure this scheme exists to
+> prevent; instead the session keeps keys in memory and says so.
 
 Reserved hex prefixes `00` and `ff` are **mined with a warning** rather than
 rejected, in both the browser app and the CLI — some users deliberately want
@@ -262,7 +269,7 @@ Hex prefixes `00` and `ff` are reserved for MeshCore framework devices and are r
 - **Browser app is hex-only.** It has no bech32/base58/base64 output; use the CLI for those encodings.
 - **Browser app must be served over HTTP(S).** Blob Web Workers are blocked on `file://` URLs.
 - **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency - 1` (capped at 16), which can over- or under-estimate on constrained or shared hardware.
-- **Browser key history is obfuscated, not encrypted.** The XOR key is derived from an IndexedDB secret plus the origin, so a copied `localStorage` blob cannot be decoded elsewhere. Script on the origin can read IndexedDB, so this is not XSS protection. Clearing site data deletes the secret and orphans the history.
+- **Browser key history is obfuscated, not encrypted.** The XOR key is derived from an IndexedDB secret plus the origin, so a copied `localStorage` blob cannot be decoded elsewhere. Script on the origin can read IndexedDB, so this is not XSS protection. Clearing site data deletes the secret and orphans the history. History is never written in plaintext: if no key can be derived, saving is refused instead.
 - **Progress is not capped at 100%.** Expected attempts are the mean of a geometric distribution, so ~37% of searches legitimately run past it. The CLI and browser show the overshoot as `+105.00%` plus how far past the mean the search has run. Once past the mean there is no meaningful "time remaining", so the ETA is replaced by the overshoot instead of being dropped or shown negative.
 - **The hot loop is already at the maths limit.** ~99% of a candidate is the Ed25519 scalar multiplication inside libsodium; encoding and prefix testing run ~175x faster than key derivation, so wrapper micro-optimisation is worth under 1% (measured with `python tools/bench_mining.py`). The only throughput lever is core count.
 - **The CLI uses every core by default.** `--workers` defaults to all CPUs, but stays serial when the search is expected to finish in under a second, because creating a `spawn` pool costs a few tenths of a second and made short prefixes dramatically slower. Pass `--workers N` to override.

@@ -869,6 +869,120 @@ await asyncCheck('the secret, not the fingerprint, decides the key', async () =>
     }
 });
 
+await asyncCheck('derivation mode is pinned so a slow load cannot orphan history', async () => {
+    // Regression: the IndexedDB call has a 2s timeout. If it timed out and the
+    // request later stored a secret, the NEXT load would derive a DIFFERENT key
+    // and orphan every stored key. Two invariants matter:
+    //   1. the mode is decided once and recorded;
+    //   2. once pinned to IndexedDB, a later blip must NOT silently switch to
+    //      the fingerprint derivation - it must report "no key" instead, so the
+    //      caller keeps the existing ciphertext and refuses to write.
+    idbData.clear();
+    storage.clear();
+    api.__resetObfKeyCache();
+    const first = await api.deriveObfuscationKey();
+    ok(/^[0-9a-f]{64}$/.test(first), `expected a derived key: ${first}`);
+    eq(storage.get('meshcoreVanityObfMode'), 'idb', 'mode should be pinned to idb');
+
+    const savedAvailable = idbAvailable;
+    idbAvailable = false;
+    api.__resetObfKeyCache();
+    try {
+        const during = await api.deriveObfuscationKey();
+        eq(during, null, 'a blip must yield no key, never a different key');
+    } finally {
+        idbAvailable = savedAvailable;
+        api.__resetObfKeyCache();
+        storage.clear();
+    }
+});
+
+await asyncCheck('fingerprint mode is honoured once recorded', async () => {
+    // If an install is pinned to the fingerprint fallback, it must stay there
+    // even when IndexedDB later becomes available, otherwise the key changes.
+    idbData.clear();
+    storage.clear();
+    idbAvailable = false;
+    api.__resetObfKeyCache();
+    const first = await api.deriveObfuscationKey();
+    eq(storage.get('meshcoreVanityObfMode'), 'fp', 'should be pinned to fp');
+
+    idbAvailable = true;
+    api.__resetObfKeyCache();
+    try {
+        eq(await api.deriveObfuscationKey(), first,
+            'must stay in fingerprint mode once chosen');
+    } finally {
+        idbAvailable = true;
+        api.__resetObfKeyCache();
+        storage.clear();
+    }
+});
+
+await asyncCheck('history is NEVER written in plaintext when no key is available', async () => {
+    // The dangerous degradation: encryptHistoryData used to return the
+    // plaintext whenever no key could be derived, silently writing every saved
+    // private key to localStorage in the clear - exactly the exposure the
+    // obfuscation exists to prevent.
+    //
+    // Reach the no-key state the realistic way: pin the install to IndexedDB,
+    // then have IndexedDB become unreachable. (The fingerprint fallback is NOT
+    // a no-key state - it derives a real key and obfuscates properly.)
+    idbData.clear();
+    storage.clear();
+    idbAvailable = true;
+    api.__resetObfKeyCache();
+    await api.deriveObfuscationKey();   // derives and pins the mode to idb
+    eq(storage.get('meshcoreVanityObfMode'), 'idb', 'precondition: pinned to idb');
+
+    idbAvailable = false;
+    api.__resetObfKeyCache();
+    try {
+        const plain = JSON.stringify([{ publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1 }]);
+        eq(await api.encryptHistoryData(plain), null,
+            'encryption must fail closed, not return plaintext');
+
+        api.getSavedKeys().length = 0;
+        api.getSavedKeys().push({
+            publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1,
+        });
+        await api.persistHistory();
+
+        const stored = storage.get(api.HISTORY_KEY);
+        ok(stored === null || stored === undefined,
+            `nothing may be written without a key (got: ${stored})`);
+        const dump = JSON.stringify([...storage.entries()]);
+        ok(!dump.includes('privateKey'),
+            `private keys must never reach storage in the clear: ${dump}`);
+        ok(/NOT being saved|not being saved/i.test(getElementById('history-warn').textContent),
+            `must warn the user: ${getElementById('history-warn').textContent}`);
+    } finally {
+        idbAvailable = true;
+        api.__resetObfKeyCache();
+        storage.clear();
+    }
+});
+
+await asyncCheck('the fingerprint fallback still obfuscates, never plaintext', async () => {
+    // When IndexedDB is simply absent (first run in private mode), the fallback
+    // must produce a real XOR key - not a pass-through.
+    idbData.clear();
+    storage.clear();
+    idbAvailable = false;
+    api.__resetObfKeyCache();
+    try {
+        const plain = JSON.stringify([{ publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1 }]);
+        const encoded = await api.encryptHistoryData(plain);
+        ok(encoded && encoded !== plain, 'fallback must still obfuscate');
+        ok(!encoded.includes('publicKey'), 'fallback must not leak field names');
+        eq(await api.decryptHistoryData(encoded), plain, 'fallback must round-trip');
+    } finally {
+        idbAvailable = true;
+        api.__resetObfKeyCache();
+        storage.clear();
+    }
+});
+
 await asyncCheck('history survives a browser user-agent change', async () => {
     // The concrete failure v1 had: an ordinary browser update silently made
     // every saved key unreadable.
