@@ -271,7 +271,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_EXPONENT, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.slice(), RATE_GRAPH_POINTS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_EXPONENT, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -1216,7 +1216,11 @@ check('rate graph: samples accumulate and stay bounded', () => {
 
     api.pushRateGraphSample(100);
     eq(api.rateGraphState().length, 1, 'one sample stored');
-    eq(api.rateGraphState()[0], 100, 'the raw rate is stored');
+    // Samples carry a timestamp alongside the value, so the on-screen window
+    // is a fixed span of TIME rather than a fixed number of reports.
+    eq(api.rateGraphState()[0].v, 100, 'the raw rate is stored');
+    ok(Number.isFinite(api.rateGraphState()[0].t),
+        'each sample must carry the time it was taken');
 
     // Nonsense must not reach the trace.
     api.pushRateGraphSample(NaN);
@@ -1225,22 +1229,66 @@ check('rate graph: samples accumulate and stay bounded', () => {
     api.pushRateGraphSample(undefined);
     eq(api.rateGraphState().length, 1, 'invalid samples are rejected');
 
-    // The buffer must not grow without bound: it covers a fixed time window,
-    // not the whole run, so a long search cannot leak memory or flatten the
-    // early samples into nothing. Overflow halves the resolution rather than
-    // shifting, so the window keeps spanning the same stretch of the run.
+    // The buffer must not grow without bound: a long search cannot leak
+    // memory or flatten the early samples into nothing.
     const cap = api.RATE_GRAPH_POINTS;
     for (let i = 0; i < cap * 4; i++) api.pushRateGraphSample(200 + (i % 7));
     const n = api.rateGraphState().length;
     ok(n > 1 && n <= cap,
         `the buffer must stay within its window: ${n} samples, cap ${cap}`);
 
-    // Halving on overflow must keep the newest value.
-    eq(api.rateGraphState()[api.rateGraphState().length - 1], 200 + ((cap * 4 - 1) % 7),
+    // Halving on overflow must keep the newest value: the dot marking "now"
+    // has to be the reading that was just pushed, not a stale neighbour.
+    const state = api.rateGraphState();
+    eq(state[state.length - 1].v, 200 + ((cap * 4 - 1) % 7),
         'the newest sample is the one just pushed');
 
     api.resetRateGraph();
     eq(api.rateGraphState().length, 0, 'a new search clears the trace');
+});
+
+check('rate graph: the window is a fixed span of time, not the whole run', () => {
+    // Regression: the trace used to keep halving the buffer without ever
+    // dropping anything, so after a long enough run it spanned 100% of the
+    // search. The first samples were then so far apart that recent rate
+    // variation - the entire point of the graph - flattened into a straight
+    // line. Timestamps let stale samples fall off the left edge instead.
+    const t0 = Date.now();
+    const realNow = Date.now;
+    try {
+        api.resetRateGraph();
+        // 20 minutes of history at one sample a second, with a clear rate
+        // swing in the LAST few minutes (simulated by the varying value).
+        let clock = 0;
+        Date.now = () => t0 + clock * 1000;
+        for (let s = 0; s < 1200; s++) {
+            // Constant 1000/s for the first 15 min, then noisy 1000-1400/s.
+            const v = s < 900 ? 1000 : 1000 + (s % 5) * 100;
+            api.pushRateGraphSample(v);
+            clock++;
+        }
+        const state = api.rateGraphState();
+        const newest = state[state.length - 1].t;
+        const oldest = state[0].t;
+        const spanSec = (newest - oldest) / 1000;
+
+        // The window must be bounded by the configured time, not unbounded.
+        ok(spanSec <= api.RATE_GRAPH_WINDOW_MS / 1000 + 5,
+            `the window must not exceed RATE_GRAPH_WINDOW_MS, got ${spanSec}s`);
+        // ...and once the run is long enough it must actually fill it, rather
+        // than showing the whole search back to the beginning.
+        ok(spanSec < 1200 * 0.5,
+            `after 20 min the trace must not span the whole run, got ${spanSec}s`);
+
+        // The recent variation must still be visible as variation: the
+        // newest samples must not all be identical.
+        const recent = state.slice(-5).map((s) => s.v);
+        ok(new Set(recent).size > 1,
+            `recent samples must still vary, got ${JSON.stringify(recent)}`);
+    } finally {
+        Date.now = realNow;
+        api.resetRateGraph();
+    }
 });
 
 check('estimate omits the scaling provenance clause', () => {

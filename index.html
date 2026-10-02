@@ -1497,8 +1497,13 @@ function detectOptimalWorkers() {
         // variation into a straight line, which is the opposite of what the
         // graph is for. The min/max are padded so the trace never touches the
         // top or bottom edge.
-        const RATE_GRAPH_POINTS = 90;   // samples retained in the window
-        const RATE_GRAPH_PAD = 0.12;    // fraction of range left headroom
+        const RATE_GRAPH_POINTS = 90;    // samples drawn across the canvas
+        const RATE_GRAPH_PAD = 0.12;     // fraction of range left headroom
+        const RATE_GRAPH_WINDOW_MS = 120000;  // 2 min of history on screen
+        // A sample is kept until there are more of them than the canvas can
+        // show; past that they are halved in place, and each sample carries the
+        // timestamp of the moment it was taken so the on-screen span stays a
+        // fixed WINDOW OF TIME rather than a fixed number of samples.
         let rateGraph = [];
 
         function resetRateGraph() {
@@ -1507,28 +1512,43 @@ function detectOptimalWorkers() {
             if (canvas) drawRateGraph();
         }
 
-        // Append one sample and redraw. A no-op once the buffer is full, so the
-        // graph keeps a fixed time window instead of stretching to the whole
-        // run (which would make the last hour indistinguishable from the first).
+        // Append one sample and redraw.
         //
-        // Deliberately NOT suppressed under prefers-reduced-motion, unlike the
-        // starfield. That is decoration; this is a data readout. The trace only
-        // changes when the miner reports a new measurement, it never animates on
-        // a timer, and it is the only way to see rate variance at all - hiding
-        // it would remove information rather than remove motion.
+        // The window is fixed in TIME, not in sample count, which is what keeps
+        // the recent behaviour readable. Reports are throttled per worker
+        // (REPORT_EVERY_MS) and the worker count varies, so "the last N
+        // samples" is not a fixed span: an earlier version halved the buffer
+        // whenever it filled, and after a few halvings the trace spanned the
+        // entire run - which stretched the first samples so far apart that the
+        // recent variation this graph exists to show flattened into a straight
+        // line. Timestamps let the old samples fall off the left edge instead.
         function pushRateGraphSample(rate) {
             const r = Number(rate);
             if (!isFinite(r) || r < 0) return;
-            if (rateGraph.length >= RATE_GRAPH_POINTS) {
-                // Drop every other point and halve the effective resolution
-                // rather than shifting the array on each push. A shift is O(n)
-                // per event; this is O(1) and the trace still covers the same
-                // span, just with a coarser time step.
+
+            const now = Date.now();
+            rateGraph.push({ t: now, v: r });
+
+            // Drop samples older than the window.
+            const cutoff = now - RATE_GRAPH_WINDOW_MS;
+            let drop = 0;
+            while (drop < rateGraph.length - 1 && rateGraph[drop].t < cutoff) drop++;
+            if (drop > 0) rateGraph = rateGraph.slice(drop);
+
+            // Still too many to resolve: halve in place, keeping the newer of
+            // each adjacent pair so the most recent reading always survives.
+            while (rateGraph.length > RATE_GRAPH_POINTS) {
                 const kept = [];
-                for (let i = 0; i < rateGraph.length; i += 2) kept.push(rateGraph[i]);
+                for (let i = 0; i < rateGraph.length; i += 2) {
+                    kept.push(rateGraph[i]);
+                }
+                // The last element can be lost by the halving above when the
+                // length was odd, so re-append the true newest sample.
+                const newest = rateGraph[rateGraph.length - 1];
+                if (kept[kept.length - 1] !== newest) kept.push(newest);
                 rateGraph = kept;
             }
-            rateGraph.push(r);
+
             drawRateGraph();
         }
 
@@ -1565,15 +1585,17 @@ function detectOptimalWorkers() {
             // flat-line case: a range of 0 would divide by zero and produce NaN
             // coordinates, which silently draw nothing.
             let min = Infinity, max = -Infinity;
-            for (const v of rateGraph) {
-                if (v < min) min = v;
-                if (v > max) max = v;
+            for (const s of rateGraph) {
+                if (s.v < min) min = s.v;
+                if (s.v > max) max = s.v;
             }
             if (!isFinite(min) || !isFinite(max)) return;
             let span = max - min;
             if (span <= 0) {
                 // Flat: centre a straight line rather than dividing by zero.
-                min = min * 0.98;
+                // At a flat rate of 0 the multiplicative nudge below is also a
+                // no-op, so the range is pinned to a sane absolute floor.
+                min = span === 0 ? min : min * 0.98;
                 span = (max - min) || 1;
             }
             const pad = span * RATE_GRAPH_PAD;
@@ -1581,16 +1603,20 @@ function detectOptimalWorkers() {
             const hi = max + pad;
             const range = (hi - lo) || 1;
 
-            const xAt = (i) => (i / (rateGraph.length - 1)) * w;
+            // X is real elapsed time across the window, not sample index, so
+            // the trace's shape reflects how the rate actually moved over the
+            // period shown and not merely how many reports arrived.
+            const tNewest = rateGraph[rateGraph.length - 1].t;
+            const tOldest = rateGraph[0].t;
+            const tSpan = tNewest - tOldest;
+            const xAt = (s) => (tSpan > 0 ? ((s.t - tOldest) / tSpan) * w : w);
             const yAt = (v) => h - ((v - lo) / range) * h;
 
             // Filled area under the trace first, so the stroke reads as an edge
             // on top of a soft mass rather than a bare line.
             ctx.beginPath();
             ctx.moveTo(0, h);
-            for (let i = 0; i < rateGraph.length; i++) {
-                ctx.lineTo(xAt(i), yAt(rateGraph[i]));
-            }
+            for (const s of rateGraph) ctx.lineTo(xAt(s), yAt(s.v));
             ctx.lineTo(w, h);
             ctx.closePath();
             ctx.fillStyle = 'rgba(63, 185, 80, 0.16)';
@@ -1598,8 +1624,9 @@ function detectOptimalWorkers() {
 
             ctx.beginPath();
             for (let i = 0; i < rateGraph.length; i++) {
-                const x = xAt(i);
-                const y = yAt(rateGraph[i]);
+                const s = rateGraph[i];
+                const x = xAt(s);
+                const y = yAt(s.v);
                 if (i === 0) ctx.moveTo(x, y);
                 else ctx.lineTo(x, y);
             }
@@ -1609,8 +1636,9 @@ function detectOptimalWorkers() {
             ctx.stroke();
 
             // A dot on the newest sample, so "now" is identifiable on the trace.
+            const newest = rateGraph[rateGraph.length - 1];
             ctx.beginPath();
-            ctx.arc(w, yAt(rateGraph[rateGraph.length - 1]), 2, 0, Math.PI * 2);
+            ctx.arc(xAt(newest), yAt(newest.v), 2, 0, Math.PI * 2);
             ctx.fillStyle = '#7ef7a0';
             ctx.fill();
         }
