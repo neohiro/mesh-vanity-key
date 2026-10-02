@@ -2408,8 +2408,16 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
             // mid-search, the same stale-callback class of bug the mining
             // workers are guarded against. Tearing down the export's own worker
             // and blob URL is still this function's job either way.
+            //
+            // `starting` counts as owning it too, not just `mining`.
+            // startMining() shows the panel and sets its status BEFORE it
+            // awaits libsodium, and `mining` only becomes true after that
+            // await resolves and the workers are created. Testing `mining`
+            // alone therefore left a window in which an export completing
+            // during startup would hide the panel the search had just opened -
+            // and the live figures would then render into a hidden element.
             const releasePanel = () => {
-                if (mining) return;      // mining owns the panel now; leave it be
+                if (mining || starting) return;   // a search owns the panel now
                 clearStatusText();
                 document.getElementById('progress').classList.add('hidden');
             };
