@@ -106,6 +106,7 @@ def _worker_search(args: tuple) -> tuple:
     _urlsafe_b64encode = base64.urlsafe_b64encode
     _hex_encode = bytes.hex
     _SigningKey = nacl.signing.SigningKey
+    _seed_keypair = nacl.bindings.crypto_sign_seed_keypair
 
     attempts = 0
     counter = start_offset
@@ -123,8 +124,9 @@ def _worker_search(args: tuple) -> tuple:
             scalar_val = (initial_scalar + counter) & ((1 << 256) - 1)
             priv_seed = scalar_val.to_bytes(32, "big")
 
-            priv = _SigningKey(priv_seed)
-            raw = bytes(priv.verify_key)
+            # Only the raw public key is needed to test the pattern; the
+            # SigningKey object is rebuilt once by the parent on a match.
+            raw = _seed_keypair(priv_seed)[0]
 
             if encoding == "hex":
                 encoded = _hex_encode(raw)
@@ -560,6 +562,7 @@ def generate_vanity_key(
     _base58 = _base58_encode
     _bech32 = _bech32_encode
     _SigningKey = nacl.signing.SigningKey
+    _seed_keypair = nacl.bindings.crypto_sign_seed_keypair
 
     # Calculate expected attempts for progress percentage
     expected_attempts = _expected_attempts(encoding, prefix_len, both)
@@ -580,8 +583,15 @@ def generate_vanity_key(
             priv_seed = scalar.to_bytes(32, "big")
             scalar = (scalar + 1) & ((1 << 256) - 1)
 
-            priv = _SigningKey(priv_seed)
-            raw = bytes(priv.verify_key)
+            # Only the raw public key is needed to test the pattern, so ask
+            # libsodium for exactly that instead of building a PyNaCl
+            # SigningKey and its VerifyKey for every candidate. The function
+            # benchmark in tools/bench_mining.py shows this consistently ahead
+            # (~3%), but end-to-end that is smaller than the run-to-run
+            # variance on a loaded host, so treat it as a wash on a quiet
+            # machine rather than a headline speedup. The object is still
+            # built below, once, on a match, because VanityResult exposes it.
+            raw = _seed_keypair(priv_seed)[0]
 
             if is_hex:
                 encoded = _hex_encode(raw)
@@ -624,6 +634,7 @@ def generate_vanity_key(
                     chk = encoded_part
                 match = chk == prefix_cmp
             if match:
+                priv = _SigningKey(priv_seed)
                 return VanityResult(
                     private_key=priv,
                     public_key=priv.verify_key,

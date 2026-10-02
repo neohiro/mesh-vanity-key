@@ -116,6 +116,42 @@ def breakdown() -> float:
     return r_loop
 
 
+def backend_comparison() -> None:
+    """Is libsodium the fastest Ed25519 backend available?
+
+    Tested because "use a faster library" is the obvious next idea and worth
+    settling permanently. OpenSSL (via `cryptography`) is a completely separate
+    implementation and turned out to be SLOWER here, so switching backends is
+    not a way forward.
+    """
+    print("\nEd25519 seed -> public key, per candidate:")
+    r1 = _rate("PyNaCl SigningKey (libsodium ref10)",
+               lambda: bytes(nacl.signing.SigningKey(SEED).verify_key), 20_000)
+    r2 = _rate("libsodium crypto_sign_seed_keypair",
+               lambda: nacl.bindings.crypto_sign_seed_keypair(SEED)[0], 20_000)
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ed25519 as c_ed
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding, PublicFormat,
+        )
+
+        def openssl():
+            k = c_ed.Ed25519PrivateKey.from_private_bytes(SEED)
+            return k.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+        r3 = _rate("OpenSSL via `cryptography`", openssl, 20_000)
+    except ImportError:
+        r3 = 0.0
+        print("  (cryptography not installed - skipping OpenSSL)")
+
+    best = max(r for r in (r1, r2, r3) if r)
+    print(f"\n  best {best:,.0f}/s; the hot loop uses the {r2 / best:.2f}x option.")
+    if r3:
+        verdict = ("OpenSSL is SLOWER - do not switch backends"
+                   if r3 < best else "OpenSSL is faster - worth switching")
+        print(f"  {verdict} ({r3 / best:.2f}x of best).")
+
+
 def parallel_scaling() -> None:
     """Compare search scaling with a pure-CPU baseline for the same host."""
     work = 4_000_000
@@ -147,6 +183,7 @@ def main() -> int:
     parser.parse_args()
 
     breakdown()
+    backend_comparison()
     parallel_scaling()
 
     print(
