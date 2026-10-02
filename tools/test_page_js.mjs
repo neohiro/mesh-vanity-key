@@ -343,7 +343,7 @@ armTrackingTimeouts();
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_EXPONENT, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_EXPONENT, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -1584,6 +1584,61 @@ await asyncCheck('an export that finishes on its own clears the panel', async ()
         'a standalone export must hide the panel when it finishes');
     eq(api.getStatusText(), '', 'and clear its status text');
     ok(w.terminated, 'and terminate its worker');
+    await teardownExportTest();
+});
+
+await asyncCheck('an export must not hide the panel while a search is STARTING', async () => {
+    // The window the `mining`-only guard missed.
+    //
+    // startMining() sets `starting = true`, shows #progress and writes its
+    // status, then AWAITS libsodium. `mining` only flips to true after that
+    // await and after the workers exist. So between the panel appearing and
+    // `mining` becoming true there is a real interval - a cold libsodium load
+    // makes it long - and an export completing inside it saw `mining === false`
+    // and hid the panel the search had just opened. The live figures would then
+    // render into a display:none element.
+    primeForm();
+    await seedHistoryForExport();
+    api.exportHistory('csv');
+    const exportWorker = exportPool[exportPool.length - 1];
+    ok(exportWorker, 'the export must have spawned a worker');
+
+    // Start a search but hold it before it finishes starting: panel is open,
+    // `starting` is true, `mining` is still false.
+    const realSodium = sandbox.libsodium;
+    sandbox.libsodium = { ready: new Promise(() => {}) };   // never resolves
+    sandbox.sodium = sandbox.libsodium;
+    const inFlight = api.startMining();
+    await new Promise((r) => setTimeout(r, 0));
+    // Do NOT await `inFlight`: it is parked on the never-resolving libsodium
+    // promise on purpose, so awaiting it deadlocks the suite. It is abandoned
+    // below by restoring state directly.
+    ok(inFlight && typeof inFlight.then === 'function',
+        'startMining should return a promise while it waits for libsodium');
+    try {
+        eq(api.startingState(), true, 'the search must be in the starting phase');
+        eq(api.miningState(), false, 'but not yet mining');
+        ok(!getElementById('progress').classList.contains('hidden'),
+            'the panel must be open during startup');
+
+        // The export finishes inside that window.
+        exportWorker.deliver({
+            type: 'done', filename: 'k.csv', mime: 'text/csv', data: 'a,b',
+        });
+
+        ok(exportWorker.terminated, 'the export worker must still be terminated');
+        ok(!getElementById('progress').classList.contains('hidden'),
+            'an export must not hide the panel a starting search already opened');
+        eq(api.getStatusText(), 'Loading crypto library...',
+            'nor retire the starting search\'s status');
+    } finally {
+        sandbox.libsodium = realSodium;
+        sandbox.sodium = realSodium;
+        // stopMining() clears `starting` and the form, so the abandoned
+        // startMining() cannot leave the harness in a starting state for the
+        // tests that follow.
+        api.stopMining();
+    }
     await teardownExportTest();
 });
 
