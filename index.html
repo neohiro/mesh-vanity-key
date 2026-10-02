@@ -1338,7 +1338,26 @@ function detectOptimalWorkers() {
                 // claims more workers than actually exist.
                 reportActualWorkers(workers.length);
 
-                const initTimeout = setTimeout(() => {
+                // This worker's own init timer, captured in the closure.
+                //
+                // It used to be looked up as initTimeouts[i] at each use site,
+                // but that array is emptied by terminateAllWorkers() and refilled
+                // by the NEXT search. A terminated worker's event can still be
+                // queued, so a late onerror/onmessage from the old search would
+                // index into the new search's array and clear the new search's
+                // watchdog at the same position - silently disarming the
+                // "failed to initialize" alert for a worker that really is hung.
+                // The handle is per-worker, so a stale event can only ever clear
+                // its own already-cleared timer.
+                let initTimeout = null;
+                const clearOwnInitTimeout = () => {
+                    if (initTimeout !== null) {
+                        clearTimeout(initTimeout);
+                        initTimeout = null;
+                    }
+                };
+
+                initTimeout = setTimeout(() => {
                     if (mining && workers.includes(w)) {
                         terminateAllWorkers();
                         mining = false;
@@ -1353,7 +1372,7 @@ function detectOptimalWorkers() {
                 initTimeouts.push(initTimeout);
 
                 w.onerror = function(e) {
-                    clearTimeout(initTimeouts[i]);
+                    clearOwnInitTimeout();
                     mining = false;
                     clearStatusText();
                     setFormDisabled(false);
@@ -1367,7 +1386,7 @@ function detectOptimalWorkers() {
                 w.onmessage = function(e) {
                     console.log('[Main] Received message from worker ' + i + ':', e.data.type, e.data);
                 if (e.data.type === 'ready') {
-                    clearTimeout(initTimeouts[i]);
+                    clearOwnInitTimeout();
                     console.log('[Main] Sending work data to worker ' + i);
                     w.postMessage({ prefix, suffix, matchPrefix, matchSuffix });
                     return;
@@ -1443,7 +1462,7 @@ function detectOptimalWorkers() {
                             setEtaMessage('calculating...');
                         }
                     } else if (e.data.type === 'found') {
-                        clearTimeout(initTimeouts[i]);
+                        clearOwnInitTimeout();
                         mining = false;
                         // Retire the startup status on this path too. A short
                         // search can match inside the FIRST batch (BATCH_SIZE
@@ -1465,7 +1484,7 @@ function detectOptimalWorkers() {
                         });
                         terminateAllWorkers();
                     } else if (e.data.type === 'error') {
-                        clearTimeout(initTimeouts[i]);
+                        clearOwnInitTimeout();
                         mining = false;
                         // Same reasoning as 'found': an error can arrive with no
                         // 'progress' before it, so the startup status has to be
