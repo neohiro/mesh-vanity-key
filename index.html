@@ -2401,21 +2401,32 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
             const url = URL.createObjectURL(blob);
             const worker = new Worker(url);
 
+            // The live panel is SHARED between mining and export - there is one
+            // #progress element. If the user starts a search while an export is
+            // in flight, mining owns that panel, so this export must not clear
+            // its status or hide it: doing so made the live figures vanish
+            // mid-search, the same stale-callback class of bug the mining
+            // workers are guarded against. Tearing down the export's own worker
+            // and blob URL is still this function's job either way.
+            const releasePanel = () => {
+                if (mining) return;      // mining owns the panel now; leave it be
+                clearStatusText();
+                document.getElementById('progress').classList.add('hidden');
+            };
+
             worker.onmessage = function(e) {
                 if (e.data.type === 'done') {
                     downloadFile(e.data.filename, e.data.mime, e.data.data);
                     URL.revokeObjectURL(url);
                     worker.terminate();
-                    clearStatusText();
-                    document.getElementById('progress').classList.add('hidden');
+                    releasePanel();
                 }
             };
             worker.onerror = function(e) {
                 alert('Export failed: ' + e.message);
-                clearStatusText();
-                document.getElementById('progress').classList.add('hidden');
                 worker.terminate();
                 URL.revokeObjectURL(url);
+                releasePanel();
             };
             worker.postMessage({ keys: savedKeys, format });
         }
