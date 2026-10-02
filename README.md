@@ -39,13 +39,13 @@ Browser-specific behaviour, for comparison with the CLI below:
 | Private key | shown per result, stored in history | only with `--output-private` |
 | History display | newest first, scroll stays at the top | n/a |
 
-> **Security:** the browser app obfuscates saved keys in `localStorage` with an
-> XOR keystream. The key is `SHA-256(secret || origin)`, where `secret` is 32
-> random bytes minted once and kept in **IndexedDB** — a different storage
-> backend from the ciphertext. So lifting `localStorage` on its own (backup,
-> sync, shared profile, a stray export) does not yield the key, while
-> `origin` binds the key to this site so a copy of both stores only decodes
-> here.
+> **Security:** the browser app encrypts saved keys in `localStorage` using
+> **AES-256-GCM** (authenticated encryption) with a per-entry random 12-byte
+> nonce. The key is derived via HKDF-SHA256 from a 32-byte secret minted once
+> and stored in **IndexedDB** — a different storage backend from the ciphertext.
+> So lifting `localStorage` on its own (backup, sync, shared profile, a stray
+> export) does not yield the key, while `origin` binds the key to this site so
+> a copy of both stores only decodes here.
 >
 > Because the key does not depend on anything the browser can change under the
 > user, saved history survives browser updates that alter the user-agent
@@ -53,15 +53,17 @@ Browser-specific behaviour, for comparison with the CLI below:
 > version derived the key purely from a hardware fingerprint and every one of
 > those permanently orphaned the history.)
 >
-> This is **obfuscation, not encryption**, and it has a deliberate scope. It
-> stops data-at-rest theft from a copied storage blob. It does **not** protect
-> against script running on the origin (XSS, a malicious extension), because
-> such code can read IndexedDB. Treat the history as a secret store, and clear
-> it when done.
+> This is **authenticated encryption**, providing confidentiality and integrity
+> (tamper detection). It does **not** protect against script running on the
+> origin (XSS, a malicious extension), because such code can read IndexedDB.
+> Treat the history as a secret store, and clear it when done.
+>
+> **Backward compatibility:** existing XOR-obfuscated entries (version 0xef)
+> are still decrypted on load. New entries use AES-GCM (version 0x01).
 >
 > If IndexedDB is unavailable (private mode, storage disabled) the key falls back
-> to `SHA-256(fingerprint)`, so history still round-trips rather than being lost.
-> The chosen mode is recorded on first run and never re-decided, because
+> to `HKDF-SHA256(fingerprint)`, so history still round-trips rather than being
+> lost. The chosen mode is recorded on first run and never re-decided, because
 > switching modes would change the key and orphan every stored key.
 >
 > If no key can be derived at all, the page **refuses to save** rather than
@@ -178,43 +180,49 @@ single-worker rate by the worker count overstates the result, because the
 workers do not each get a core to themselves. This was measured rather than
 assumed:
 
-- Reference host: **8 logical CPUs on 4 physical cores**.
-- Pure-CPU keygen was run at 1–8 concurrent workers, measuring aggregate
-  throughput.
-- Aggregate throughput **saturated at ≈2.3x the single-worker rate at 8 threads**,
+- Reference host: **4 physical cores / 8 logical (Intel i5-1155G7)**.
+- Shipped miner (libsodium.wasm + 32-byte walk, nibble match, 500 ms reporting, 30 ms yield)
+  was run at 1–8 concurrent workers, measuring aggregate throughput via delta-over-window.
+- Aggregate throughput **saturated at ≈2.9x the single-worker rate at 8 threads**,
   not the 8x that linear scaling predicts.
 
-Two effects explain the shortfall: SMT siblings sharing one physical core do not
-get independent execution units (so 4→8 threads buys far less than 2x), and the
-workers contend for memory bandwidth.
+Two effects explain the shortfall:
+  1. **Per-candidate JS wrapper work** (32-byte walk, nibble match, postMessage,
+     500 ms reporting, 30 ms yield) that scales with wall-clock time rather than
+     raw compute. This is the dominant limiter.
+  2. Thermal/SMT behaviour on this particular CPU (the bare Ed25519 loop scales
+     considerably further — ~3.3x at 8 threads — confirming the wrapper is the
+     bottleneck, not the crypto).
 
 | Workers | Aggregate speedup | Basis |
 |---|---|---|
 | 1 | 1.00x | baseline |
-| 2 | 1.32x | fitted |
-| 3 | 1.55x | fitted |
-| 4 | 1.74x | fitted |
-| 6 | 2.05x | fitted |
-| **8** | **2.30x** | **measured** |
+| 2 | 1.58x | fitted |
+| 3 | 2.04x | fitted |
+| 4 | 2.28x | fitted |
+| 6 | 2.79x | fitted |
+| **8** | **2.88x** | **measured** |
 
 Only the 8-thread end point was measured directly; the intermediate points come
 from a power-law fit anchored to that measurement:
 
-    scale(n) = n ** (log(2.3) / log(8))     # exponent ~= 0.4005
+    scale(n) = n ** (log(2.88) / log(8))     # exponent ≈ 0.372
 
 The curve is concave and capped at the measured ceiling, so it cannot predict
 more speedup than was actually observed. The browser estimate now folds this
 factor in and prints the multiplier inline instead of hedging:
 
-    workers share cores, improvement is only ~2.3x at 8 threads; scale derived from 2.3x at 8 threads
+    workers share cores, improvement is only ~2.9x at 8 threads; scale derived from 2.88x at 8 threads
 
 **To re-measure on different hardware**, update `WORKER_SCALE_MEASURED` and
 `WORKER_SCALE_EXPONENT` in `index.html` together; nothing else needs to change.
-`tools/bench_real_browser.mjs` measures real-browser keygen throughput.
+`tools/measure_scaling.py` measures the shipped miner's worker-scaling curve
+with delta-over-window methodology.
 
-> The multiplier is **hardware-specific** — 2.3x encodes *this* host's 2:1 SMT
-> ratio. A machine with 8 physical cores would scale very differently and must be
-> re-measured rather than reusing 2.3x.
+> The multiplier is **hardware-specific** — 2.88x encodes *this* host's
+> 4 physical / 8 logical topology and the wrapper overhead. A machine with
+> different core counts or thermal behaviour must be re-measured rather than
+> reusing 2.88x.
 
 ## Privacy and third-party requests
 
@@ -278,7 +286,7 @@ measured keygen rate, and an ETA — and asks for confirmation on interactive
 terminals:
 
 ```
-Estimate: 65,536 expected attempts (~35,062 keys/s (single-worker measurement x 1.7 for 4 workers; scale derived from 2.3x at 8 threads)) | ETA ~2s
+Estimate: 65,536 expected attempts (~35,062 keys/s (single-worker measurement x 1.7 for 4 workers; scale derived from 2.9x at 8 threads)) | ETA ~2s
 Continue? [y/N]:
 ```
 
@@ -407,10 +415,10 @@ Hex prefixes `00` and `ff` are reserved for MeshCore framework devices and are r
 - **Browser app is hex-only.** It has no bech32/base58/base64 output; use the CLI for those encodings.
 - **Browser app must be served over HTTP(S).** Blob Web Workers are blocked on `file://` URLs.
 - **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency - 1` (capped at 16), which can over- or under-estimate on constrained or shared hardware.
-- **Browser key history is obfuscated, not encrypted.** The XOR key is derived from an IndexedDB secret plus the origin, so a copied `localStorage` blob cannot be decoded elsewhere. Script on the origin can read IndexedDB, so this is not XSS protection. Clearing site data deletes the secret and orphans the history. History is never written in plaintext: if no key can be derived, saving is refused instead.
+- **Browser key history is AES-256-GCM encrypted** with per-entry nonce. The key is derived via HKDF-SHA256 from an IndexedDB secret plus origin. Legacy XOR-obfuscated entries are still decrypted. Script on the origin can read IndexedDB, so this is not XSS protection. Clearing site data deletes the secret and orphans the history. History is never written in plaintext: if no key can be derived, saving is refused instead.
 - **Progress is not capped at 100%.** Expected attempts are the mean of a geometric distribution, so ~37% of searches legitimately run past it. The CLI and browser show the overshoot as `+105.00%` plus how far past the mean the search has run. Once past the mean there is no meaningful "time remaining", so the ETA is replaced by the overshoot instead of being dropped or shown negative.
 - **The hot loop is already at the maths limit.** The cost of a candidate is the Ed25519 scalar multiplication, not our code. Measured per core: **Python/native libsodium ~25,000–32,000 keys/s**, **browser libsodium.wasm ~13,500 keys/s** (`python tools/bench_mining.py`, `bun tools/bench_real_browser.mjs`). Our wrapper adds per-candidate overhead measured at ~10M keys/s equivalent — roughly three orders of magnitude cheaper than the derivation it wraps — so optimising it further cannot help. OpenSSL (via `cryptography`) was measured as a separate backend and is ~20% *slower* than libsodium, so switching implementations is not a win either. The only throughput lever is core count.
-- **Browser workers default to `hardwareConcurrency - 1`** (capped at 16), leaving one core for the UI. The hot loop yields every 30 ms, so this may be more conservative than necessary, but it has never been measured in a real browser.
+- **Browser workers default to `hardwareConcurrency - 1`** (capped at 16), leaving one core for the UI. The hot loop uses adaptive yielding: it runs multiple batches before yielding, tracking frame budget to stay responsive without fixed timers. This avoids the Promise overhead of yielding every batch (which cost ~85% throughput with a free stub keygen).
 - **The CLI uses every core by default.** `--workers` defaults to all CPUs, but stays serial when the search is expected to finish in under a second, because creating a `spawn` pool costs a few tenths of a second and made short prefixes dramatically slower. Pass `--workers N` to override.
 - **Browser prefix + suffix are limited to 64 hex digits combined.** A key is exactly 64 hex digits, so longer patterns would overlap and could never match; the app refuses to start such a search.
 

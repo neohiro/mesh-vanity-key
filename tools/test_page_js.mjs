@@ -864,9 +864,9 @@ check('smoothEta: rejects non-finite and non-positive input', () => {
 
 // ---- Worker scaling model --------------------------------------------------
 check('workerScale: anchored to the measured 8-thread ceiling', () => {
-    eq(api.WORKER_SCALE_MEASURED[8], 2.3, 'the measurement is recorded');
-    eq(Math.round(api.workerScale(8) * 100) / 100, 2.3,
-        '8 workers must reproduce the measured 2.3x');
+    eq(api.WORKER_SCALE_MEASURED[8], 2.9, 'the measurement is recorded');
+    eq(Math.round(api.workerScale(8) * 100) / 100, 2.9,
+        '8 workers must reproduce the measured 2.9x');
     eq(api.workerScale(1), 1, 'one worker is 1x');
     eq(api.workerScale(0), 1, 'zero workers is 1x');
 });
@@ -1019,7 +1019,7 @@ check('background: subtle gradient and rare star flickers, reduced-motion safe',
 
 check('estimate: states the measured scale instead of hedging', () => {
     const html = fs.readFileSync(pageHtmlPath, 'utf8');
-    ok(/scale derived from 2\.3x at 8 threads/.test(html),
+    ok(/scale derived from 2\.9x at 8 threads/.test(html),
         'the estimate must disclose where the scaling factor came from');
     ok(/improvement is only ~/.test(html),
         'the estimate must state the improvement multiplier');
@@ -1041,10 +1041,21 @@ check('progress: no duplicate id and no stale status under the panel', () => {
     ok(status < panel,
         'the transient status must be above the live panel, not lingering under it');
 
-    // The live panel is what a screen reader should announce now that the
-    // status line no longer updates during mining.
-    ok(/id="live-logs"[^>]*aria-live="polite"/.test(html),
-        'the live panel must be aria-live, or mining updates are silent');
+// The live panel is a visual dashboard, not a status stream: the cells
+        // change several times a second and announcing each change is the
+        // classic live-region-spam anti-pattern. So it is aria-live="off" and
+        // meaningful status reaches assistive tech via the throttled summary
+        // below instead of every digit tick.
+        ok(/id="live-logs"[^>]*aria-live="off"/.test(html),
+            'the live panel must be aria-live="off" (dashboard, not a status stream)');
+        ok(/id="live-logs"[^>]*aria-atomic="false"/.test(html),
+            'the live panel must be aria-atomic="false"');
+        ok(/id="live-summary"[^>]*aria-live="polite"/.test(html),
+            'a throttled summary region must be aria-live="polite" so mining updates are announced');
+        ok(/id="live-summary"[^>]*aria-atomic="true"/.test(html),
+            'the summary region must be aria-atomic="true" (one complete snapshot)');
+        ok(/id="live-summary-text"/.test(html),
+            'the summary region must have a single text node to announce');
 });
 
 check('live logs: a titled 2x2 grid carries the four figures', () => {

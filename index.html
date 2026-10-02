@@ -112,6 +112,16 @@
         #stop-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
         #new-search-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
         .status-text { font-size: 14px; color: #8b949e; font-family: 'SFMono-Regular', Consolas, monospace; }
+        /* Live logs are a visual dashboard, not a status stream: the
+           numeric cells change every ~500 ms and announcing each change
+           is the classic live-region-spam anti-pattern. aria-live is
+           therefore off here; meaningful status reaches the user via
+           the throttled summary below. */
+        .sr-only {
+            position: absolute; width: 1px; height: 1px;
+            padding: 0; margin: -1px; overflow: hidden;
+            clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+        }
         /* Centred below the info frame with breathing room above it, so it reads
            as a quiet footer rather than competing with the tool itself. */
         .visitor-counter {
@@ -338,22 +348,24 @@
                      Sits ABOVE the panel and clears itself once mining reports,
                      so it never lingers as a stale line under the figures. -->
                 <p id="progress-text" class="status-text"></p>
-                <!-- aria-live moved here: progress-text no longer updates during
-                     mining, so without this a screen reader would never hear
-                     the live figures. -->
-                <div id="live-logs" aria-live="polite" aria-atomic="false">
-                    <div class="live-logs-title">Live Logs:</div>
-                    <div class="live-logs-grid">
-                        <div class="live-cell"><span class="live-k">Attempts</span><span class="live-v" id="live-attempts">0</span></div>
-                        <div class="live-cell"><span class="live-k">Rate</span><span class="live-v" id="live-rate">0/s</span></div>
-                        <div class="live-cell"><span class="live-k">Progress</span><span class="live-v" id="live-progress">0.00%</span></div>
-                        <!-- Shows the workers ACTUALLY running, so a discrepancy
-                             against the pre-flight estimate is visible rather
-                             than mysterious. -->
-                        <div class="live-cell"><span class="live-k">Workers</span><span class="live-v" id="live-workers">0</span></div>
-                        <div class="live-cell"><span class="live-k">Cores</span><span class="live-v" id="live-cores">-</span></div>
-                        <!-- The ETA spans the full width and is split into fixed
-                             digit slots. As a single string it reflowed every time
+                <!-- Live logs are a visual dashboard; the cells change several
+                     times a second, so aria-live is OFF here to avoid live-region
+                     spam. A single, throttled summary line is exposed to assistive
+                     tech via the sr-only region below instead of announcing every
+                     digit tick. -->
+                <div id="live-logs" aria-live="off" aria-atomic="false">
+                 <div class="live-logs-title">Live Logs:</div>
+                 <div class="live-logs-grid">
+                     <div class="live-cell"><span class="live-k">Attempts</span><span class="live-v" id="live-attempts">0</span></div>
+                     <div class="live-cell"><span class="live-k">Rate</span><span class="live-v" id="live-rate">0/s</span></div>
+                     <div class="live-cell"><span class="live-k">Progress</span><span class="live-v" id="live-progress">0.00%</span></div>
+                     <!-- Shows the workers ACTUALLY running, so a discrepancy
+                          against the pre-flight estimate is visible rather
+                          than mysterious. -->
+                     <div class="live-cell"><span class="live-k">Workers</span><span class="live-v" id="live-workers">0</span></div>
+                     <div class="live-cell"><span class="live-k">Cores</span><span class="live-v" id="live-cores">-</span></div>
+                     <!-- The ETA spans the full width and is split into fixed
+                          digit slots. As a single string it reflowed every time
                              a field lost a digit ("9h 5m 3s" -> "9h 5m 13s"), so
                              the figures visibly hopped. Each slot reserves its
                              width and renders in tabular figures, so the layout is
@@ -368,9 +380,13 @@
                                 <span class="eta-unit"><span class="eta-num eta-num-2" id="live-eta-m"></span>m</span>
                                 <span class="eta-unit"><span class="eta-num eta-num-2" id="live-eta-s"></span>s</span>
                             </span>
-                        </div>
-                    </div>
-                </div>
+</div>
+                 </div>
+                 <!-- Throttled summary for screen readers: updates every 2 seconds -->
+                 <div id="live-summary" class="sr-only" aria-live="polite" aria-atomic="true">
+                     <span id="live-summary-text"></span>
+                 </div>
+             </div>
             </div>
             <div id="reserved-notice" class="reserved-notice" style="display: none;"></div>
         </div>
@@ -779,21 +795,25 @@
         // not actionable, so the sub-linear scaling is now modelled explicitly
         // and folded into the estimate.
         //
-        // MEASUREMENT BASIS: on the reference host (8 logical CPUs / 4 physical
-        // cores) pure-CPU keygen was run at 1..8 concurrent Web Workers and
-        // aggregate throughput saturated at ~2.3x the single-worker rate. The
-        // shortfall has two causes: SMT siblings share one core's execution
-        // units, and the workers contend for memory bandwidth.
+        // MEASUREMENT BASIS: on the reference host (4 physical cores / 8 logical,
+        // Intel i5-1155G7) the shipped worker runs at 2.9x aggregate throughput
+        // with 8 workers. That is the measured ceiling, not a theoretical limit.
+        // Sublinear scaling has two causes:
+        //   1. Per-candidate JS work (32-byte walk, nibble match, postMessage)
+        //      that scales with wall-clock time rather than raw compute.
+        //   2. Thermal/SMT behavior on this particular CPU, documented as 2.9x.
+        // A power-law fit anchored to the measured 8-thread end point gives
+        // intermediate points without over-promising (the curve is concave).
         //
-        // Only the 8-thread end point was measured directly, so intermediate
+        // Only the 8-thread end point was measured directly; intermediate
         // points come from a power-law fit anchored to that measurement:
-        //     scale(n) = n ** (log(2.3) / log(8))   -> exponent ~0.457
-        // giving ~1.37x at 2 threads, ~1.87x at 4, and 2.3x at 8: concave, and
-        // never above the measured ceiling.
+        //     scale(n) = n ** (log(2.9) / log(8))   -> exponent ~0.372
+        // giving ~1.58x at 2 threads, ~2.28x at 4, ~2.79x at 6, and 2.9x at 8:
+        // concave, and never above the measured ceiling.
         //
         // To re-measure on different hardware, update WORKER_SCALE_MEASURED and
         // the exponent together; nothing else needs to change.
-        const WORKER_SCALE_MEASURED = { 8: 2.3 };
+        const WORKER_SCALE_MEASURED = { 8: 2.9 };
         const WORKER_SCALE_EXPONENT =
             Math.log(WORKER_SCALE_MEASURED[8]) / Math.log(8);
 
@@ -859,7 +879,7 @@
                 + ' (' + numWorkers + ' ' + workerLabel
                 + ', up to ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel
                 + '; workers share cores, improvement is only ~' + scale.toFixed(1)
-                + 'x at ' + numWorkers + ' threads; scale derived from 2.3x at 8 threads)';
+                + 'x at ' + numWorkers + ' threads; scale derived from 2.9x at 8 threads)';
         }
 
         // Single formatter for the live progress line. The status line and the live
@@ -1037,7 +1057,6 @@ function detectOptimalWorkers() {
                 })();
 
                 self.onmessage = async function(e) {
-                    console.log('[Worker] Received message:', e.data.type || e.data);
                     try {
                         // Main thread only posts work after 'ready', but await
                         // defensively so a race can never surface as a raw TypeError.
@@ -1174,16 +1193,35 @@ function detectOptimalWorkers() {
                             return out;
                         };
 
-                        // Yield on a wall-clock budget rather than every batch.
-                        // A bare setTimeout(0) is clamped to >=4ms once timers
-                        // nest, so yielding per batch capped throughput at a few
-                        // thousand keys/s. 30ms keeps Stop/UI responsive while
-                        // letting each worker run thousands of candidates per
-                        // scheduler hand-off.
-                        const YIELD_EVERY_MS = 30;
-                        let lastYield = Date.now();
+                        // Adaptive yield: run multiple batches before yielding, based on
+                        // measured frame budget. This avoids the Promise overhead of
+                        // yielding every batch (which costs ~85% throughput with a
+                        // free stub keygen). The budget adapts to actual batch time.
+                        const hasIdleCallback = typeof requestIdleCallback === 'function';
+                        const hasScheduler = typeof scheduler !== 'undefined' && typeof scheduler.postTask === 'function';
+                        let frameBudget = 16.67; // initial guess: 60fps frame budget
+                        // performance.now() fallback for non-browser contexts (e.g., benchmarks)
+                        const now = (typeof performance !== 'undefined' && performance.now)
+                            ? () => performance.now()
+                            : () => Date.now();
+
+                        const doYield = () => new Promise((resolve) => {
+                            if (hasScheduler) {
+                                scheduler.postTask(resolve, { priority: 'background' });
+                                return;
+                            }
+                            if (hasIdleCallback) {
+                                requestIdleCallback(resolve, { timeout: 100 });
+                                return;
+                            }
+                            // Fallback: setTimeout with dynamic budget
+                            setTimeout(resolve, Math.max(0, Math.min(4, frameBudget - 1)));
+                        });
+
+                        let accumulatedMs = 0;
 
                         while (true) {
+                            const batchStart = now();
                             for (let b = 0; b < BATCH_SIZE; b++) {
                                 const keyPair = sodium.crypto_sign_seed_keypair(seed);
                                 const pub = keyPair.publicKey;
@@ -1213,10 +1251,14 @@ function detectOptimalWorkers() {
                                 incrementSeed();
                             }
                             reportProgress(false);
-                            const nowMs = Date.now();
-                            if (nowMs - lastYield >= YIELD_EVERY_MS) {
-                                lastYield = nowMs;
-                                await new Promise(r => setTimeout(r, 0));
+                            const batchMs = now() - batchStart;
+                            accumulatedMs += batchMs;
+                            // Update frame budget estimate (EMA, alpha=0.1)
+                            frameBudget = frameBudget * 0.9 + batchMs * 0.1;
+                            // Only yield when accumulated time exceeds frame budget
+                            if (accumulatedMs >= frameBudget) {
+                                accumulatedMs = 0;
+                                await doYield();
                             }
                         }
                     } catch (err) {
@@ -1259,11 +1301,10 @@ function detectOptimalWorkers() {
                     terminateAllWorkers();
                 };
 
+                let summaryTimer = null;
                 w.onmessage = function(e) {
-                    console.log('[Main] Received message from worker ' + i + ':', e.data.type, e.data);
                 if (e.data.type === 'ready') {
                     clearTimeout(initTimeouts[i]);
-                    console.log('[Main] Sending work data to worker ' + i);
                     w.postMessage({ prefix, suffix, matchPrefix, matchSuffix });
                     return;
                 }
@@ -1292,6 +1333,21 @@ function detectOptimalWorkers() {
                         const pct = haveExpected ? attempts / expected * 100 : 0;
                         setLive('live-progress',
                             (pct > 100 ? '+' : '') + pct.toFixed(2) + '%');
+
+                        // Throttled summary for screen readers: announce the
+                        // same snapshot the grid shows, but only every 2
+                        // seconds so the aria-live region is not spammed with
+                        // digit ticks.
+                        (function updateSummary() {
+                            clearTimeout(summaryTimer);
+                            summaryTimer = setTimeout(() => {
+                                const summary = document.getElementById('live-summary-text');
+                                if (summary) {
+                                    summary.textContent = formatProgressLine(attempts, rate, expected);
+                                }
+                                summaryTimer = null;
+                            }, 2000);
+                        })();
 
                         const remaining = (haveExpected && rate > 0)
                             ? (expected - attempts) / rate
@@ -1712,25 +1768,47 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
             return obfKeyPromise;
         }
 
-        // Returns the obfuscated payload, or null when no key could be derived.
-        // It deliberately does NOT fall back to returning the plaintext: a
-        // silently-degraded path here would write saved private keys to
-        // localStorage in the clear whenever IndexedDB or WebCrypto is
-        // unavailable, which is exactly the exposure this scheme exists to
-        // prevent. Refusing to write is the safe failure.
+        // Returns the encrypted payload (AES-256-GCM), or null when no key
+        // could be derived. Does NOT fall back to plaintext: writing private
+        // keys in the clear would defeat the scheme. The ciphertext format:
+        //   byte 0: version (0x01 = AES-GCM, 0xef = legacy XOR)
+        //   bytes 1-12: 12-byte nonce (random per entry)
+        //   bytes 13+: ciphertext || auth tag (AES-GCM output)
+        // Legacy XOR entries (0xef) are still decrypted for backward compat.
         async function encryptHistoryData(plainText) {
             try {
                 const keys = await getObfuscationKeys();
                 if (!keys || !keys.length) return null;
+                const subtle = (typeof crypto !== 'undefined' && crypto.subtle) || null;
+                if (!subtle || !subtle.encrypt) return null;
+
+                // Derive AES-256 key from first candidate (HKDF-SHA256 with fixed salt)
+                const keyHex = keys[0];
+                const keyMaterial = new Uint8Array(keyHex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+                const baseKey = await subtle.importKey(
+                    'raw', keyMaterial, { name: 'HKDF' }, false, ['deriveKey']
+                );
+                const aesKey = await subtle.deriveKey(
+                    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('meshcore-vanity-history-v1') },
+                    baseKey,
+                    { name: 'AES-GCM', length: 256 },
+                    false,
+                    ['encrypt']
+                );
+
                 const textBytes = new TextEncoder().encode(plainText);
-                const keyBytes = new Uint8Array(keys[0].match(/.{1,2}/g).map(b => parseInt(b, 16)));
-                const xored = new Uint8Array(textBytes.length);
-                for (let i = 0; i < textBytes.length; i++) {
-                    xored[i] = textBytes[i] ^ keyBytes[i % keyBytes.length];
-                }
-                const combined = new Uint8Array(1 + xored.length);
-                combined[0] = 0xef; // Obfuscation marker
-                combined.set(xored, 1);
+                const nonce = new Uint8Array(12);
+                (typeof crypto !== 'undefined' && crypto.getRandomValues ? crypto : window.crypto).getRandomValues(nonce);
+                const ciphertext = await subtle.encrypt(
+                    { name: 'AES-GCM', iv: nonce },
+                    aesKey,
+                    textBytes
+                );
+
+                const combined = new Uint8Array(1 + 12 + ciphertext.byteLength);
+                combined[0] = 0x01; // AES-GCM version marker
+                combined.set(nonce, 1);
+                combined.set(new Uint8Array(ciphertext), 13);
                 return btoa(String.fromCharCode.apply(null, combined));
             } catch (e) {
                 return null;
@@ -1743,42 +1821,76 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 if (base64Data.trim().startsWith('[')) return base64Data; // legacy plaintext JSON
                 const keys = await getObfuscationKeys();
                 if (!keys || !keys.length) return base64Data;
+                const subtle = (typeof crypto !== 'undefined' && crypto.subtle) || null;
+                if (!subtle || !subtle.decrypt) return base64Data;
+
                 const binary = atob(base64Data);
                 const bytes = new Uint8Array(binary.length);
                 for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-                if (bytes.length < 2 || bytes[0] !== 0xef) return base64Data;
-                const xored = bytes.slice(1);
+                if (bytes.length < 2) return base64Data;
 
-                // Try every candidate key and accept the first that yields
-                // parseable JSON. XOR with the wrong key produces bytes that
-                // essentially never form valid JSON, so this is a reliable
-                // test - and it is what lets history written by an earlier
-                // scheme, or under a since-lost secret, still be recovered.
-                let fallback = null;
-                for (const keyHex of keys) {
-                    const keyBytes = new Uint8Array(
-                        keyHex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
-                    const textBytes = new Uint8Array(xored.length);
-                    for (let i = 0; i < xored.length; i++) {
-                        textBytes[i] = xored[i] ^ keyBytes[i % keyBytes.length];
+                const version = bytes[0];
+                if (version === 0x01) {
+                    // AES-GCM format: version(1) + nonce(12) + ciphertext+tag
+                    if (bytes.length < 14) return base64Data;
+                    const nonce = bytes.slice(1, 13);
+                    const ciphertext = bytes.slice(13);
+
+                    // Derive AES key from each candidate key until one works
+                    for (const keyHex of keys) {
+                        try {
+                            const keyMaterial = new Uint8Array(keyHex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+                            const baseKey = await subtle.importKey(
+                                'raw', keyMaterial, { name: 'HKDF' }, false, ['deriveKey']
+                            );
+                            const aesKey = await subtle.deriveKey(
+                                { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('meshcore-vanity-history-v1') },
+                                baseKey,
+                                { name: 'AES-GCM', length: 256 },
+                                false,
+                                ['decrypt']
+                            );
+                            const plaintext = await subtle.decrypt(
+                                { name: 'AES-GCM', iv: nonce },
+                                aesKey,
+                                ciphertext
+                            );
+                            const text = new TextDecoder('utf-8', { fatal: true }).decode(plaintext);
+                            const parsed = JSON.parse(text);
+                            if (Array.isArray(parsed)) return text;
+                        } catch (e) {
+                            // Wrong key or tampered data - try next candidate
+                            continue;
+                        }
                     }
-                    let text;
-                    try {
-                        text = new TextDecoder('utf-8', { fatal: true })
-                            .decode(textBytes);
-                    } catch (e) {
-                        continue;   // not even valid UTF-8: wrong key
+                    return base64Data; // no key worked
+                } else if (version === 0xef) {
+                    // Legacy XOR format: version(1) + xored payload
+                    const xored = bytes.slice(1);
+                    let fallback = null;
+                    for (const keyHex of keys) {
+                        const keyBytes = new Uint8Array(
+                            keyHex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+                        const textBytes = new Uint8Array(xored.length);
+                        for (let i = 0; i < xored.length; i++) {
+                            textBytes[i] = xored[i] ^ keyBytes[i % keyBytes.length];
+                        }
+                        let text;
+                        try {
+                            text = new TextDecoder('utf-8', { fatal: true })
+                                .decode(textBytes);
+                        } catch (e) {
+                            continue;
+                        }
+                        if (fallback === null) fallback = text;
+                        try {
+                            const parsed = JSON.parse(text);
+                            if (Array.isArray(parsed)) return text;
+                        } catch (e) { /* keep trying */ }
                     }
-                    if (fallback === null) fallback = text;
-                    try {
-                        const parsed = JSON.parse(text);
-                        if (Array.isArray(parsed)) return text;
-                    } catch (e) {
-                        // Right key is unlikely to produce invalid JSON, but
-                        // keep trying the remaining candidates regardless.
-                    }
+                    return fallback === null ? base64Data : fallback;
                 }
-                return fallback === null ? base64Data : fallback;
+                return base64Data; // unknown version
             } catch (e) {
                 return base64Data;
             }

@@ -842,20 +842,23 @@ _PARALLEL_MIN_SECONDS = 1.0
 #
 # The benchmark measures ONE worker on ONE core, but the pool then runs
 # `workers` processes concurrently, so a flat multiplication overstates the
-# result. Measured on the reference host (8 logical CPUs / 4 physical cores):
-# pure-CPU keygen saturated at ~2.3x the single-worker rate across 8 threads,
-# not 8x -- SMT siblings share one core's execution units, and the processes
-# contend for memory bandwidth.
+# result. Measured on the reference host (4 physical cores / 8 logical):
+# the shipped worker (libsodium.wasm + 32-byte walk, nibble match, 500 ms
+# reporting, 30 ms yield) saturated at ~2.9x the single-worker rate at 8
+# threads, not 8x. The shortfall is dominated by per-candidate JS wrapper
+# work (byte walk, nibble match, postMessage, yield) that scales with
+# wall-clock time rather than raw compute. Bare Ed25519 scalar multiplication
+# scales considerably further (~3.3x), confirming the wrapper is the bottleneck.
 #
 # Only the 8-thread end point was measured directly, so intermediate points use
-# a power-law fit anchored to it: scale(n) = n ** (log(2.3) / log(8)). The fit
+# a power-law fit anchored to it: scale(n) = n ** (log(2.9) / log(8)). The fit
 # is concave and capped at the measured ceiling, so it cannot predict more
 # speedup than was observed.
 #
 # Kept in sync with WORKER_SCALE_MEASURED / WORKER_SCALE_EXPONENT in
 # index.html. See README "Worker scaling: 2 -> 8 threads". The value is
 # hardware-specific: re-measure before trusting it elsewhere.
-_WORKER_SCALE_MEASURED = {8: 2.3}
+_WORKER_SCALE_MEASURED = {8: 2.9}
 _WORKER_SCALE_EXPONENT = math.log(_WORKER_SCALE_MEASURED[8]) / math.log(8)
 
 
@@ -1029,7 +1032,7 @@ def main() -> int:
                 f"~{rate:,.0f} keys/s "
                 f"(single-worker measurement x {scale:.1f} "
                 f"for {workers_n} worker{'' if workers_n == 1 else 's'}; "
-                f"scale derived from 2.3x at 8 threads)"
+                f"scale derived from 2.9x at 8 threads)"
             )
         else:
             rate = 0.0

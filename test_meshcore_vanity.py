@@ -935,7 +935,10 @@ def test_check_inline_js_extracts_current_page():
     mod = _load_check_inline_js()
     extracted = mod.extract(Path(__file__).parent)
     assert set(extracted) == {"worker.js", "main.js"}
-    assert "await new Promise" in extracted["worker.js"]
+    # Worker must yield to the event loop. Accept either the old
+    # `await new Promise(r => setTimeout(r, 0))` or the new `doYield()`.
+    assert ("await new Promise" in extracted["worker.js"]
+            or "doYield" in extracted["worker.js"])
     assert "startMining" in extracted["main.js"]
 
 
