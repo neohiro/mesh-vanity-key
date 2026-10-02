@@ -139,6 +139,12 @@ def main() -> int:
                 # search can finish inside the first batch, so samples are fed
                 # explicitly - that also makes the assertion independent of how
                 # fast the host is.
+                #
+                # NOTE: no `//` comments in this snippet. Python concatenates
+                # adjacent string literals with no newline between them, so a
+                # line comment would swallow everything after it - including the
+                # closing braces - and the whole arrow function would arrive as
+                # one unterminated comment. Block comments are used instead.
                 painted = page.evaluate(
                     "() => {"
                     "  const panel = document.getElementById('progress');"
@@ -150,18 +156,18 @@ def main() -> int:
                     # surfacing as a bare ReferenceError.
                     "  if (typeof pushRateGraphSample !== 'function') {"
                     "    if (wasHidden) panel.classList.add('hidden');"
-                    "    return { error: 'pushRateGraphSample is not a global on window' };"
+                    "    return { error: 'pushRateGraphSample is not a global' };"
                     "  }"
-                    "  // Force a redraw from a known-varying series."
-                    "  //"
-                    "  // Date.now is frozen so every sample carries the SAME"
-                    "  // timestamp. That is deliberate and it is the regression:"
-                    "  // with no time spread the x-axis has nothing to scale by,"
-                    "  // and an earlier version pinned every point to the right"
-                    "  // edge, collapsing the trace into a vertical line. Freezing"
-                    "  // the clock makes that degenerate path deterministic, so the"
-                    "  // check cannot pass or fail depending on how fast the host"
-                    "  // happens to be."
+                    # The JS block comment below has to live inside a Python string
+                    # literal, or Python tries to parse `/*` as an expression.
+                    "  /* Date.now is frozen so every sample carries the SAME"
+                    "     timestamp. That is deliberate and it is the regression:"
+                    "     with no time spread the x-axis has nothing to scale by,"
+                    "     and an earlier version pinned every point to the right"
+                    "     edge, collapsing the trace into a vertical line."
+                    "     Freezing the clock makes that degenerate path"
+                    "     deterministic, so the check cannot depend on how fast the"
+                    "     host happens to be. */"
                     "  const realNow = Date.now;"
                     "  const frozen = realNow.call(Date);"
                     "  Date.now = () => frozen;"
@@ -177,13 +183,14 @@ def main() -> int:
                     "  const d = ctx.getImageData(0, 0, c.width, c.height).data;"
                     "  const W = c.width;"
                     "  let inked = 0, total = 0;"
-                    # The stroke is drawn at 0.85 alpha and the fill at 0.16, so
-                    # a high-alpha threshold isolates the trace line itself. That
-                    # distinction is what makes the span check meaningful: a
-                    # regression that collapsed the trace into a vertical line at
-                    # the right edge still filled a large wedge of the canvas, so
-                    # total coverage alone would have passed while showing
-                    # nothing useful.
+                    # Also has to be inside a Python string literal.
+                    "  /* The stroke is drawn at 0.85 alpha and the fill at 0.16,"
+                    "     so a high-alpha threshold isolates the trace line itself."
+                    "     That distinction is what makes the span check meaningful:"
+                    "     a regression that collapsed the trace into a vertical line"
+                    "     at the right edge still filled a large wedge of the canvas,"
+                    "     so total coverage alone would have passed while showing"
+                    "     nothing useful. */"
                     "  const strokeCols = new Set();"
                     "  for (let i = 0; i < d.length; i += 4) {"
                     "    total++;"
