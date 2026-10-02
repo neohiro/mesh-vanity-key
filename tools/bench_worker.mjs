@@ -89,13 +89,26 @@ if (r.found) console.log(`  matched after ${r.found.attempts.toLocaleString()} a
 
 // Regression gate.
 //
-// The threshold is deliberately set far below the observed ~10-14M keys/s but
-// far ABOVE the 9,182 keys/s of the original per-16-candidate-yield loop. A
-// very low gate (the previous 200k) could only catch a catastrophic
-// regression, so an ordinary 5-20x slowdown would have shipped green. 3M still
-// leaves ~3x headroom for slower CI runners while catching a genuine
-// regression in the wrapper.
-const MIN_KEYS_PER_SEC = 3_000_000;
+// Chosen from OBSERVED numbers, not optimism:
+//   catastrophic regression (per-16-candidate yield + hex churn): ~9,182/s
+//   development machine                                              ~10-13M/s
+//   GitHub Actions shared runner                        2,733,763/s (observed)
+// A floor of 3M was set from the dev-machine figure and turned CI red four
+// times in a row: a shared vCPU is several times slower than a workstation, and
+// an absolute threshold tuned on one machine does not transfer.
+//
+// What does this gate actually protect? Real key derivation runs at only
+// ~13,500/s in a browser (tools/bench_real_browser.mjs), so the wrapper is
+// already ~1000x cheaper than the work it wraps. At 1M/s it would still be 74x
+// faster than the keygen, i.e. entirely invisible to users. The regression
+// that mattered was 9,182/s - right at keygen cost, which is why mining felt
+// catastrophically slow.
+//
+// So the floor belongs far above that functional cliff, not near the
+// dev-machine figure. 1M is 109x above 9,182/s and leaves ~2.7x headroom below
+// the slowest observed runner, so ordinary runner variance cannot fail a build
+// while a real wrapper regression still fails hard.
+const MIN_KEYS_PER_SEC = 1_000_000;
 if (r.rate < MIN_KEYS_PER_SEC) {
     console.error(
         `\nFAILED: wrapper throughput ${Math.round(r.rate).toLocaleString()} keys/s `

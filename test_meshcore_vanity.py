@@ -1211,11 +1211,15 @@ def test_worker_wrapper_throughput_is_not_the_bottleneck():
     assert m, f"could not parse benchmark output: {proc.stdout!r}"
     rate = int(m.group(1).replace(",", ""))
 
-    # 200k/s leaves ~65x headroom below the measured ~12.9M/s while still
-    # failing hard (9k/s) if the per-batch yield or hex churn comes back.
-    assert rate > 200_000, (
+    # Same floor as tools/bench_worker.mjs. A shared CI vCPU measured 2,733,763/s
+    # against ~10-13M/s on a dev machine, so a threshold tuned locally does not
+    # transfer - 3M kept turning CI red. 1M is ~2.7x below the slowest observed
+    # runner and still 109x above the 9,182/s catastrophic regression, which is
+    # the case that mattered: at that speed the wrapper costs about as much as
+    # real key derivation (~13.5k/s) and mining becomes ~1000x slower.
+    assert rate > 1_000_000, (
         f"worker wrapper overhead regressed: only {rate:,} keys/s with a stubbed "
-        "keygen; the wrapper is the bottleneck again (expected >200,000)"
+        "keygen; the wrapper is the bottleneck again (expected >1,000,000)"
     )
 
 
