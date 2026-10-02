@@ -86,7 +86,39 @@ one. Set `MESHCORE_VANITY_STRICT_RESERVED=1` to make the CLI reject them again.
 ### The live panel
 
 Six figures are shown while mining: attempts, rate, progress, workers actually
-running, cores, and ETA.
+running, cores, and ETA. A keys/s trace is drawn behind the ETA row.
+
+**The rate graph answers a different question from the rate figure.** The rate
+cell says how fast the search is *now*; the trace says whether that has been
+*steady*. A tab throttled in the background, a thermal dip or a GC pause all
+show as a visible droop, which a single headline number cannot reveal.
+
+It is deliberately drawn as a **backdrop on the ETA row** rather than as a
+separate chart block, so it costs no vertical space and cannot push the figures
+around:
+
+- absolutely positioned with `pointer-events: none`, so it never intercepts a
+  click aimed at the digits sitting above it, and never enters layout;
+- the digits carry a matching dark `text-shadow` so the line crossing a glyph
+  cannot make the figure harder to read;
+- the x-axis is **real elapsed time over a 2-minute window**, not sample index.
+  Reports are throttled per worker and the worker count varies, so a fixed
+  sample *count* would not be a fixed span - and the window has to be fixed in
+  time or the recent detail (the part anyone looks at) flattens into a straight
+  line;
+- it plots the **raw** per-batch rate, not the EMA. Smoothing is what the
+  headline figure is for; smoothing the trace would hide the variation it exists
+  to reveal;
+- the y-scale is padded and deliberately **not** zero-based, because a zero
+  baseline flattens exactly the variation the graph is for;
+- `aria-hidden`, since the numbers it shows are already announced by the live
+  region, and it no-ops without a 2d context so it can never throw into the
+  progress handler and stall the figures behind it.
+
+It is deliberately **not** suppressed under `prefers-reduced-motion`, unlike the
+starfield: that is decoration, this is a data readout. It only changes when the
+miner reports a measurement, never animates on a timer, and hiding it would
+remove information rather than remove motion.
 
 **The ETA is split into fixed digit slots.** Rendered as one string it reflowed
 every time a field changed digit count — `9h 5m 3s` becoming `9h 5m 13s` moved

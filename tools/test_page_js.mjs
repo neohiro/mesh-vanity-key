@@ -1189,6 +1189,38 @@ check('status line: nothing writes it behind setStatusText()', () => {
         + `at least as often as it hides it - ${short.join('; ')}`);
 });
 
+check('worker init timers are per-worker, not looked up by index', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+
+    // Regression: each worker's handlers used to do
+    // `clearTimeout(initTimeouts[i])`. terminateAllWorkers() empties that array
+    // and the NEXT search refills it, so a late event from a terminated worker
+    // indexed into the new search's array and cleared the new search's watchdog
+    // at the same position - silently disarming the "failed to initialize"
+    // alert for a worker that really was hung.
+    const indexed = html.match(/clearTimeout\(initTimeouts\[/g) || [];
+    ok(indexed.length === 0,
+        `no handler may clear its timer via initTimeouts[i]; found ${indexed.length} `
+        + 'such call(s), which can disarm a later search\'s watchdog');
+
+    // The handle must be captured per worker and cleared via the closure.
+    ok(/let initTimeout = null;/.test(html),
+        'each worker must capture its own init-timer handle');
+    ok(/const clearOwnInitTimeout = \(\) => \{/.test(html),
+        'the per-worker clear helper must exist');
+    ok(/clearOwnInitTimeout\(\);/.test(html),
+        'handlers must clear via the per-worker helper');
+
+    // The helper must be idempotent: a late second call must not clear a
+    // different timer, which it cannot if it nulls the handle first.
+    const helper = html.slice(html.indexOf('const clearOwnInitTimeout'),
+        html.indexOf('const clearOwnInitTimeout') + 400);
+    ok(/initTimeout = null;/.test(helper),
+        'the helper must null its handle, so a repeat call is a no-op');
+    ok(/initTimeouts\.push\(initTimeout\)/.test(html),
+        'the handle must still be registered for bulk teardown');
+});
+
 check('the rate graph cannot break the live figures', () => {
     const html = fs.readFileSync(pageHtmlPath, 'utf8');
 
