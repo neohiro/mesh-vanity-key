@@ -297,14 +297,17 @@ def main() -> int:
                 # The day estimate must actually precede the hours in the DOM,
                 # or the multi-week reading appears after the digit it qualifies.
                 eta_order = page.evaluate(
-                    "() => [...document.querySelectorAll('#live-eta > span')]"
-                    ".map((el) => el.id || el.className)"
+                    # Descendants, not children: the digit slots sit inside
+                    # .eta-unit wrappers, so '#live-eta > span' would miss them.
+                    "() => [...document.querySelectorAll('#live-eta span')]"
+                    ".map((el) => el.id).filter(Boolean)"
                 )
-                assert eta_order and "live-eta-days" in eta_order[0], (
-                    f"the day estimate must come first, got {eta_order}"
-                )
+                for wanted in ("live-eta-days", "live-eta-h", "live-eta-m", "live-eta-s"):
+                    assert wanted in eta_order, (
+                        f"{wanted} missing from the ETA slot order: {eta_order}"
+                    )
                 assert eta_order.index("live-eta-days") < eta_order.index("live-eta-h"), (
-                    f"days must precede hours, got {eta_order}"
+                    f"the day estimate must precede the hours: {eta_order}"
                 )
 
                 # The counter badge is a third-party image, so its presence and
