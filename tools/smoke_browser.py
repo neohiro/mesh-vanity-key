@@ -71,29 +71,60 @@ def main() -> int:
                 page.fill("#prefix", "a")
 
                 # 'Starting...' was written once and never cleared, so it sat
-                # above the figures for the whole run. Drive the real mining path
-                # and assert the line is retired as soon as figures arrive.
+                # above the figures for the whole run. Assert the invariant
+                # rather than a specific moment: whatever the search's timing,
+                # once it has finished there must be no stale status text left
+                # in the DOM. Waiting for the clear DURING the run would be
+                # wrong - a 1-char pattern can match inside the first batch and
+                # finish before any progress report fires.
                 page.click("#start-btn")
-                page.wait_for_function(
+                page.wait_for_selector(".result-frame", timeout=120_000)
+                assert page.evaluate(
                     "() => { const el = document.getElementById('progress-text');"
-                    " if (!el) return false;"
-                    " return el.hidden && (el.textContent || '') === ''; }",
-                    timeout=60_000,
+                    " return el && (el.textContent || '').trim() === ''; }"
+                ), (
+                    "the startup status must not linger in the DOM after a search"
                 )
 
-                # The rate graph is a backdrop on the ETA row: it must have a
-                # real box and a painted backing store, not just exist in markup.
-                assert page.evaluate(
-                    "() => { const c = document.getElementById('rate-graph');"
-                    " if (!c) return false;"
-                    " const r = c.getBoundingClientRect();"
-                    " return r.width > 0 && r.height > 0 && c.width > 0 && c.height > 0; }"
-                ), "the rate graph must be laid out with a sized backing store"
-                # ...and must not sit in flow, or it would push the panel taller.
-                assert page.evaluate(
-                    "() => getComputedStyle(document.getElementById('rate-graph'))"
-                    ".position === 'absolute'"
-                ), "the rate graph must be taken out of flow"
+                # The rate graph is a backdrop on the ETA row. The panel is
+                # display:none once the search ends, and a hidden box measures
+                # 0x0, so reveal it, measure, then put the page back - the same
+                # approach the ETA-slot metrics below use.
+                graph = page.evaluate(
+                    "() => {"
+                    "  const panel = document.getElementById('progress');"
+                    "  const wasHidden = panel.classList.contains('hidden');"
+                    "  if (wasHidden) panel.classList.remove('hidden');"
+                    "  const c = document.getElementById('rate-graph');"
+                    "  const r = c.getBoundingClientRect();"
+                    "  const out = {"
+                    "    w: r.width, h: r.height,"
+                    "    cw: c.width, ch: c.height,"
+                    "    position: getComputedStyle(c).position,"
+                    "    pointerEvents: getComputedStyle(c).pointerEvents,"
+                    "  };"
+                    "  if (wasHidden) panel.classList.add('hidden');"
+                    "  return out;"
+                    "}"
+                )
+                assert graph["w"] > 0 and graph["h"] > 0, (
+                    f"the rate graph must be laid out with a real box, got "
+                    f"{graph['w']}x{graph['h']}"
+                )
+                assert graph["cw"] > 0 and graph["ch"] > 0, (
+                    f"the canvas backing store must be sized, got "
+                    f"{graph['cw']}x{graph['ch']}"
+                )
+                # Absolutely positioned, or it would sit in flow and make the
+                # live panel taller instead of being a backdrop.
+                assert graph["position"] == "absolute", (
+                    f"the rate graph must be taken out of flow, got {graph['position']}"
+                )
+                # Decorative: it must never intercept a click aimed at the
+                # figures sitting on top of it.
+                assert graph["pointerEvents"] == "none", (
+                    f"the rate graph must not intercept clicks, got {graph['pointerEvents']}"
+                )
 
                 page.wait_for_selector(".result-frame", timeout=120_000)
                 heading = page.text_content(".result-frame h2")

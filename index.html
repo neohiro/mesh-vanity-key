@@ -1324,6 +1324,7 @@ function detectOptimalWorkers() {
                     if (mining && workers.includes(w)) {
                         terminateAllWorkers();
                         mining = false;
+                        clearStatusText();
                         setFormDisabled(false);
                         document.getElementById('start-btn').disabled = false;
                         document.getElementById('stop-btn').disabled = true;
@@ -1336,6 +1337,7 @@ function detectOptimalWorkers() {
                 w.onerror = function(e) {
                     clearTimeout(initTimeouts[i]);
                     mining = false;
+                    clearStatusText();
                     setFormDisabled(false);
                     document.getElementById('start-btn').disabled = false;
                     document.getElementById('stop-btn').disabled = true;
@@ -1414,6 +1416,12 @@ function detectOptimalWorkers() {
                     } else if (e.data.type === 'found') {
                         clearTimeout(initTimeouts[i]);
                         mining = false;
+                        // Retire the startup status on this path too. A short
+                        // search can match inside the FIRST batch (BATCH_SIZE
+                        // 256) and so deliver 'found' before any 'progress'
+                        // message ever fires - which left "Starting..." sitting
+                        // in the DOM for the whole of the next search's startup.
+                        clearStatusText();
                         setFormDisabled(false);
                         document.getElementById('start-btn').disabled = false;
                         document.getElementById('stop-btn').disabled = true;
@@ -1430,6 +1438,10 @@ function detectOptimalWorkers() {
                     } else if (e.data.type === 'error') {
                         clearTimeout(initTimeouts[i]);
                         mining = false;
+                        // Same reasoning as 'found': an error can arrive with no
+                        // 'progress' before it, so the startup status has to be
+                        // retired here too.
+                        clearStatusText();
                         setFormDisabled(false);
                         document.getElementById('start-btn').disabled = false;
                         document.getElementById('stop-btn').disabled = true;

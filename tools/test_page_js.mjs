@@ -1078,6 +1078,19 @@ check('progress: "Starting..." is retired once mining reports', () => {
     ok(branch.indexOf('clearStatusText()') < branch.indexOf('pushRateGraphSample('),
         'the status must be cleared before the figures are updated');
 
+    // A short search can match inside the FIRST batch (BATCH_SIZE 256) and so
+    // deliver 'found' before any 'progress' message fires. Clearing only in the
+    // progress branch left "Starting..." in the DOM for the next search's
+    // startup. Every terminal branch must retire it too.
+    for (const kind of ['found', 'error']) {
+        const bStart = html.indexOf(`e.data.type === '${kind}'`);
+        ok(bStart !== -1, `the ${kind} branch must exist`);
+        const bEnd = html.indexOf('} else if (', bStart + 10);
+        const body = html.slice(bStart, bEnd === -1 ? undefined : bEnd);
+        ok(body.includes('clearStatusText()'),
+            `the ${kind} branch must also retire the startup status`);
+    }
+
     // Hiding the element (not just emptying it) is what removes the line box.
     // Emptying alone left a blank row that pushed the figures down.
     ok(/function setStatusText\(text\)[\s\S]{0,400}?\.hidden = !text/.test(html),
