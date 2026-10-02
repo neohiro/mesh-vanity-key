@@ -5,7 +5,7 @@ A fast, MeshCore-compatible Ed25519 vanity public-key generator. Ships in two fo
 - **`meshcore_vanity.py`** — a Python CLI with bech32/base58/base64 support and parallel multiprocessing.
 - **`index.html`** — a zero-install browser app (PWA) that mines with Web Workers + libsodium WASM.
 
-Inspired by and credited to [MeshCore](https://meshcore.co.uk/) — a decentralized mesh networking project. This tool generates Ed25519 keypairs whose encoded public keys match a user-defined pattern, suitable for use with MeshCore devices and related tooling.
+Inspired by and credited to [MeshCore](https://meshcore.io/) — a decentralized mesh networking project. This tool generates Ed25519 keypairs whose encoded public keys match a user-defined pattern, suitable for use with MeshCore devices and related tooling.
 
 ---
 
@@ -324,7 +324,7 @@ MIT
 
 ## Credits
 
-- [MeshCore](https://meshcore.co.uk/) — decentralized mesh networking
+- [MeshCore](https://meshcore.io/) — decentralized mesh networking
 - [Ed25519](https://ed25519.cr.yp.to/) — fast, secure elliptic curve signatures
 - [BIP-0173](https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki) — bech32 address format
 - [PyNaCl](https://pynacl.readthedocs.io/) — Python libsodium bindings (Ed25519)

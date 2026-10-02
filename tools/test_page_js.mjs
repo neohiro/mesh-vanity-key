@@ -252,7 +252,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKey, getOrCreateObfuscationSecret, formatProgressLine, progressEtaClause, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -792,21 +792,6 @@ sandbox.confirm = () => true;
 // lifted the stored history also lifted the key, so the "obfuscation" bought
 // nothing against data-at-rest theft.
 
-await asyncCheck('obfuscation key is derived, never read from storage', async () => {
-    const key = await api.deriveObfuscationKey();
-    ok(/^[0-9a-f]{64}$/.test(key), `expected a 32-byte hex key, got: ${key}`);
-    // Critically: the key is not the value a previous version persisted.
-    const stored = localStorageMock.getItem('meshcoreVanityObfKey');
-    ok(stored === null,
-        `obfuscation key must not be stored in localStorage (found: ${stored})`);
-});
-
-await asyncCheck('obfuscation key is stable across calls', async () => {
-    const a = await api.deriveObfuscationKey();
-    const b = await api.deriveObfuscationKey();
-    eq(a, b, 'the same fingerprint must always derive the same key');
-});
-
 await asyncCheck('fingerprint includes the storage origin', async () => {
     const fp = api.machineFingerprint();
     ok(fp.includes('https://example.test'),
@@ -907,131 +892,6 @@ await asyncCheck('fingerprint fallback excludes volatile values', async () => {
     ok(fp.includes('meshcore-vanity-obf-v2-fallback'),
         'fallback fingerprint must be versioned');
     ok(fp.includes('https://example.test'), 'must still bind the origin');
-});
-
-await asyncCheck('the secret, not the fingerprint, decides the key', async () => {
-    // The whole point of v2: changing anything the browser controls must NOT
-    // change the key, because the secret is the primary input.
-    idbData.clear();
-    api.__resetObfKeyCache();
-    const before = await api.deriveObfuscationKey();
-
-    const origOffset = Date.prototype.getTimezoneOffset;
-    const origUA = navigatorMock.userAgent;
-    const origPlatform = navigatorMock.platform;
-    const origLang = navigatorMock.language;
-    const origCores = navigatorMock.hardwareConcurrency;
-    Date.prototype.getTimezoneOffset = () => -840;      // fly to UTC-14
-    navigatorMock.userAgent = 'Mozilla/5.0 (Upgraded)';
-    navigatorMock.platform = 'Win32';
-    navigatorMock.language = 'zz-ZZ';
-    navigatorMock.hardwareConcurrency = 2;
-    api.__resetObfKeyCache();
-    try {
-        eq(await api.deriveObfuscationKey(), before,
-            'key must be unchanged by UA, timezone, platform, language or cores');
-    } finally {
-        Date.prototype.getTimezoneOffset = origOffset;
-        navigatorMock.userAgent = origUA;
-        navigatorMock.platform = origPlatform;
-        navigatorMock.language = origLang;
-        navigatorMock.hardwareConcurrency = origCores;
-        api.__resetObfKeyCache();
-    }
-});
-
-await asyncCheck('derivation mode is pinned so a slow load cannot orphan history', async () => {
-    // Regression: the IndexedDB call has a 2s timeout. If it timed out and the
-    // request later stored a secret, the NEXT load would derive a DIFFERENT key
-    // and orphan every stored key. Two invariants matter:
-    //   1. the mode is decided once and recorded;
-    //   2. once pinned to IndexedDB, a later blip must NOT silently switch to
-    //      the fingerprint derivation - it must report "no key" instead, so the
-    //      caller keeps the existing ciphertext and refuses to write.
-    idbData.clear();
-    storage.clear();
-    api.__resetObfKeyCache();
-    const first = await api.deriveObfuscationKey();
-    ok(/^[0-9a-f]{64}$/.test(first), `expected a derived key: ${first}`);
-    eq(storage.get('meshcoreVanityObfMode'), 'idb', 'mode should be pinned to idb');
-
-    const savedAvailable = idbAvailable;
-    idbAvailable = false;
-    api.__resetObfKeyCache();
-    try {
-        const during = await api.deriveObfuscationKey();
-        eq(during, null, 'a blip must yield no key, never a different key');
-    } finally {
-        idbAvailable = savedAvailable;
-        api.__resetObfKeyCache();
-        storage.clear();
-    }
-});
-
-await asyncCheck('fingerprint mode is honoured once recorded', async () => {
-    // If an install is pinned to the fingerprint fallback, it must stay there
-    // even when IndexedDB later becomes available, otherwise the key changes.
-    idbData.clear();
-    storage.clear();
-    idbAvailable = false;
-    api.__resetObfKeyCache();
-    const first = await api.deriveObfuscationKey();
-    eq(storage.get('meshcoreVanityObfMode'), 'fp', 'should be pinned to fp');
-
-    idbAvailable = true;
-    api.__resetObfKeyCache();
-    try {
-        eq(await api.deriveObfuscationKey(), first,
-            'must stay in fingerprint mode once chosen');
-    } finally {
-        idbAvailable = true;
-        api.__resetObfKeyCache();
-        storage.clear();
-    }
-});
-
-await asyncCheck('history is NEVER written in plaintext when no key is available', async () => {
-    // The dangerous degradation: encryptHistoryData used to return the
-    // plaintext whenever no key could be derived, silently writing every saved
-    // private key to localStorage in the clear - exactly the exposure the
-    // obfuscation exists to prevent.
-    //
-    // Reach the no-key state the realistic way: pin the install to IndexedDB,
-    // then have IndexedDB become unreachable. (The fingerprint fallback is NOT
-    // a no-key state - it derives a real key and obfuscates properly.)
-    idbData.clear();
-    storage.clear();
-    idbAvailable = true;
-    api.__resetObfKeyCache();
-    await api.deriveObfuscationKey();   // derives and pins the mode to idb
-    eq(storage.get('meshcoreVanityObfMode'), 'idb', 'precondition: pinned to idb');
-
-    idbAvailable = false;
-    api.__resetObfKeyCache();
-    try {
-        const plain = JSON.stringify([{ publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1 }]);
-        eq(await api.encryptHistoryData(plain), null,
-            'encryption must fail closed, not return plaintext');
-
-        api.getSavedKeys().length = 0;
-        api.getSavedKeys().push({
-            publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1,
-        });
-        await api.persistHistory();
-
-        const stored = storage.get(api.HISTORY_KEY);
-        ok(stored === null || stored === undefined,
-            `nothing may be written without a key (got: ${stored})`);
-        const dump = JSON.stringify([...storage.entries()]);
-        ok(!dump.includes('privateKey'),
-            `private keys must never reach storage in the clear: ${dump}`);
-        ok(/NOT being saved|not being saved/i.test(getElementById('history-warn').textContent),
-            `must warn the user: ${getElementById('history-warn').textContent}`);
-    } finally {
-        idbAvailable = true;
-        api.__resetObfKeyCache();
-        storage.clear();
-    }
 });
 
 await asyncCheck('the fingerprint fallback still obfuscates, never plaintext', async () => {
@@ -1199,6 +1059,106 @@ await asyncCheck('concurrent persists serialise, last write wins', async () => {
     ok(parsed.length === 1 || parsed.length === 2,
         `stored history must be one coherent state, got ${parsed.length} entries`);
     storage.clear();
+});
+
+await asyncCheck('history survives environment changes when the secret is present', async () => {
+    // The realistic data-loss case, and the one this fixes: the key used to
+    // depend on a fingerprint containing the user agent, screen metrics and the
+    // timezone, so a browser update, a resize or travel silently changed it
+    // and the saved keys became unreadable.
+    idbData.clear();
+    storage.clear();
+    idbAvailable = true;
+    api.__resetObfKeyCache();
+    await api.getOrCreateObfuscationSecret();
+
+    const plain = JSON.stringify([{ publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1 }]);
+    const written = await api.encryptHistoryData(plain);
+
+    // Change everything the old fingerprint keyed on.
+    const origUA = navigatorMock.userAgent;
+    const origOffset = Date.prototype.getTimezoneOffset;
+    navigatorMock.userAgent = 'Mozilla/5.0 (Chrome 999)';
+    Date.prototype.getTimezoneOffset = () => -840;
+    api.__resetObfKeyCache();
+    try {
+        eq(await api.decryptHistoryData(written), plain,
+            'history must survive a UA update and a timezone change');
+    } finally {
+        navigatorMock.userAgent = origUA;
+        Date.prototype.getTimezoneOffset = origOffset;
+        api.__resetObfKeyCache();
+        storage.clear();
+    }
+});
+
+await asyncCheck('a lost secret preserves the ciphertext instead of destroying it', async () => {
+    // Being precise: data encrypted with the secret CANNOT be recovered if the
+    // secret is gone - no other candidate derives the same keystream. What we
+    // can guarantee is that the bytes are never overwritten or replaced with
+    // something unreadable, so the situation is recoverable if the secret comes
+    // back (and is otherwise reported, not silently blanked).
+    idbData.clear();
+    storage.clear();
+    idbAvailable = true;
+    api.__resetObfKeyCache();
+    await api.getOrCreateObfuscationSecret();
+
+    const plain = JSON.stringify([{ publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1 }]);
+    const written = await api.encryptHistoryData(plain);
+
+    idbData.clear();
+    idbAvailable = false;
+    api.__resetObfKeyCache();
+    try {
+        // A new key found later must not clobber the unreadable blob.
+        storage.set(api.HISTORY_KEY, written);
+        await api.loadHistory();
+        api.addKeyToHistory({
+            publicKey: 'e'.repeat(64), privateKey: 'f'.repeat(64),
+            attempts: 1, elapsed: 1, pattern: "prefix 'e'", minedAt: 'now',
+        });
+        await api.persistHistory();
+        eq(storage.get(api.HISTORY_KEY), written,
+            'the original ciphertext must be left byte-for-byte intact');
+    } finally {
+        idbAvailable = true;
+        api.__resetObfKeyCache();
+        storage.clear();
+    }
+});
+
+await asyncCheck('history written by the v1 scheme is still readable', async () => {
+    // v1 mixed screen metrics and timezone into the key. Anyone who saved keys
+    // on that release must not lose them, so v1 is kept as a candidate.
+    await api.getOrCreateObfuscationSecret();
+
+    // Reproduce v1 ciphertext exactly.
+    const enc = new TextEncoder().encode(api.legacyFingerprintV1());
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', enc);
+    const v1Key = Array.from(new Uint8Array(digest))
+        .map(b => b.toString(16).padStart(2, '0')).join('');
+
+    const plain = JSON.stringify([{ publicKey: 'c'.repeat(64), privateKey: 'd'.repeat(64), n: 9 }]);
+    const text = new TextEncoder().encode(plain);
+    const kb = new Uint8Array(v1Key.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+    const xored = new Uint8Array(text.length);
+    for (let i = 0; i < text.length; i++) xored[i] = text[i] ^ kb[i % kb.length];
+    const combined = new Uint8Array(1 + xored.length);
+    combined[0] = 0xef;
+    combined.set(xored, 1);
+    const v1Blob = btoa(String.fromCharCode.apply(null, combined));
+
+    eq(await api.decryptHistoryData(v1Blob), plain, 'v1 history must still decode');
+});
+
+await asyncCheck('decrypt tries every candidate and rejects wrong keys', async () => {
+    const keys = await api.deriveObfuscationKeys();
+    ok(keys.length >= 2, `expected multiple candidates, got ${keys.length}`);
+    ok(new Set(keys).size === keys.length, 'candidate keys must be distinct');
+    ok(keys.every(k => /^[0-9a-f]{64}$/.test(k)), 'each key is 32 hex bytes');
+    eq(await api.decryptHistoryData('7b3d6a7f8271615b'), '7b3d6a7f8271615b',
+        'garbage must pass through unchanged, not as mojibake');
 });
 
 await asyncCheck('legacy plaintext history still loads', async () => {

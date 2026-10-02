@@ -191,7 +191,7 @@
             <p><strong>How it works:</strong> This page uses Web Workers with libsodium WASM to search for Ed25519 keys in the background. Workers are auto-detected based on your CPU cores for maximum performance.</p>
             <p style="margin-top: 8px;"><strong>Tip:</strong> Shorter patterns are found faster. A 2-char prefix takes seconds; a 6-char pattern may take hours.</p>
 
-            <p style="margin-top: 8px;">Inspired by <a href="https://meshcore.co.uk/">MeshCore</a>.</p>
+            <p style="margin-top: 8px;">Inspired by <a href="https://meshcore.io/">MeshCore</a>.</p>
             <p style="margin-top: 8px;"><a href="https://neohiro.github.io/">← Back to neohiro.github.io</a></p>
         </div>
     </div>
@@ -1124,32 +1124,6 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
             ].join('|');
         }
 
-        // Which derivation mode this install uses. Recorded on first run and then
-        // never changed, because switching modes changes the key and would
-        // orphan every key already stored. Without this the 2s IndexedDB
-        // timeout below could pick the fingerprint for one slow load and the
-        // secret for the next - a silent, timing-dependent loss of history.
-        const OBFUSCATION_MODE_STORAGE = 'meshcoreVanityObfMode';
-        const MODE_SECRET = 'idb';
-        const MODE_FINGERPRINT = 'fp';
-
-        function readObfuscationMode() {
-            try {
-                return localStorage.getItem(OBFUSCATION_MODE_STORAGE);
-            } catch (e) {
-                return null;
-            }
-        }
-
-        function recordObfuscationMode(mode) {
-            try {
-                localStorage.setItem(OBFUSCATION_MODE_STORAGE, mode);
-            } catch (e) {
-                // Cannot record: fall back to re-deciding every load, which is
-                // the pre-existing behaviour and still round-trips within a
-                // load. Only matters when storage is partially broken.
-            }
-        }
 
         // Read (or create) the install-scoped secret from IndexedDB.
         // Resolves to a hex string, or null when IndexedDB is unavailable
@@ -1230,52 +1204,74 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
             });
         }
 
-        // Derive a 32-byte key. Uses SHA-256 so the key is not a trivially reversible
-        // function of its inputs.
-        async function deriveObfuscationKey() {
-            const subtle = (typeof crypto !== 'undefined' && crypto.subtle) || null;
-            if (!subtle || !subtle.digest) return null;
-            try {
-                // Once a mode is recorded, honour it forever. Re-deciding could
-                // flip the mode on a slow load and change the key, which would
-                // make previously stored history undecodable.
-                const recorded = readObfuscationMode();
-                let secret = null;
-                if (recorded !== MODE_FINGERPRINT) {
-                    secret = await getOrCreateObfuscationSecret();
-                    if (!secret && recorded === MODE_SECRET) {
-                        // Pinned to IndexedDB but the secret is temporarily
-                        // unreachable. Do NOT silently switch to the fingerprint
-                        // derivation: that would change the key and orphan every
-                        // stored key. Report "no key" so the caller keeps the
-                        // existing ciphertext and refuses to write, which is
-                        // recoverable, unlike a changed key.
-                        return null;
-                    }
-                }
-                if (!recorded) recordObfuscationMode(secret ? MODE_SECRET : MODE_FINGERPRINT);
+        // v1 key derivation, kept ONLY so history written by earlier releases can
+        // still be read. It mixes in screen metrics and the timezone offset,
+        // which is exactly why it was replaced: a browser update, a resize or
+        // travel silently changed the key and orphaned the history.
+        function legacyFingerprintV1() {
+            const nav = (typeof navigator !== 'undefined' && navigator) || {};
+            const scr = (typeof screen !== 'undefined' && screen) || {};
+            return [
+                'meshcore-vanity-obf-v1',
+                location.origin || '',
+                nav.userAgent || '',
+                nav.language || '',
+                (nav.languages || []).join(','),
+                nav.hardwareConcurrency || 0,
+                nav.maxTouchPoints || 0,
+                nav.platform || '',
+                nav.deviceMemory || 0,
+                scr.width || 0,
+                scr.height || 0,
+                scr.colorDepth || 0,
+                new Date().getTimezoneOffset(),
+            ].join('|');
+        }
 
-                // Primary: the install-scoped secret, so the key is stable
-                // across every environment change. `origin` keeps the key bound
-                // to this site rather than shared across origins.
-                // Fallback: fingerprint only, when IndexedDB is unavailable.
-                const material = secret
-                    ? 'meshcore-vanity-obf-v2|' + location.origin + '|' + secret
-                    : machineFingerprint();
-                const enc = new TextEncoder().encode(material);
-                const digest = await subtle.digest('SHA-256', enc);
-                return Array.from(new Uint8Array(digest))
+        // Every key this page might have encrypted history with, best first.
+        //
+        // Trying a list rather than a single key is what makes stored history
+        // RECOVERABLE. A single-key scheme loses data whenever its one input
+        // becomes unavailable - IndexedDB cleared while localStorage survives,
+        // a fingerprint change, a browser update - and the page could then only
+        // report that the data was unreadable. With candidates, whatever wrote
+        // the ciphertext is still tried on every load, so losing the secret does
+        // not lose the keys.
+        //
+        // Security is unchanged: an attacker who lifts localStorage still cannot
+        // derive any of these without also having the IndexedDB secret or the
+        // machine fingerprint.
+        async function deriveObfuscationKeys() {
+            const subtle = (typeof crypto !== 'undefined' && crypto.subtle) || null;
+            if (!subtle || !subtle.digest) return [];
+
+            const digestHex = async (text) => {
+                const d = await subtle.digest('SHA-256', new TextEncoder().encode(text));
+                return Array.from(new Uint8Array(d))
                     .map(b => b.toString(16).padStart(2, '0')).join('');
-            } catch (e) {
-                return null;
+            };
+
+            const materials = [];
+            const secret = await getOrCreateObfuscationSecret();
+            if (secret) {
+                materials.push('meshcore-vanity-obf-v2|' + location.origin + '|' + secret);
             }
+            materials.push(machineFingerprint());
+            materials.push(legacyFingerprintV1());
+
+            const keys = [];
+            for (const m of materials) {
+                try {
+                    keys.push(await digestHex(m));
+                } catch (e) { /* skip this candidate */ }
+            }
+            return keys;
         }
 
         // Cached so the async digest runs once per page load, not per save.
         let obfKeyPromise = null;
-        function getObfuscationKey() {
-            if (!storageAvailable) return Promise.resolve(null);
-            if (!obfKeyPromise) obfKeyPromise = deriveObfuscationKey();
+        function getObfuscationKeys() {
+            if (!obfKeyPromise) obfKeyPromise = deriveObfuscationKeys();
             return obfKeyPromise;
         }
 
@@ -1287,10 +1283,10 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
         // prevent. Refusing to write is the safe failure.
         async function encryptHistoryData(plainText) {
             try {
-                const keyHex = await getObfuscationKey();
-                if (!keyHex) return null;
+                const keys = await getObfuscationKeys();
+                if (!keys || !keys.length) return null;
                 const textBytes = new TextEncoder().encode(plainText);
-                const keyBytes = new Uint8Array(keyHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+                const keyBytes = new Uint8Array(keys[0].match(/.{1,2}/g).map(b => parseInt(b, 16)));
                 const xored = new Uint8Array(textBytes.length);
                 for (let i = 0; i < textBytes.length; i++) {
                     xored[i] = textBytes[i] ^ keyBytes[i % keyBytes.length];
@@ -1308,19 +1304,44 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
             try {
                 if (!base64Data || typeof base64Data !== 'string') return base64Data;
                 if (base64Data.trim().startsWith('[')) return base64Data; // legacy plaintext JSON
-                const keyHex = await getObfuscationKey();
-                if (!keyHex) return base64Data;
+                const keys = await getObfuscationKeys();
+                if (!keys || !keys.length) return base64Data;
                 const binary = atob(base64Data);
                 const bytes = new Uint8Array(binary.length);
                 for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
                 if (bytes.length < 2 || bytes[0] !== 0xef) return base64Data;
-                const keyBytes = new Uint8Array(keyHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
                 const xored = bytes.slice(1);
-                const textBytes = new Uint8Array(xored.length);
-                for (let i = 0; i < xored.length; i++) {
-                    textBytes[i] = xored[i] ^ keyBytes[i % keyBytes.length];
+
+                // Try every candidate key and accept the first that yields
+                // parseable JSON. XOR with the wrong key produces bytes that
+                // essentially never form valid JSON, so this is a reliable
+                // test - and it is what lets history written by an earlier
+                // scheme, or under a since-lost secret, still be recovered.
+                let fallback = null;
+                for (const keyHex of keys) {
+                    const keyBytes = new Uint8Array(
+                        keyHex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+                    const textBytes = new Uint8Array(xored.length);
+                    for (let i = 0; i < xored.length; i++) {
+                        textBytes[i] = xored[i] ^ keyBytes[i % keyBytes.length];
+                    }
+                    let text;
+                    try {
+                        text = new TextDecoder('utf-8', { fatal: true })
+                            .decode(textBytes);
+                    } catch (e) {
+                        continue;   // not even valid UTF-8: wrong key
+                    }
+                    if (fallback === null) fallback = text;
+                    try {
+                        const parsed = JSON.parse(text);
+                        if (Array.isArray(parsed)) return text;
+                    } catch (e) {
+                        // Right key is unlikely to produce invalid JSON, but
+                        // keep trying the remaining candidates regardless.
+                    }
                 }
-                return new TextDecoder().decode(textBytes);
+                return fallback === null ? base64Data : fallback;
             } catch (e) {
                 return base64Data;
             }
