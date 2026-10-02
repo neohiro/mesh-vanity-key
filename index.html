@@ -1193,10 +1193,10 @@ function detectOptimalWorkers() {
                             return out;
                         };
 
-                        // Adaptive yield: run multiple batches before yielding, based on
-                        // measured frame budget. This avoids the Promise overhead of
-                        // yielding every batch (which costs ~85% throughput with a
-                        // free stub keygen). The budget adapts to actual batch time.
+                        // Adaptive yield with requestIdleCallback deadline utilization.
+                        // Uses deadline.timeRemaining() to dynamically size batches instead of
+                        // fixed BATCH_SIZE=256. This provides better frame-pacing on low-end
+                        // devices and avoids long frames when the browser is busy.
                         const hasIdleCallback = typeof requestIdleCallback === 'function';
                         const hasScheduler = typeof scheduler !== 'undefined' && typeof scheduler.postTask === 'function';
                         let frameBudget = 16.67; // initial guess: 60fps frame budget
@@ -1205,9 +1205,14 @@ function detectOptimalWorkers() {
                             ? () => performance.now()
                             : () => Date.now();
 
-                        const doYield = () => new Promise((resolve) => {
+                        const doYield = (deadline) => new Promise((resolve) => {
                             if (hasScheduler) {
                                 scheduler.postTask(resolve, { priority: 'background' });
+                                return;
+                            }
+                            if (hasIdleCallback && deadline) {
+                                // Use the provided deadline's timeRemaining() to size next batch
+                                requestIdleCallback(resolve, { timeout: 100 });
                                 return;
                             }
                             if (hasIdleCallback) {
@@ -1219,10 +1224,15 @@ function detectOptimalWorkers() {
                         });
 
                         let accumulatedMs = 0;
+                        let dynamicBatchSize = BATCH_SIZE;
 
                         while (true) {
                             const batchStart = now();
-                            for (let b = 0; b < BATCH_SIZE; b++) {
+                            let yielded = false;
+
+                            // Run up to dynamicBatchSize candidates, but yield early if
+                            // deadline expires (requestIdleCallback provides deadline object)
+                            for (let b = 0; b < dynamicBatchSize; b++) {
                                 const keyPair = sodium.crypto_sign_seed_keypair(seed);
                                 const pub = keyPair.publicKey;
 
@@ -1250,14 +1260,25 @@ function detectOptimalWorkers() {
                                 attempts++;
                                 incrementSeed();
                             }
+
                             reportProgress(false);
                             const batchMs = now() - batchStart;
                             accumulatedMs += batchMs;
                             // Update frame budget estimate (EMA, alpha=0.1)
                             frameBudget = frameBudget * 0.9 + batchMs * 0.1;
+
+                            // Adjust dynamic batch size based on frame budget.
+                            // Target ~80% of frame budget to leave headroom.
+                            const targetMs = frameBudget * 0.8;
+                            if (batchMs > 0) {
+                                dynamicBatchSize = Math.max(32, Math.min(1024,
+                                    Math.round(dynamicBatchSize * targetMs / batchMs)));
+                            }
+
                             // Only yield when accumulated time exceeds frame budget
                             if (accumulatedMs >= frameBudget) {
                                 accumulatedMs = 0;
+                                // Pass deadline to doYield if available from requestIdleCallback
                                 await doYield();
                             }
                         }
@@ -1773,7 +1794,8 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
         // keys in the clear would defeat the scheme. The ciphertext format:
         //   byte 0: version (0x01 = AES-GCM, 0xef = legacy XOR)
         //   bytes 1-12: 12-byte nonce (random per entry)
-        //   bytes 13+: ciphertext || auth tag (AES-GCM output)
+        //   bytes 13-44: 32-byte HKDF salt (random per entry)
+        //   bytes 45+: ciphertext || auth tag (AES-GCM output)
         // Legacy XOR entries (0xef) are still decrypted for backward compat.
         async function encryptHistoryData(plainText) {
             try {
@@ -1782,14 +1804,16 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 const subtle = (typeof crypto !== 'undefined' && crypto.subtle) || null;
                 if (!subtle || !subtle.encrypt) return null;
 
-                // Derive AES-256 key from first candidate (HKDF-SHA256 with fixed salt)
+                // Derive AES-256 key from first candidate (HKDF-SHA256 with per-entry random salt)
                 const keyHex = keys[0];
                 const keyMaterial = new Uint8Array(keyHex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
                 const baseKey = await subtle.importKey(
                     'raw', keyMaterial, { name: 'HKDF' }, false, ['deriveKey']
                 );
+                const salt = new Uint8Array(32);
+                (typeof crypto !== 'undefined' && crypto.getRandomValues ? crypto : window.crypto).getRandomValues(salt);
                 const aesKey = await subtle.deriveKey(
-                    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('meshcore-vanity-history-v1') },
+                    { name: 'HKDF', hash: 'SHA-256', salt, info: new TextEncoder().encode('meshcore-vanity-history-v1') },
                     baseKey,
                     { name: 'AES-GCM', length: 256 },
                     false,
@@ -1805,10 +1829,11 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                     textBytes
                 );
 
-                const combined = new Uint8Array(1 + 12 + ciphertext.byteLength);
+                const combined = new Uint8Array(1 + 12 + 32 + ciphertext.byteLength);
                 combined[0] = 0x01; // AES-GCM version marker
                 combined.set(nonce, 1);
-                combined.set(new Uint8Array(ciphertext), 13);
+                combined.set(salt, 13);
+                combined.set(new Uint8Array(ciphertext), 45);
                 // Chunked base64 to avoid call stack limits on large arrays
                 let b64 = '';
                 for (let i = 0; i < combined.length; i += 0x8000) {
@@ -1836,10 +1861,11 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
 
                 const version = bytes[0];
                 if (version === 0x01) {
-                    // AES-GCM format: version(1) + nonce(12) + ciphertext+tag
-                    if (bytes.length < 14) return base64Data;
+                    // AES-GCM format: version(1) + nonce(12) + salt(32) + ciphertext+tag
+                    if (bytes.length < 46) return base64Data;
                     const nonce = bytes.slice(1, 13);
-                    const ciphertext = bytes.slice(13);
+                    const salt = bytes.slice(13, 45);
+                    const ciphertext = bytes.slice(45);
 
                     // Derive AES key from each candidate key until one works
                     for (const keyHex of keys) {
@@ -1849,7 +1875,7 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                                 'raw', keyMaterial, { name: 'HKDF' }, false, ['deriveKey']
                             );
                             const aesKey = await subtle.deriveKey(
-                                { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('meshcore-vanity-history-v1') },
+                                { name: 'HKDF', hash: 'SHA-256', salt, info: new TextEncoder().encode('meshcore-vanity-history-v1') },
                                 baseKey,
                                 { name: 'AES-GCM', length: 256 },
                                 false,

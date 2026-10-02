@@ -59,7 +59,13 @@ Browser-specific behaviour, for comparison with the CLI below:
 > Treat the history as a secret store, and clear it when done.
 >
 > **Backward compatibility:** existing XOR-obfuscated entries (version 0xef)
-> are still decrypted on load. New entries use AES-GCM (version 0x01).
+> are still decrypted on load. New entries use AES-GCM (version 0x01) with
+> per-entry random 32-byte HKDF salt (stored alongside the 12-byte nonce).
+> The ciphertext format is:
+>   byte 0: version (0x01 = AES-GCM, 0xef = legacy XOR)
+>   bytes 1-12: 12-byte nonce (random per entry)
+>   bytes 13-44: 32-byte HKDF salt (random per entry)
+>   bytes 45+: ciphertext || auth tag (AES-GCM output)
 >
 > If IndexedDB is unavailable (private mode, storage disabled) the key falls back
 > to `HKDF-SHA256(fingerprint)`, so history still round-trips rather than being
