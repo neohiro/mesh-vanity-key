@@ -28,6 +28,8 @@ from meshcore_vanity import (
     _default_workers,
     _PARALLEL_MIN_SECONDS,
     format_elapsed,
+    format_eta,
+    format_day_hint,
     _validate_prefix,
     _validate_seed,
     _validate_hrp,
@@ -765,6 +767,46 @@ def test_expected_attempts():
     assert _expected_attempts("base58", 1, False) == 58
     assert _expected_attempts("bech32", 1, False) == 32
     assert _expected_attempts("hex", 2, True) == 16**4
+
+
+def test_format_day_hint_uses_half_day_steps():
+    assert format_day_hint(30) == ""
+    assert format_day_hint(86400 - 1) == ""          # just under a day
+    assert format_day_hint(86400) == " (~1 day)"
+    assert format_day_hint(86400 * 1.4) == " (~1.5 days)"
+    assert format_day_hint(86400 * 2.5) == " (~2.5 days)"
+    assert format_day_hint(86400 * 9.9) == " (~10 days)"
+    # Beyond ~10 days the estimate is too uncertain to state; withhold it.
+    assert format_day_hint(86400 * 10.5) == ""
+    assert format_day_hint(0) == ""
+    assert format_day_hint(-5) == ""
+    assert format_day_hint(float("inf")) == ""
+    assert format_day_hint(float("nan")) == ""
+
+
+def test_format_eta_appends_day_hint():
+    assert format_eta(30) == "30.0s"
+    assert format_eta(86400) == "24h 0m 0s (~1 day)"
+    assert format_eta(86400 * 2.5) == "60h 0m 0s (~2.5 days)"
+    # Under a day nothing is appended.
+    assert "(~" not in format_eta(3600)
+
+
+def test_progress_line_uses_eta_with_day_hint():
+    # A search expected to take a few days should show the day hint. 262,144
+    # attempts at 1/s is ~2.9 days - inside the window where the hint applies.
+    # (16**5 would be ~12 days, past the 10-day cutoff, where the hint is
+    # deliberately withheld as false precision.)
+    s = _format_progress(1, 1.0, 262_144)
+    assert "eta=" in s, s
+    assert "(~" in s, f"long ETA should carry a day hint: {s}"
+    assert "days" in s, s
+    # A sub-day ETA must NOT carry a hint.
+    short = _format_progress(1, 1.0, 16**4)   # ~18h
+    assert "(~" not in short, short
+    # Nor may a hopeless (>10 day) one.
+    absurd = _format_progress(1, 1.0, 16**6)
+    assert "(~" not in absurd, absurd
 
 
 def test_format_progress():

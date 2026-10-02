@@ -96,6 +96,50 @@
             font-weight: 600;
         }
         #progress { margin-top: 12px; }
+
+        /* Live telemetry: a titled 2x2 grid, green to read as running. */
+        #live-logs {
+            margin-top: 10px;
+            padding: 10px 12px;
+            border: 1px solid #1f6f33;
+            border-radius: 6px;
+            background: #0f1f14;
+        }
+        .live-logs-title {
+            color: #3fb950;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+        .live-logs-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px 16px;
+        }
+        .live-cell {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            min-width: 0;
+        }
+        .live-k {
+            color: #56d364;
+            font-size: 11px;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+        }
+        .live-v {
+            color: #7ee787;
+            font-family: 'SFMono-Regular', Consolas, monospace;
+            font-size: 13px;
+            overflow-wrap: anywhere;
+        }
+        /* Very narrow screens: one column keeps each value readable. */
+        @media (max-width: 420px) {
+            .live-logs-grid { grid-template-columns: 1fr; }
+        }
         #estimate { margin-top: 12px; }
         #results { margin-top: 24px; display: flex; flex-direction: column; gap: 16px; max-height: 60vh; overflow-y: auto; }
         .result-frame { padding: 20px; background: #0d1117; border: 1px solid #238636; border-radius: 8px; }
@@ -171,9 +215,20 @@
             </div>
 
             <p id="estimate" class="status-text"></p>
-            <p id="live-estimate" class="status-text" style="display: none; color: #3fb950;"></p>
             <div id="progress" class="hidden">
-                <p id="progress-text" class="status-text">Attempts: 0 | Rate: 0/s</p>
+                <!-- Live logs: one 2x2 grid, so the four figures scan as a block
+                     instead of a long pipe-separated line that wraps badly on
+                     narrow screens. Green to read as "this is live telemetry". -->
+                <div id="live-logs">
+                    <div class="live-logs-title">Live Logs:</div>
+                    <div class="live-logs-grid">
+                        <div class="live-cell"><span class="live-k">Attempts</span><span class="live-v" id="live-attempts">0</span></div>
+                        <div class="live-cell"><span class="live-k">Rate</span><span class="live-v" id="live-rate">0/s</span></div>
+                        <div class="live-cell"><span class="live-k">Progress</span><span class="live-v" id="live-progress">0.00%</span></div>
+                        <div class="live-cell"><span class="live-k">ETA</span><span class="live-v" id="live-eta">-</span></div>
+                    </div>
+                </div>
+                <p id="progress-text" class="status-text" aria-live="polite"></p>
             </div>
             <div id="reserved-notice" class="reserved-notice" style="display: none;"></div>
         </div>
@@ -315,6 +370,29 @@
             if (h > 0) out += h + 'h ';
             if (h > 0 || m > 0) out += m + 'm ';
             return (out + s + 's').trim();
+        }
+
+        // Approximate whole/half-day suffix for long waits, e.g. "(~1 day)",
+        // "(~2.5 days)". "116h 25m" is precise but hard to judge at a glance;
+        // this is the scale that tells someone whether to wait or walk away.
+        // Below a day there is nothing useful to add. At or beyond ~10 days the
+        // estimate is too uncertain to be meaningful, so it is withheld rather
+        // than stated as false precision.
+        function formatDayHint(seconds) {
+            if (typeof seconds !== 'number' || !isFinite(seconds) || seconds <= 0) {
+                return '';
+            }
+            const days = seconds / 86400;
+            if (days < 1) return '';
+            if (days >= 10) return '';
+            const rounded = Math.round(days * 2) / 2;
+            const label = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+            return ' (~' + label + (rounded === 1 ? ' day' : ' days') + ')';
+        }
+
+        // Human-readable duration with an optional "(~N days)" hint appended.
+        function formatEta(seconds) {
+            return formatElapsed(seconds) + formatDayHint(seconds);
         }
 
         // The only characters an Ed25519 public key can contain: a 32-byte key is
@@ -528,8 +606,8 @@
             estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (' + numWorkers + ' ' + workerLabel + ', ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel + ')';
         }
 
-        // Single formatter for the live progress line, shared by the status text and
-        // the live estimate so the two can never disagree. `rateForDisplay`
+        // Single formatter for the live progress line. The status line and the live
+        // estimate share it so the two can never disagree; `rateForDisplay`
         // lets the caller substitute the EMA-smoothed rate for the headline
         // figure while progress maths stays on the raw sample.
         //
@@ -568,11 +646,24 @@
                 + (eta ? ' | ' + eta : '');
         }
 
-        // The ETA clause on its own, for the secondary "Live estimate" line.
+        // The ETA clause on its own, used by the CLI-equivalent readout and tests.
         function progressEtaClause(attempts, rate, expected) {
             const line = formatProgressLine(attempts, rate, expected);
             const parts = line.split('|').map(s => s.trim());
             return parts.length > 3 ? parts.slice(3).join(' | ') : '';
+        }
+
+        // Clear the live-logs grid so a new search never shows the previous
+        // run's attempts/rate/ETA for a moment before the first progress event.
+        function resetLiveLogs() {
+            const set = (id, text) => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = text;
+            };
+            set('live-attempts', '0');
+            set('live-rate', '0/s');
+            set('live-progress', '0.00%');
+            set('live-eta', '-');
         }
 
         function setFormDisabled(disabled) {
@@ -624,10 +715,9 @@
             const matchSuffix = suffix.length > 0;
             const numWorkers = detectOptimalWorkers();
 
-            document.getElementById('live-estimate').textContent = '';
-            document.getElementById('live-estimate').style.display = 'none';
             window.liveEstimateShown = false;
             resetRateSmoothing();
+            resetLiveLogs();
             const progressEl = document.getElementById('progress-text');
             progressEl.textContent = 'Starting...';
             progressEl.className = 'status-text';
@@ -902,23 +992,37 @@
                         smoothRate(rate);
                         const liveRateStr = Math.round(emaRate).toLocaleString() + '/s';
 
-                        document.getElementById('progress-text').textContent =
-                            formatProgressLine(attempts, rate, expected, emaRate);
+                        // Feed the 2x2 live-logs grid. This replaces the old
+                        // "Live estimate: ETA ... at .../s" line, which repeated
+                        // the rate and ETA that the grid already shows.
+                        const setLive = (id, text) => {
+                            const el = document.getElementById(id);
+                            if (el) el.textContent = text;
+                        };
+                        setLive('live-attempts', attempts.toLocaleString());
+                        setLive('live-rate', liveRateStr);
 
-                        // Update live estimate continuously (not just first time)
-                        const liveEstimateEl = document.getElementById('live-estimate');
-                        if (liveEstimateEl) {
-                            const etaPart = progressEtaClause(attempts, rate, expected);
-                            if (attempts > 0 && etaPart) {
-                                liveEstimateEl.textContent = 'Live estimate: '
-                                    + etaPart + ' at ' + liveRateStr;
-                                liveEstimateEl.style.display = 'block';
-                            } else if (attempts > 0) {
-                                liveEstimateEl.textContent = 'Live estimate: calculating...';
-                                liveEstimateEl.style.display = 'block';
-                            } else {
-                                liveEstimateEl.style.display = 'none';
-                            }
+                        const haveExpected = isFinite(expected) && expected > 0;
+                        const pct = haveExpected ? attempts / expected * 100 : 0;
+                        setLive('live-progress',
+                            (pct > 100 ? '+' : '') + pct.toFixed(2) + '%');
+
+                        const remaining = (haveExpected && rate > 0)
+                            ? (expected - attempts) / rate
+                            : NaN;
+                        if (isFinite(remaining) && rate > 0 && remaining > 0) {
+                            setLive('live-eta', formatEta(remaining));
+                        } else if (isFinite(remaining) && rate > 0) {
+                            // Past the expected mean there is no meaningful
+                            // time remaining; say how far over we are instead
+                            // of leaving a stale ETA on screen.
+                            const pctOver = attempts > 0
+                                ? (-remaining) / (attempts / rate) * 100
+                                : 0;
+                            setLive('live-eta',
+                                pctOver.toFixed(0) + '% past expected');
+                        } else {
+                            setLive('live-eta', 'calculating...');
                         }
                     } else if (e.data.type === 'found') {
                         clearTimeout(initTimeouts[i]);
@@ -985,8 +1089,6 @@
             document.getElementById('stop-btn').disabled = true;
             document.getElementById('progress').classList.add('hidden');
             // Drop the previous run's live figures; updateEstimate() redraws static ones.
-            document.getElementById('live-estimate').textContent = '';
-            document.getElementById('live-estimate').style.display = 'none';
             window.liveEstimateShown = false;
             resetRateSmoothing();
             updateEstimate();
@@ -1033,9 +1135,6 @@
             document.getElementById('prefix').value = '';
             document.getElementById('suffix').value = '';
             document.getElementById('estimate').textContent = '';
-            const live = document.getElementById('live-estimate');
-            live.textContent = '';
-            live.style.display = 'none';
             window.liveEstimateShown = false;
             document.getElementById('progress').classList.add('hidden');
             starting = false;

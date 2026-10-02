@@ -400,6 +400,29 @@ def format_elapsed(seconds: float) -> str:
     return (out + f"{s}s").strip()
 
 
+def format_day_hint(seconds: float) -> str:
+    """Approximate whole/half-day suffix for long waits, e.g. ``(~2.5 days)``.
+
+    "127h 24m" is precise but hard to judge at a glance; the day hint is the
+    scale that tells someone whether to wait or walk away. Nothing is added
+    below a day, and beyond ~10 days the estimate is too uncertain to state as
+    false precision, so it is withheld. Mirrors formatDayHint() in the page.
+    """
+    if seconds != seconds or seconds in (float("inf"), float("-inf")) or seconds <= 0:
+        return ""
+    days = seconds / 86400
+    if days < 1 or days >= 10:
+        return ""
+    rounded = round(days * 2) / 2
+    label = str(int(rounded)) if rounded == int(rounded) else f"{rounded:.1f}"
+    return f" (~{label} day)" if rounded == 1 else f" (~{label} days)"
+
+
+def format_eta(seconds: float) -> str:
+    """Human duration with the day hint appended."""
+    return format_elapsed(seconds) + format_day_hint(seconds)
+
+
 def _format_progress(attempts: int, elapsed: float, expected_attempts: int) -> str:
     """Single stderr progress-line format shared by all search paths.
 
@@ -419,7 +442,7 @@ def _format_progress(attempts: int, elapsed: float, expected_attempts: int) -> s
         # infinity; say so instead of implying "no time remaining".
         eta = " eta=unknown"
     elif remaining > 0:
-        eta = f" eta={format_elapsed(remaining)}"
+        eta = f" eta={format_eta(remaining)}"
     else:
         # Past the mean the naive remaining figure is negative and meaningless,
         # and dropping it silently left the user with no sense of progress.

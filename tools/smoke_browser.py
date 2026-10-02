@@ -162,6 +162,37 @@ def main() -> int:
                 assert "past expected" in over, f"overshoot not explained: {over!r}"
                 assert "ETA: -" not in over, f"negative ETA rendered: {over!r}"
 
+                # Long waits carry an approximate day hint, in half-day steps.
+                assert page.evaluate("() => formatEta(86400)") == "24h 0m 0s (~1 day)", (
+                    "one-day ETA hint"
+                )
+                assert page.evaluate("() => formatEta(86400 * 2.5)") == (
+                    "60h 0m 0s (~2.5 days)"
+                ), "half-day ETA hint"
+                assert page.evaluate("() => formatEta(3600)") == "1h 0m 0s", (
+                    "sub-day ETA must carry no hint"
+                )
+
+                # The live panel is a titled 2x2 grid, and the redundant
+                # "Live estimate: ... at .../s" line must be gone.
+                assert page.text_content(".live-logs-title").strip() == "Live Logs:", (
+                    "live panel title"
+                )
+                for cell_id in ("live-attempts", "live-rate", "live-progress", "live-eta"):
+                    assert page.query_selector(f"#{cell_id}"), f"missing #{cell_id}"
+                assert page.query_selector("#live-estimate") is None, (
+                    "redundant live-estimate line still present"
+                )
+                cols = page.evaluate(
+                    "() => getComputedStyle(document.querySelector('.live-logs-grid'))"
+                    ".gridTemplateColumns.split(' ').length"
+                )
+                assert cols == 2, f"live logs must be 2 columns, got {cols}"
+                colour = page.evaluate(
+                    "() => getComputedStyle(document.querySelector('#live-rate')).color"
+                )
+                assert colour == "rgb(126, 231, 135)", f"live values should be green: {colour}"
+
                 # An undecodable stored history must not be silently overwritten by the
                 # next mined key: that blob may be the only copy of the user's
                 # existing keys.

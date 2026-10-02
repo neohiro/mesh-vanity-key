@@ -252,7 +252,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, resetLiveLogs, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -759,6 +759,64 @@ check('progressEtaClause: returns only the trailing clause', () => {
     ok(/past expected/.test(api.progressEtaClause(1500, 10, 1000)),
         `overshoot clause: ${api.progressEtaClause(1500, 10, 1000)}`);
     eq(api.progressEtaClause(0, 0, 0), '', 'no clause when there is nothing to report');
+});
+
+check('formatDayHint: half-day steps, and withheld when meaningless', () => {
+    eq(api.formatDayHint(30), '', 'under a day: nothing added');
+    eq(api.formatDayHint(86400 - 1), '', 'just under a day: nothing added');
+    eq(api.formatDayHint(86400), ' (~1 day)', 'exactly one day');
+    eq(api.formatDayHint(86400 * 1.4), ' (~1.5 days)', 'half-day rounding');
+    eq(api.formatDayHint(86400 * 2.5), ' (~2.5 days)', 'two and a half days');
+    eq(api.formatDayHint(86400 * 9.9), ' (~10 days)', 'just inside the window');
+    eq(api.formatDayHint(86400 * 10.5), '', 'past 10 days: withheld as false precision');
+    eq(api.formatDayHint(0), '', 'zero');
+    eq(api.formatDayHint(-5), '', 'negative');
+    eq(api.formatDayHint(NaN), '', 'NaN');
+    eq(api.formatDayHint(Infinity), '', 'infinite');
+});
+
+check('formatEta: human duration with the day hint appended', () => {
+    eq(api.formatEta(30), '30.0s');
+    eq(api.formatEta(86400), '24h 0m 0s (~1 day)');
+    eq(api.formatEta(86400 * 2.5), '60h 0m 0s (~2.5 days)');
+    eq(api.formatEta(3600), '1h 0m 0s', 'sub-day gets no hint');
+});
+
+check('live logs: a titled 2x2 grid carries the four figures', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+
+    ok(html.includes('Live Logs:'), 'the panel must be titled "Live Logs:"');
+
+    // Four cells, each with a label and a value element.
+    for (const id of ['live-attempts', 'live-rate', 'live-progress', 'live-eta']) {
+        ok(html.includes(`id="${id}"`), `missing live-log value element #${id}`);
+    }
+    for (const label of ['Attempts', 'Rate', 'Progress', 'ETA']) {
+        ok(new RegExp(`class="live-k">${label}<`).test(html), `missing label ${label}`);
+    }
+
+    // Laid out as a two-column grid.
+    ok(/\.live-logs-grid\s*\{[^}]*grid-template-columns:\s*1fr 1fr/.test(html),
+        'live logs must be a 2x2 grid');
+
+    // Green styling.
+    ok(/\.live-v\s*\{[^}]*color:\s*#7ee787/.test(html),
+        'live values should be green');
+
+    // The redundant "Live estimate: ... at .../s" line is gone: it repeated
+    // the rate and ETA the grid already shows. Asserted against rendered
+    // output, not raw text, since comments legitimately name what was removed.
+    ok(!/id="live-estimate"/.test(html), 'redundant live-estimate element must be removed');
+    ok(!/>Live estimate/.test(html), 'no "Live estimate:" label should be rendered');
+    ok(!/textContent = 'Live estimate/.test(html), 'nothing should write that label');
+});
+
+check('resetLiveLogs clears every cell for a new search', () => {
+    api.resetLiveLogs();
+    eq(getElementById('live-attempts').textContent, '0', 'attempts reset');
+    eq(getElementById('live-rate').textContent, '0/s', 'rate reset');
+    eq(getElementById('live-progress').textContent, '0.00%', 'progress reset');
+    eq(getElementById('live-eta').textContent, '-', 'eta reset');
 });
 
 check('formatElapsed: human units for long searches', () => {
