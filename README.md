@@ -170,6 +170,7 @@ Regression guards:
 |---|---|
 | `node tools/verify_worker_math.mjs` | the byte-walk is arithmetically identical to the previous BigInt/hex implementation, including 2²⁵⁶ carry and wraparound |
 | `node tools/bench_worker.mjs <worker.js>` | wrapper overhead with a stubbed (free) keygen; must stay far above the keygen cost. Runs three trials and reports the best, so JIT warm-up or a descheduled shared vCPU cannot fail an otherwise healthy run — a real regression drops every trial and still fails hard |
+| `node tools/bench_worker_scaling.mjs` | aggregate throughput vs worker count, using real OS threads. Corroborates the scaling figure in "Worker scaling" below, but is **not** a substitute for a browser run — see the note there for why the two differ |
 
 > **Careful:** never write `if (++bytes[i] !== 0)`. Incrementing a `Uint8Array`
 > element returns the *unclamped* value (`256`, not `0`), so the carry test never
@@ -219,6 +220,22 @@ assumed:
 Two effects explain the shortfall: SMT siblings sharing one physical core do not
 get independent execution units (so 4→8 threads buys far less than 2x), and the
 workers contend for memory bandwidth.
+
+> **Worth re-measuring before trusting the 2.3x.** `node tools/bench_worker_scaling.mjs`
+> measures the same shape with real OS threads. On the same class of host
+> (verified: i3-10105, 4 physical / 8 logical — the same topology as the
+> reference host) it reaches **~6.4x at 8 threads**, not 2.3x.
+>
+> That is not a contradiction, and the constant has deliberately **not** been
+> changed on the strength of it. The probe has no main thread to keep responsive,
+> no WASM instance shared between workers, and no `postMessage` per progress
+> report. So the gap points at contention on something *shared* in the browser —
+> most plausibly the UI thread — rather than at the crypto. Re-measure with
+> `tools/bench_real_browser.mjs` in a real browser and update the constant, the
+> page's `MEASUREMENT BASIS` comment and this table together.
+>
+> The number is user-visible on every estimate: raising it shortens every ETA,
+> lowering it lengthens them.
 
 | Workers | Aggregate speedup | Basis |
 |---|---|---|

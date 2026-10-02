@@ -49,6 +49,14 @@ jobs:
       - name: Page/worker JS behaviour tests
         run: node tools/test_page_js.mjs /tmp/inline-js/main.js /tmp/inline-js/worker.js
 
+      # Validate the JS the smoke test builds. Python concatenates adjacent
+      # string literals with no newline, so a `//` comment in one of those
+      # snippets eats the rest of the function and Playwright reports
+      # "Unexpected end of input" - only once a browser is running. Checking it
+      # here turns a red browser job into a fast, local failure.
+      - name: Validate smoke-test JS snippets
+        run: python tools/check_smoke_snippets.py
+
       # Proves the mining loop's arithmetic is exactly equivalent to the
       # BigInt/hex reference (including 2**256 carry propagation).
       - name: Worker math equivalence

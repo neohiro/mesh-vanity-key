@@ -840,6 +840,24 @@
         // shortfall has two causes: SMT siblings share one core's execution
         // units, and the workers contend for memory bandwidth.
         //
+        // UNVERIFIED SINCE: tools/bench_worker_scaling.mjs was added to make
+        // this re-measurable, and it is worth reading before trusting the 2.3x.
+        // On the same class of host (verified: i3-10105, 4 physical / 8 logical
+        // - the same topology as the reference host) N plain OS threads doing
+        // comparable ALU + table work reach ~6.4x at 8 threads, not 2.3x. That
+        // gap is not a contradiction: the probe has no main thread to keep
+        // responsive, no WASM instance shared between workers, and no
+        // postMessage per progress report. It suggests the browser figure is
+        // held down by contention on something shared - most likely the UI
+        // thread - rather than by the crypto itself.
+        //
+        // The constant is deliberately NOT changed on the strength of that. A
+        // Node thread pool cannot reproduce Web Worker scaling, so editing the
+        // number from it would be guessing. Re-measure in a real browser
+        // (tools/bench_real_browser.mjs) and update both the constant and this
+        // comment together. Raising it makes every ETA shorter; lowering it
+        // makes them longer, so this number is user-visible on every estimate.
+        //
         // Only the 8-thread end point was measured directly, so intermediate
         // points come from a power-law fit anchored to that measurement:
         //     scale(n) = n ** (log(2.3) / log(8))   -> exponent ~0.4005
@@ -1371,7 +1389,22 @@ function detectOptimalWorkers() {
                 }, 10000);
                 initTimeouts.push(initTimeout);
 
+                // A worker event is only meaningful while that worker belongs to
+                // the CURRENT search.
+                //
+                // Worker.terminate() is not synchronous with events already
+                // queued, so a worker from a finished search can still deliver
+                // onerror/onmessage after the user has stopped it and started
+                // another. Without this guard, that stale onerror ran
+                // terminateAllWorkers() against the *new* search: it killed the
+                // live workers, emptied initTimeouts and so disarmed the new
+                // search's initialization watchdogs, all while reporting an
+                // error about a worker that no longer existed. The init-timeout
+                // callback below already had this check; these two did not.
+                const isCurrent = () => workers.includes(w);
+
                 w.onerror = function(e) {
+                    if (!isCurrent()) return;      // stale worker, ignore
                     clearOwnInitTimeout();
                     mining = false;
                     clearStatusText();
@@ -1384,6 +1417,7 @@ function detectOptimalWorkers() {
                 };
 
                 w.onmessage = function(e) {
+                    if (!isCurrent()) return;      // stale worker, ignore
                     console.log('[Main] Received message from worker ' + i + ':', e.data.type, e.data);
                 if (e.data.type === 'ready') {
                     clearOwnInitTimeout();
@@ -1650,20 +1684,34 @@ function detectOptimalWorkers() {
             const hi = max + pad;
             const range = (hi - lo) || 1;
 
-            // X is real elapsed time across the window, not sample index, so
-            // the trace's shape reflects how the rate actually moved over the
-            // period shown and not merely how many reports arrived.
+            // X is real elapsed time across the window, so the trace's shape
+            // reflects how the rate actually moved over the period shown.
+            //
+            // The fallback matters more than it looks. Every sample in a burst
+            // can share one millisecond - reports are throttled per worker
+            // (REPORT_EVERY_MS) so several workers tick together, and a short
+            // search can post its only two samples in the same millisecond.
+            // tSpan is then 0, and a naive "avoid divide-by-zero" fallback that
+            // pinned every point to the right edge collapsed the whole trace
+            // into a single vertical line: present, correctly sized, and
+            // completely useless. Sampling by index instead still draws a
+            // readable trend, which is the honest reading when there is no
+            // time information to spread across.
             const tNewest = rateGraph[rateGraph.length - 1].t;
             const tOldest = rateGraph[0].t;
             const tSpan = tNewest - tOldest;
-            const xAt = (s) => (tSpan > 0 ? ((s.t - tOldest) / tSpan) * w : w);
+            const xAt = tSpan > 0
+                ? (s) => ((s.t - tOldest) / tSpan) * w
+                : (s, i) => (i / (rateGraph.length - 1)) * w;
             const yAt = (v) => h - ((v - lo) / range) * h;
 
             // Filled area under the trace first, so the stroke reads as an edge
             // on top of a soft mass rather than a bare line.
             ctx.beginPath();
             ctx.moveTo(0, h);
-            for (const s of rateGraph) ctx.lineTo(xAt(s), yAt(s.v));
+            for (let i = 0; i < rateGraph.length; i++) {
+                ctx.lineTo(xAt(rateGraph[i], i), yAt(rateGraph[i].v));
+            }
             ctx.lineTo(w, h);
             ctx.closePath();
             ctx.fillStyle = 'rgba(63, 185, 80, 0.16)';
@@ -1672,7 +1720,7 @@ function detectOptimalWorkers() {
             ctx.beginPath();
             for (let i = 0; i < rateGraph.length; i++) {
                 const s = rateGraph[i];
-                const x = xAt(s);
+                const x = xAt(s, i);
                 const y = yAt(s.v);
                 if (i === 0) ctx.moveTo(x, y);
                 else ctx.lineTo(x, y);
@@ -1683,9 +1731,10 @@ function detectOptimalWorkers() {
             ctx.stroke();
 
             // A dot on the newest sample, so "now" is identifiable on the trace.
-            const newest = rateGraph[rateGraph.length - 1];
+            const newestIndex = rateGraph.length - 1;
+            const newest = rateGraph[newestIndex];
             ctx.beginPath();
-            ctx.arc(xAt(newest), yAt(newest.v), 2, 0, Math.PI * 2);
+            ctx.arc(xAt(newest, newestIndex), yAt(newest.v), 2, 0, Math.PI * 2);
             ctx.fillStyle = '#7ef7a0';
             ctx.fill();
         }

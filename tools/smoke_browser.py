@@ -127,6 +127,112 @@ def main() -> int:
                     f"the rate graph must not intercept clicks, got {graph['pointerEvents']}"
                 )
 
+                # Layout alone does not prove the graph works. A canvas that is
+                # present, sized and positioned can still be blank - which is
+                # exactly the failure a "does the element exist" check cannot
+                # see, and exactly the one nobody has looked for.
+                #
+                # Rather than assert on a screenshot (a baseline that breaks on
+                # any unrelated pixel, and that nobody here can regenerate),
+                # read the pixels back and assert ink is present. The trace is
+                # drawn only once there are at least two samples, and a 1-char
+                # search can finish inside the first batch, so samples are fed
+                # explicitly - that also makes the assertion independent of how
+                # fast the host is.
+                #
+                # NOTE: no `//` comments in this snippet. Python concatenates
+                # adjacent string literals with no newline between them, so a
+                # line comment would swallow everything after it - including the
+                # closing braces - and the whole arrow function would arrive as
+                # one unterminated comment. Block comments are used instead.
+                painted = page.evaluate(
+                    "() => {"
+                    "  const panel = document.getElementById('progress');"
+                    "  const wasHidden = panel.classList.contains('hidden');"
+                    "  if (wasHidden) panel.classList.remove('hidden');"
+                    # pushRateGraphSample is a top-level declaration in a
+                    # classic (non-module) script, so it is a window global.
+                    # Checked explicitly so a failure says why, rather than
+                    # surfacing as a bare ReferenceError.
+                    "  if (typeof pushRateGraphSample !== 'function') {"
+                    "    if (wasHidden) panel.classList.add('hidden');"
+                    "    return { error: 'pushRateGraphSample is not a global' };"
+                    "  }"
+                    # The JS block comment below has to live inside a Python string
+                    # literal, or Python tries to parse `/*` as an expression.
+                    "  /* Date.now is frozen so every sample carries the SAME"
+                    "     timestamp. That is deliberate and it is the regression:"
+                    "     with no time spread the x-axis has nothing to scale by,"
+                    "     and an earlier version pinned every point to the right"
+                    "     edge, collapsing the trace into a vertical line."
+                    "     Freezing the clock makes that degenerate path"
+                    "     deterministic, so the check cannot depend on how fast the"
+                    "     host happens to be. */"
+                    "  const realNow = Date.now;"
+                    "  const frozen = realNow.call(Date);"
+                    "  Date.now = () => frozen;"
+                    "  try {"
+                    "    for (let i = 0; i < 12; i++) {"
+                    "      pushRateGraphSample(1000 + (i % 4) * 300);"
+                    "    }"
+                    "  } finally {"
+                    "    Date.now = realNow;"
+                    "  }"
+                    "  const c = document.getElementById('rate-graph');"
+                    "  const ctx = c.getContext('2d');"
+                    "  const d = ctx.getImageData(0, 0, c.width, c.height).data;"
+                    "  const W = c.width;"
+                    "  let inked = 0, total = 0;"
+                    # Also has to be inside a Python string literal.
+                    "  /* The stroke is drawn at 0.85 alpha and the fill at 0.16,"
+                    "     so a high-alpha threshold isolates the trace line itself."
+                    "     That distinction is what makes the span check meaningful:"
+                    "     a regression that collapsed the trace into a vertical line"
+                    "     at the right edge still filled a large wedge of the canvas,"
+                    "     so total coverage alone would have passed while showing"
+                    "     nothing useful. */"
+                    "  const strokeCols = new Set();"
+                    "  for (let i = 0; i < d.length; i += 4) {"
+                    "    total++;"
+                    "    if (d[i + 3] > 0) inked++;"
+                    "    if (d[i + 3] > 150) strokeCols.add(Math.floor((i / 4) / W));"
+                    "  }"
+                    "  if (wasHidden) panel.classList.add('hidden');"
+                    "  return {"
+                    "    inked, total, ratio: total ? inked / total : 0,"
+                    "    strokeCols: strokeCols.size,"
+                    "  };"
+                    "}"
+                )
+                assert not painted.get("error"), (
+                    f"could not exercise the rate graph: {painted['error']}"
+                )
+                assert painted["total"] > 0, (
+                    "the rate graph canvas has no pixels to read; backing store "
+                    f"is unsized ({painted['total']})"
+                )
+                assert painted["inked"] > 0, (
+                    "the rate graph canvas is blank after drawing a varying "
+                    "series - present and sized, but nothing was painted"
+                )
+                # A trace plus a soft fill should cover a real but minority
+                # share of the box. A near-full fill means the scale or the
+                # background is wrong; near-zero means the line is too faint.
+                assert 0.01 < painted["ratio"] < 0.95, (
+                    "the rate graph coverage is implausible: "
+                    f"{painted['inked']}/{painted['total']} = {painted['ratio']:.3f}"
+                )
+                # The decisive check. Coverage alone is not enough: a trace
+                # collapsed into a single vertical line still fills a wide wedge
+                # and would sail past the ratio test while conveying nothing.
+                # The stroke line must be spread across the width, which is what
+                # makes this a graph rather than a smear at the right edge.
+                assert painted["strokeCols"] >= 20, (
+                    "the rate trace must span the canvas horizontally, but its "
+                    f"stroke covers only {painted['strokeCols']} column(s) - the "
+                    "graph has collapsed to a vertical line"
+                )
+
                 heading = page.text_content(".result-frame h2")
                 assert heading and "Key 1 Found!" in heading, f"unexpected heading: {heading!r}"
 

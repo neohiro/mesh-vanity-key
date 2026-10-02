@@ -75,6 +75,7 @@ function getElementById(id) {
 }
 
 const alerts = [];
+const confirms = [];
 const storage = new Map();
 
 const documentMock = {
@@ -122,15 +123,22 @@ const localStorageMock = {
 const workerStats = { created: 0, terminated: 0, live: 0, revokedUrls: 0 };
 
 const urlStats = { objectURLs: new Set() };
-const URLMock = {
-    createObjectURL(blob) {
-        const u = `blob:mock/${urlStats.objectURLs.size}`;
-        urlStats.objectURLs.add(u);
-        return u;
-    },
-    revokeObjectURL(u) {
-        if (urlStats.objectURLs.delete(u)) workerStats.revokedUrls++;
-    },
+// Callable as a constructor as well as a namespace: the page builds a real URL
+// (`new URL('libsodium.js', location.href)`) when it assembles the worker
+// source, so a plain object left `URL is not a constructor` and every
+// mining-lifecycle test failed before reaching its assertions.
+function URLMock(input, base) {
+    const href = base ? new URL(String(input), String(base)).href : String(input);
+    this.href = href;
+    this.toString = () => href;
+}
+URLMock.createObjectURL = function (blob) {
+    const u = `blob:mock/${urlStats.objectURLs.size}`;
+    urlStats.objectURLs.add(u);
+    return u;
+};
+URLMock.revokeObjectURL = function (u) {
+    if (urlStats.objectURLs.delete(u)) workerStats.revokedUrls++;
 };
 
 // Minimal in-memory IndexedDB: enough for the obfuscation secret store. Tests
@@ -206,6 +214,59 @@ function makeIndexedDB() {
     };
 }
 
+// Timer bookkeeping.
+//
+// Mining arms one init-timeout watchdog PER WORKER, and the bug this exists to
+// catch was a stale worker clearing the wrong one. Counting live timers cannot
+// see that: clearTimeout() on an already-cleared handle is a no-op and leaves
+// the array length unchanged, so a cross-search clear is invisible to a length
+// check. Recording every handle as it is armed, and every handle passed to
+// clearTimeout, makes it directly observable.
+const realSetTimeout = globalThis.setTimeout;
+const realClearTimeout = globalThis.clearTimeout;
+const timerLog = { armed: [], cleared: [] };
+function armTrackingTimeouts() {
+    sandbox.setTimeout = (fn, ms, ...rest) => {
+        const h = realSetTimeout(fn, ms, ...rest);
+        timerLog.armed.push(h);
+        return h;
+    };
+    sandbox.clearTimeout = (h) => {
+        if (h !== undefined && h !== null) timerLog.cleared.push(h);
+        return realClearTimeout(h);
+    };
+    sandbox.__timerLog = timerLog;
+}
+
+// Controllable worker pool. The page assigns onmessage/onerror to each worker
+// and calls terminate(); the pool keeps them addressable so a test can deliver
+// an event to a worker the page has ALREADY terminated, which is exactly the
+// ordering that used to disarm a later search's watchdog.
+const workerPool = [];
+const WorkerMock = class {
+    constructor(url) {
+        this.url = url;
+        this.terminated = false;
+        this.index = workerPool.length;
+        this.posted = [];
+        workerPool.push(this);
+        workerStats.created++;
+        workerStats.live++;
+    }
+    postMessage(msg) { this.posted.push(msg); }
+    terminate() {
+        if (!this.terminated) {
+            this.terminated = true;
+            workerStats.terminated++;
+            workerStats.live--;
+        }
+    }
+    // --- test-only helpers ---
+    deliver(data) { if (this.onmessage) this.onmessage({ data }); }
+    raiseError(message) { if (this.onerror) this.onerror({ message }); }
+    hasHandler(kind) { return typeof this[kind] === 'function'; }
+};
+
 const sandbox = {
     document: documentMock,
     navigator: navigatorMock,
@@ -213,6 +274,9 @@ const sandbox = {
     console,
     // Validation failures report via alert(); capture instead of blocking.
     alert(msg) { alerts.push(String(msg)); },
+    // Auto-accept: the found path asks before persisting a key, and an
+    // unstubbed confirm() throws in a vm context.
+    confirm() { confirms.push(true); return true; },
     localStorage: localStorageMock,
     performance,
     setTimeout,
@@ -246,25 +310,11 @@ const sandbox = {
     btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
     atob: (s) => Buffer.from(s, 'base64').toString('binary'),
     indexedDB: makeIndexedDB(),
-    Worker: class {
-        constructor(url) {
-            this.url = url;
-            this.terminated = false;
-            workerStats.created++;
-            workerStats.live++;
-        }
-        postMessage() {}
-        terminate() {
-            if (!this.terminated) {
-                this.terminated = true;
-                workerStats.terminated++;
-                workerStats.live--;
-            }
-        }
-    },
+    Worker: WorkerMock,
 };
 sandbox.globalThis = sandbox;
 sandbox.self = sandbox;
+armTrackingTimeouts();
 
 // Expose the script's top-level bindings for assertions. The page script uses
 // classic (non-module) top-level function declarations, so a function-scoped
@@ -1189,15 +1239,224 @@ check('status line: nothing writes it behind setStatusText()', () => {
         + `at least as often as it hides it - ${short.join('; ')}`);
 });
 
+// ---- Behavioural mining lifecycle -------------------------------------------
+//
+// These drive the REAL startMining/stopMining/resetForm handlers against the
+// controllable worker pool, rather than asserting on source text. An executed
+// test is what actually pins behaviour: it still fails if the logic changes in a
+// way the static checks below would not notice. The static checks are kept as a
+// cheap backstop.
+
+function primeForm() {
+    getElementById('prefix').value = 'ab';
+    getElementById('suffix').value = '';
+    workerPool.length = 0;
+}
+
+// startMining() awaits awaitSodium(), which throws unless a libsodium global is
+// present. The sandbox deliberately has none (a test above asserts that), so
+// install one for the duration of a lifecycle check and remove it afterwards,
+// leaving the rest of the suite's assumptions intact.
+async function withSodium(fn) {
+    const stub = {
+        ready: Promise.resolve(),
+        crypto_sign_seed_keypair(seed) {
+            const pk = new Uint8Array(32);
+            pk[0] = (seed[0] || 0) ^ 0xab;
+            pk[31] = seed[31] & 0xff;
+            return { publicKey: pk, privateKey: new Uint8Array(64) };
+        },
+    };
+    sandbox.libsodium = stub;
+    sandbox.sodium = stub;
+    try {
+        await fn();
+    } finally {
+        delete sandbox.libsodium;
+        delete sandbox.sodium;
+    }
+}
+
+await asyncCheck('startMining arms exactly one init watchdog per worker', async () => {
+    await withSodium(async () => {
+        primeForm();
+        await api.startMining();
+        ok(api.miningState(), 'mining should be active after startMining');
+        const n = workerPool.length;
+        ok(n >= 1, `expected at least one worker, created ${n}`);
+        eq(api.initTimeoutCount(), n, 'one init watchdog per worker must be armed');
+        eq(workerStats.live, n, 'every created worker must be live');
+        await api.stopMining();
+        eq(workerStats.live, 0, 'stopMining must terminate every worker');
+        eq(api.initTimeoutCount(), 0, 'and clear every watchdog');
+    });
+});
+
+await asyncCheck('stopMining retires the status and hides the panel', async () => {
+    await withSodium(async () => {
+        primeForm();
+        await api.startMining();
+        api.setStatusText('Starting...');
+        await api.stopMining();
+        eq(api.getStatusText(), '', 'the status text must be empty after stop');
+        eq(api.getStatusHidden(), true, 'and the line must be hidden, not left blank');
+        ok(getElementById('progress').classList.contains('hidden'),
+            'the panel must be hidden after stop');
+        eq(api.miningState(), false, 'mining must be inactive');
+    });
+});
+
+await asyncCheck('a found event terminates every worker and clears the panel', async () => {
+    await withSodium(async () => {
+        primeForm();
+        await api.startMining();
+        const n = workerPool.length;
+        api.setStatusText('Starting...');
+        // Deliver 'found' from the first worker, as a short search would. This is
+        // the path that fires before any 'progress' message, which is why the
+        // status has to be retired here too.
+        workerPool[0].deliver({
+            type: 'found',
+            publicKey: 'ab' + '0'.repeat(62),
+            privateKey: 'c'.repeat(64),
+            attempts: 3,
+            elapsed: 0.01,
+        });
+        eq(api.miningState(), false, 'mining must stop on found');
+        eq(workerStats.live, 0, `all ${n} workers must be terminated on found`);
+        eq(api.initTimeoutCount(), 0, 'every watchdog must be cleared on found');
+        eq(api.getStatusText(), '', 'no stale status after found');
+        ok(getElementById('progress').classList.contains('hidden'),
+            'the panel must be hidden after found');
+        api.clearHistory();
+    });
+});
+
+await asyncCheck('a stale worker cannot disarm the next search watchdog', async () => {
+    await withSodium(async () => {
+        // The regression. Worker handlers used to do
+        // `clearTimeout(initTimeouts[i])`, indexing a shared array that
+        // terminateAllWorkers() empties and the next search refills. A late event
+        // from an already-terminated worker therefore cleared the NEW search's
+        // watchdog at the same index, silently disarming the "failed to
+        // initialize" alert so a genuinely hung worker never surfaces.
+        primeForm();
+    
+        // --- search 1 ---
+        timerLog.armed.length = 0;
+        timerLog.cleared.length = 0;
+        await api.startMining();
+        const first = workerPool.slice();
+        ok(first.length >= 1, 'search 1 must create workers');
+        await api.stopMining();                  // workers terminated, timers cleared
+        eq(api.initTimeoutCount(), 0, 'search 1 watchdogs cleared on stop');
+    
+        // --- search 2 ---
+        const armedBefore = timerLog.armed.length;
+        await api.startMining();
+        const search2Handles = timerLog.armed.slice(armedBefore);
+        ok(search2Handles.length >= 1, 'search 2 must arm its own watchdogs');
+    
+        // A worker from the FINISHED search fires late, after being terminated.
+        // That is the real ordering: Worker.terminate() is not synchronous with
+        // events already queued.
+        for (const w of first) {
+            ok(w.terminated, 'search 1 workers must already be terminated');
+            if (w.hasHandler('onerror')) w.raiseError('late failure from a dead worker');
+            if (w.hasHandler('onmessage')) {
+                w.deliver({ type: 'progress', attempts: 1, rate: 1, expectedAttempts: 256 });
+            }
+        }
+    
+        // No handle belonging to search 2 may have been cleared.
+        const crossCleared = search2Handles.filter((h) => timerLog.cleared.includes(h));
+        eq(crossCleared.length, 0,
+            'a terminated worker from a previous search must not clear the current '
+            + `search's watchdogs (cleared ${crossCleared.length} of ${search2Handles.length})`);
+        eq(api.initTimeoutCount(), search2Handles.length,
+            'the current search must keep every watchdog armed');
+        await api.stopMining();
+    });
+});
+
+await asyncCheck('a stale worker cannot record a key into the next search', async () => {
+    // The companion to the watchdog case, and the reason the onmessage handler
+    // needs the same staleness guard as onerror.
+    //
+    // A worker from a finished search can still deliver 'found'. Unguarded,
+    // that would write the old run's key into history, stop the CURRENT search
+    // (mining = false, panel hidden, every live worker terminated) and report a
+    // key belonging to a search the user already stopped.
+    primeForm();
+    timerLog.armed.length = 0;
+    timerLog.cleared.length = 0;
+    await withSodium(async () => {
+        await api.startMining();
+        const first = workerPool.slice();
+        await api.stopMining();
+        eq(api.miningState(), false, 'search 1 stopped');
+
+        // --- search 2 begins ---
+        await api.startMining();
+        ok(api.miningState(), 'search 2 must be running');
+        const liveBefore = workerStats.live;
+        const historyBefore = api.getSavedKeys().length;
+
+        // The dead worker reports a hit.
+        for (const w of first) {
+            w.deliver({
+                type: 'found',
+                publicKey: 'ab' + '1'.repeat(62),
+                privateKey: 'd'.repeat(64),
+                attempts: 7,
+                elapsed: 0.02,
+            });
+        }
+
+        eq(api.getSavedKeys().length, historyBefore,
+            'a stale found must not add a key to history');
+        eq(api.miningState(), true,
+            'a stale found must not stop the current search');
+        eq(workerStats.live, liveBefore,
+            'a stale found must not terminate the current search\'s workers');
+        await api.stopMining();
+    });
+});
+
+await asyncCheck('resetForm retires the status and hides the panel', async () => {
+    await withSodium(async () => {
+        primeForm();
+        api.setStatusText('Loading crypto library...');
+        api.resetForm();
+        eq(api.getStatusText(), '', 'resetForm must clear the status text');
+        eq(api.getStatusHidden(), true, 'and hide the line');
+        ok(getElementById('progress').classList.contains('hidden'),
+            'resetForm must hide the panel');
+    });
+});
+
+await asyncCheck('a ready event does not change the status', async () => {
+    await withSodium(async () => {
+        primeForm();
+        await api.startMining();
+        // 'ready' only tells the main thread to send the pattern; it must not
+        // resurrect or alter the startup status.
+        const before = api.getStatusText();
+        workerPool[0].deliver({ type: 'ready' });
+        eq(api.getStatusText(), before, 'a ready event must not change the status text');
+        await api.stopMining();
+    });
+});
+
 check('worker init timers are per-worker, not looked up by index', () => {
     const html = fs.readFileSync(pageHtmlPath, 'utf8');
 
-    // Regression: each worker's handlers used to do
-    // `clearTimeout(initTimeouts[i])`. terminateAllWorkers() empties that array
-    // and the NEXT search refills it, so a late event from a terminated worker
-    // indexed into the new search's array and cleared the new search's watchdog
-    // at the same position - silently disarming the "failed to initialize"
-    // alert for a worker that really was hung.
+    // Static backstop only. The behaviour that actually matters is pinned by
+    // the executed tests above - notably 'a stale worker cannot disarm the next
+    // search watchdog' and 'a stale worker cannot record a key into the next
+    // search' - which drive the real handlers and failed for real when the
+    // staleness guard was removed. This check stays because it costs nothing
+    // and localises the regression to one sentence if it ever comes back.
     const indexed = html.match(/clearTimeout\(initTimeouts\[/g) || [];
     ok(indexed.length === 0,
         `no handler may clear its timer via initTimeouts[i]; found ${indexed.length} `
@@ -1219,6 +1478,16 @@ check('worker init timers are per-worker, not looked up by index', () => {
         'the helper must null its handle, so a repeat call is a no-op');
     ok(/initTimeouts\.push\(initTimeout\)/.test(html),
         'the handle must still be registered for bulk teardown');
+
+    // Both handlers must ignore events from workers that are no longer part of
+    // the current search. terminateAllWorkers() is not synchronous with already
+    // queued events, so without this a dead worker's error would tear down the
+    // LIVE search. The executed tests above catch the behaviour; this pins the
+    // mechanism so the intent is greppable.
+    const staleGuards = html.match(/if \(!isCurrent\(\)\) return;/g) || [];
+    ok(staleGuards.length === 2,
+        `both onerror and onmessage must ignore a stale worker, found `
+        + `${staleGuards.length} guard(s)`);
 });
 
 check('the rate graph cannot break the live figures', () => {
