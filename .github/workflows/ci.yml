@@ -59,11 +59,16 @@ jobs:
         run: node tools/verify_keypair.mjs
 
       # Records WHY the hot loop cannot be made faster at the wrapper level
-      # (~99% of a candidate is the scalar multiplication) and how the CLI
-      # scales on this host. Not a gate; it fails the build only if the tool
-      # itself breaks.
+      # and how the CLI scales on this host. Not a gate; it fails the build
+      # only if the tool itself breaks.
       - name: Mining cost breakdown and parallel scaling
         run: python tools/bench_mining.py
+
+      # The browser side of the same question, using the real libsodium.wasm the
+      # page loads rather than a stub. Also informational, not a gate: absolute
+      # keys/s varies by runner, so a fixed threshold here would be flaky.
+      - name: Browser keygen rate (real libsodium.wasm)
+        run: bun tools/bench_real_browser.mjs
 
   # REQUIRED GATE, not advisory.
   #
