@@ -137,7 +137,7 @@ Regression guards:
 | Command | Checks |
 |---|---|
 | `node tools/verify_worker_math.mjs` | the byte-walk is arithmetically identical to the previous BigInt/hex implementation, including 2²⁵⁶ carry and wraparound |
-| `node tools/bench_worker.mjs <worker.js>` | wrapper overhead with a stubbed (free) keygen; must stay far above the keygen cost |
+| `node tools/bench_worker.mjs <worker.js>` | wrapper overhead with a stubbed (free) keygen; must stay far above the keygen cost. Runs three trials and reports the best, so JIT warm-up or a descheduled shared vCPU cannot fail an otherwise healthy run — a real regression drops every trial and still fails hard |
 
 > **Careful:** never write `if (++bytes[i] !== 0)`. Incrementing a `Uint8Array`
 > element returns the *unclamped* value (`256`, not `0`), so the carry test never
