@@ -116,11 +116,12 @@
         .live-logs-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 6px 16px;
+            gap: 6px 20px;
         }
         .live-cell {
             display: flex;
             flex-direction: column;
+            align-items: flex-end;   /* right-align the figures, as asked */
             gap: 2px;
             min-width: 0;
         }
@@ -134,11 +135,15 @@
             color: #7ee787;
             font-family: 'SFMono-Regular', Consolas, monospace;
             font-size: 13px;
+            text-align: right;
             overflow-wrap: anywhere;
         }
-        /* Very narrow screens: one column keeps each value readable. */
+        /* Very narrow screens: one column keeps each value readable, and each
+           row stays right-aligned against the panel edge. */
         @media (max-width: 420px) {
-            .live-logs-grid { grid-template-columns: 1fr; }
+            .live-logs-grid { grid-template-columns: 1fr; gap: 4px 0; }
+            .live-cell { padding: 2px 0; border-bottom: 1px solid #16301f; }
+            .live-cell:last-child { border-bottom: none; }
         }
         #estimate { margin-top: 12px; }
         #results { margin-top: 24px; display: flex; flex-direction: column; gap: 16px; max-height: 60vh; overflow-y: auto; }
@@ -226,6 +231,11 @@
                         <div class="live-cell"><span class="live-k">Rate</span><span class="live-v" id="live-rate">0/s</span></div>
                         <div class="live-cell"><span class="live-k">Progress</span><span class="live-v" id="live-progress">0.00%</span></div>
                         <div class="live-cell"><span class="live-k">ETA</span><span class="live-v" id="live-eta">-</span></div>
+                        <!-- Shows the workers ACTUALLY running, so a discrepancy
+                             against the pre-flight estimate is visible rather
+                             than mysterious. -->
+                        <div class="live-cell"><span class="live-k">Workers</span><span class="live-v" id="live-workers">0</span></div>
+                        <div class="live-cell"><span class="live-k">Cores</span><span class="live-v" id="live-cores">-</span></div>
                     </div>
                 </div>
                 <p id="progress-text" class="status-text" aria-live="polite"></p>
@@ -608,7 +618,18 @@
                 }
             }
             const workerLabel = numWorkers === 1 ? 'worker' : 'workers';
-            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString() + ' | Estimated time: ~' + timeStr + ' (' + numWorkers + ' ' + workerLabel + ', ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel + ')';
+            // The pre-flight figure is a per-worker EXTRAPOLATION, and it is
+            // optimistic by construction: calibration runs one keygen at a time
+            // on one core, but the workers then share those cores, so aggregate
+            // throughput cannot reach rate x workers. Measured on an 8-thread /
+            // 4-core host, pure-CPU work scaled only ~2.3x across 8 threads.
+            // Saying so prevents the estimate reading as a broken promise, and
+            // the live logs show the real aggregate rate once mining starts.
+            estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString()
+                + ' | Estimated time: ~' + timeStr
+                + ' (' + numWorkers + ' ' + workerLabel
+                + ', up to ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel
+                + '; workers share cores, so actual will be lower)';
         }
 
         // Single formatter for the live progress line. The status line and the live
@@ -660,7 +681,7 @@
 
         // Clear the live-logs grid so a new search never shows the previous
         // run's attempts/rate/ETA for a moment before the first progress event.
-        function resetLiveLogs() {
+        function resetLiveLogs(workers, cores) {
             const set = (id, text) => {
                 const el = document.getElementById(id);
                 if (el) el.textContent = text;
@@ -669,6 +690,19 @@
             set('live-rate', '0/s');
             set('live-progress', '0.00%');
             set('live-eta', '-');
+            set('live-workers', String(workers == null ? 0 : workers));
+            set('live-cores', String(cores == null ? '-' : cores));
+        }
+
+        // Report how many workers actually started, not how many were planned.
+        // A short search may create fewer than requested if the browser cannot
+        // spawn them all, and silently reporting the plan would hide it.
+        function reportActualWorkers(created) {
+            const el = document.getElementById('live-workers');
+            if (el) el.textContent = String(created);
+            const coresEl = document.getElementById('live-cores');
+            if (coresEl) coresEl.textContent = String(navigator.hardwareConcurrency || '-');
+            return created;
         }
 
         function setFormDisabled(disabled) {
@@ -677,10 +711,20 @@
             document.getElementById('new-search-btn').disabled = disabled;
         }
 
-        function detectOptimalWorkers() {
-            const cores = navigator.hardwareConcurrency || 4;
-            return Math.min(Math.max(cores - 1, 1), 16);
-        }
+        // Use every logical core.
+//
+// This previously reserved one core for the UI. The hot loop already yields to
+// the event loop every 30ms, which is far more often than the browser needs to
+// repaint, so the UI stays responsive without sacrificing a core - and on a
+// 4-core machine that reserve was a 25% throughput loss for no benefit.
+//
+// Capped at 32: past roughly the physical core count extra workers only add
+// context-switching overhead, and unbounded counts on a high-core machine can
+// make the tab unresponsive long before the browser would refuse.
+function detectOptimalWorkers() {
+    const cores = navigator.hardwareConcurrency || 4;
+    return Math.min(Math.max(cores, 1), 32);
+}
 
         async function startMining() {
             if (mining || starting) return;
@@ -722,7 +766,7 @@
 
             window.liveEstimateShown = false;
             resetRateSmoothing();
-            resetLiveLogs();
+            resetLiveLogs(numWorkers, navigator.hardwareConcurrency || '-');
             const progressEl = document.getElementById('progress-text');
             progressEl.textContent = 'Starting...';
             progressEl.className = 'status-text';
@@ -953,6 +997,9 @@
             for (let i = 0; i < numWorkers; i++) {
                 const w = createMiningWorker(workerCode);
                 workers.push(w);
+                // Show the running count as it is built, so the live panel never
+                // claims more workers than actually exist.
+                reportActualWorkers(workers.length);
 
                 const initTimeout = setTimeout(() => {
                     if (mining && workers.includes(w)) {

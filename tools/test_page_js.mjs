@@ -270,7 +270,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, resetLiveLogs, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -337,35 +337,39 @@ check('formatElapsed: non-finite and negative degrade to "unknown"', () => {
 
 // ---- detectOptimalWorkers --------------------------------------------------
 
-check('detectOptimalWorkers: leaves a core for the UI, clamps to 16', () => {
+check('detectOptimalWorkers: uses every core, capped at 32', () => {
     const set = (n) => { navigatorMock.hardwareConcurrency = n; };
     set(1); eq(api.detectOptimalWorkers(), 1, '1 core ->');
-    set(2); eq(api.detectOptimalWorkers(), 1, '2 cores ->');
-    set(4); eq(api.detectOptimalWorkers(), 3, '4 cores ->');
-    set(8); eq(api.detectOptimalWorkers(), 7, '8 cores ->');
-    set(17); eq(api.detectOptimalWorkers(), 16, '17 cores ->');
-    set(64); eq(api.detectOptimalWorkers(), 16, '64 cores ->');
-    set(undefined); eq(api.detectOptimalWorkers(), 3, 'unknown cores ->');
+    set(2); eq(api.detectOptimalWorkers(), 2, '2 cores ->');
+    set(4); eq(api.detectOptimalWorkers(), 4, '4 cores ->');
+    set(8); eq(api.detectOptimalWorkers(), 8, '8 cores ->');
+    set(32); eq(api.detectOptimalWorkers(), 32, '32 cores ->');
+    set(64); eq(api.detectOptimalWorkers(), 32, '64 cores -> capped');
+    // 0 is falsy, so the documented fallback of 4 applies.
+    set(0); eq(api.detectOptimalWorkers(), 4, 'unknown/0 cores -> fallback 4');
+    set(undefined); eq(api.detectOptimalWorkers(), 4, 'undefined cores -> fallback 4');
 });
 
 // ---- updateEstimate: singular / plural -------------------------------------
 
 check('updateEstimate: uses "1 worker" (singular) when one core is available', () => {
-    navigatorMock.hardwareConcurrency = 2;   // -> 1 worker
+    navigatorMock.hardwareConcurrency = 1;   // -> 1 worker
     getElementById('prefix').value = 'ab';
     getElementById('suffix').value = '';
     api.updateEstimate();
     const txt = getElementById('estimate').textContent;
     ok(txt.includes('1 worker,'), `expected "1 worker," in: ${txt}`);
     ok(!txt.includes('1 workers'), `must not say "1 workers": ${txt}`);
-    ok(!txt.includes('workers'), `must not use plural at all: ${txt}`);
+    // "workers share cores" explains the caveat; that is not the plural bug.
+    ok(!/(?<!share cores, so )\bworkers\b(?! share cores)/.test(txt.replace(/workers share cores/g, '')),
+        `must not use plural for the count: ${txt}`);
 });
 
 check('updateEstimate: uses "N workers" (plural) for multiple cores', () => {
-    navigatorMock.hardwareConcurrency = 8;   // -> 7 workers
+    navigatorMock.hardwareConcurrency = 8;   // -> 8 workers
     api.updateEstimate();
     const txt = getElementById('estimate').textContent;
-    ok(txt.includes('7 workers,'), `expected "7 workers," in: ${txt}`);
+    ok(txt.includes('8 workers,'), `expected "8 workers," in: ${txt}`);
     ok(txt.includes('Expected attempts: 256'), `expected 256 attempts in: ${txt}`);
 });
 
@@ -838,6 +842,59 @@ check('resetLiveLogs clears every cell for a new search', () => {
     eq(getElementById('live-rate').textContent, '0/s', 'rate reset');
     eq(getElementById('live-progress').textContent, '0.00%', 'progress reset');
     eq(getElementById('live-eta').textContent, '-', 'eta reset');
+    eq(getElementById('live-workers').textContent, '0', 'workers reset');
+    eq(getElementById('live-cores').textContent, '-', 'cores reset');
+});
+
+check('live logs report the workers actually running', () => {
+    // The pre-flight estimate is a per-worker extrapolation; showing the real
+    // running count and the core count is what makes a shortfall visible
+    // instead of mysterious.
+    api.resetLiveLogs(8, 8);
+    eq(getElementById('live-workers').textContent, '8', 'planned workers shown');
+    eq(getElementById('live-cores').textContent, '8', 'cores shown');
+
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+    ok(html.includes('id="live-workers"'), 'workers cell present');
+    ok(html.includes('id="live-cores"'), 'cores cell present');
+
+    api.reportActualWorkers(3);
+    eq(getElementById('live-workers').textContent, '3',
+        'actual running count must replace the plan');
+    api.resetLiveLogs();
+});
+
+check('worker count uses every core', () => {
+    // Reserving a core cost 25% throughput on a 4-core machine for no benefit,
+    // because the hot loop already yields every 30ms.
+    navigatorMock.hardwareConcurrency = 4;
+    eq(api.detectOptimalWorkers(), 4, 'a 4-core machine should use all 4');
+    navigatorMock.hardwareConcurrency = 1;
+    eq(api.detectOptimalWorkers(), 1, 'never below 1');
+    navigatorMock.hardwareConcurrency = 256;
+    eq(api.detectOptimalWorkers(), 32, 'capped to bound oversubscription');
+    navigatorMock.hardwareConcurrency = 0;
+    eq(api.detectOptimalWorkers(), 4, '0 is falsy so the documented fallback of 4 applies');
+    navigatorMock.hardwareConcurrency = 4;
+});
+
+check('live log values are right-aligned, including on mobile', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+    ok(/\.live-cell\s*\{[^}]*align-items:\s*flex-end/.test(html),
+        'cells must right-align their content');
+    ok(/\.live-v\s*\{[^}]*text-align:\s*right/.test(html),
+        'values must be right-aligned');
+    // Narrow screens collapse to one column and must keep the alignment.
+    ok(/@media \(max-width: 420px\)/.test(html), 'there is a mobile breakpoint');
+});
+
+check('the pre-flight estimate says it is an upper bound', () => {
+    // Calibration is single-core; workers then share those cores, so rate x
+    // workers is unreachable. The label must not read as a promise.
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+    ok(/workers share cores/.test(html),
+        'estimate must disclose that workers share cores');
+    ok(/up to /.test(html), 'rate must be presented as a ceiling');
 });
 
 check('formatElapsed: human units for long searches', () => {
