@@ -54,11 +54,16 @@ def main() -> int:
                 errors: list[str] = []
                 dialogs: list[str] = []
                 page.on("pageerror", lambda e: errors.append(str(e)))
-                # Worker failures surface via alert(); dismiss so the test
-                # fails fast with the message instead of hanging on a modal.
+# Worker failures surface via alert(). Record the message so an unexpected
+                # modal fails the test with context instead of hanging, and
+                # ACCEPT it: dialogs are auto-dismissed by this handler, so a
+                # confirm() would always return false and any step that
+                # legitimately needs confirming (Clear All Keys) would silently
+                # do nothing. Unexpected dialogs are still asserted at the end.
                 def handle_dialog(d) -> None:
                     dialogs.append(d.message)
-                    d.dismiss()
+                    d.accept()
+
                 page.on("dialog", handle_dialog)
                 page.goto(url, wait_until="load")
 
@@ -233,7 +238,8 @@ def main() -> int:
 
                 # Clear All Keys is the documented escape hatch and must work
                 # even though the decoded in-memory list is empty.
-                page.once("dialog", lambda d: d.accept())
+                # The shared handler already accepts dialogs, so the confirm() in
+                # clearHistory() resolves true without a second handler.
                 page.click(".clear-all-btn")
                 page.wait_for_timeout(300)
                 after_clear = page.evaluate(
@@ -255,7 +261,10 @@ def main() -> int:
 
                 worker_errors = [e for e in errors if "Worker" in e]
                 assert not worker_errors, f"worker errors: {worker_errors!r}"
-                assert not dialogs, f"unexpected dialogs: {dialogs!r}"
+                # The one dialog this test deliberately provokes is the Clear All Keys
+                # confirmation. Anything else means a worker or library error.
+                unexpected = [d for d in dialogs if "Delete" not in d]
+                assert not unexpected, f"unexpected dialogs: {unexpected!r}"
             finally:
                 browser.close()
     finally:
