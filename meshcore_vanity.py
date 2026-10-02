@@ -897,13 +897,27 @@ def main() -> int:
     else:
         mode_desc = f"starting with '{args.prefix}'"
 
+    # Validate --workers before anything is printed or measured. Showing
+    # "~-33,011 keys/s" or a bogus "ETA ~very long" and only then failing
+    # after the user already confirmed is both wrong and wasteful. Previously a
+    # non-positive value was silently coerced to 1, which hid typos; it is now
+    # an explicit, up-front error.
+    workers_n = _default_workers() if args.workers is None else args.workers
+    if workers_n < 1:
+        print(f"Error: --workers must be at least 1, got {args.workers}",
+              file=sys.stderr)
+        return 2
+    if workers_n > 256:
+        print(f"Error: --workers must be <= 256, got {workers_n}",
+              file=sys.stderr)
+        return 2
+
     # Budget estimator: search-space size + locally measured rate + ETA.
     # Requires confirmation on interactive terminals unless --force.
     # All user-facing text goes to stderr: stdout carries only the key.
     try:
         expected = _expected_attempts(args.encoding, len(args.prefix), args.both)
         measured = _benchmark_rate()
-        workers_n = _default_workers() if args.workers is None else args.workers
         # Spawning the pool costs a few tenths of a second. If the search is
         # expected to finish sooner than that, staying serial is dramatically
         # faster (measured ~40x for short prefixes). Only apply this to the

@@ -227,7 +227,7 @@ Prints the private key in multiple formats to stderr:
 | `--progress-interval` | 100000 | Progress report frequency |
 | `--output-private` | off | Also output private key to stderr |
 | `--seed` | random | 64 hex chars (32 bytes) for deterministic search |
-| `--workers` | all CPU cores | Number of parallel processes (forced to 1 for searches expected to finish in under a second) |
+| `--workers` | all CPU cores (max 256) | Number of parallel processes (forced to 1 for searches expected to finish in under a second) |
 | `-f`, `--force` | off | Skip the pre-search estimate confirmation |
 
 ## Supported Encodings

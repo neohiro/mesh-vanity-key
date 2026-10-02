@@ -101,21 +101,18 @@ def breakdown() -> float:
     )
     _rate("  bytes compare (no encoding at all)", lambda: pk[:4] == prefix_bytes, 200_000)
 
-    # What fraction of a candidate is NOT the scalar multiplication? This is the
+    # What fraction of a candidate is NOT the key derivation? This is the
     # number that decides whether wrapper micro-optimisation is worth anything.
-    # keygen alone measures within run-to-run noise of the whole loop, so the
-    # ratio is clamped to avoid reporting a physically impossible >100%.
+    # Keygen alone measures within run-to-run noise of the whole loop, so the
+    # ratio is clamped: reporting a literal >100% would be nonsense, and
+    # reporting "0.00% left" would overstate what was actually measured.
     ratio = r_keygen / r_loop if r_loop else 1.0
-    keygen_share = min(ratio, 1.0)
-    print(
-        f"\n  => key derivation is {keygen_share * 100:.2f}% of a candidate"
-        f" (measured separately, within noise of the full loop);"
-    )
-    print(
-        f"     the encode-and-test half runs {r_enc / r_keygen:,.0f}x faster than"
-        " key derivation."
-    )
-    print("     Removing ALL non-keygen work would gain under 1%.")
+    print(f"\n  => key derivation alone is at least "
+          f"{min(ratio, 1.0) * 100:.0f}% of a candidate")
+    print(f"     (the two measure within noise of each other). The "
+          f"encode-and-test half runs")
+    print(f"     {r_enc / r_keygen:,.0f}x faster than key derivation, so removing "
+          "ALL of it would gain under 1%.")
     return r_loop
 
 

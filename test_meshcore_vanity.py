@@ -7,6 +7,7 @@ import json
 import multiprocessing
 import re
 import struct
+import sys
 import warnings
 from pathlib import Path
 
@@ -273,6 +274,41 @@ def test_main_smoke(monkeypatch, capsys):
         ["meshcore_vanity.py", "ab", "--encoding", "hex", "--seed", "00 " * 32],
     )
     assert mv.main() == 2
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "257", "999"])
+def test_main_rejects_invalid_workers_before_estimating(monkeypatch, capsys, bad):
+    import meshcore_vanity as mv
+
+    # A nonsensical --workers must fail immediately. Printing "~-33,011 keys/s"
+    # or a bogus "ETA ~very long" and only erroring after the user confirmed
+    # was both wrong and wasted their time.
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["meshcore_vanity.py", "ab", "--encoding", "hex", "--workers", bad, "--force"],
+    )
+    assert mv.main() == 2
+    err = capsys.readouterr().err
+    assert "--workers" in err, err
+    # No estimate may be printed for a value that cannot be used.
+    assert "Estimate:" not in err, err
+    assert "keys/s" not in err, err
+
+
+def test_main_accepts_valid_workers(monkeypatch, capsys):
+    import meshcore_vanity as mv
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "meshcore_vanity.py", "ab", "--encoding", "hex",
+            "--workers", "1", "--max-attempts", "100000", "--force",
+        ],
+    )
+    assert mv.main() == 0
+    assert capsys.readouterr().out.strip().startswith("ab")
 
 
 def test_generate_vanity_key_empty_prefix():
