@@ -1136,6 +1136,92 @@ check('progress: "Starting..." is retired once mining reports', () => {
         'a hidden status line must not reserve a blank row');
 });
 
+check('status line: nothing writes it behind setStatusText()', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+
+    // setStatusText() is what keeps `hidden` in sync with the text. A direct
+    // textContent write sets the text but leaves `hidden` stale, so the line
+    // cannot be retired properly and reappears over the next run. The export
+    // path did exactly this ("Preparing export..."), and the libsodium-failure
+    // path hid the panel without ever clearing the text.
+    const direct = html.match(/getElementById\(['"]progress-text['"]\)[\s\S]{0,120}?\.textContent\s*=/g) || [];
+    ok(direct.length === 1,
+        `progress-text must only be written inside setStatusText, found `
+        + `${direct.length} direct write(s)`);
+
+    // Every path that hides the live panel must retire the status too, or the
+    // text is still in the DOM when the panel next opens.
+    //
+    // Scope: the nearest `clearStatusText()` must sit within the same block as
+    // the hide. Checking "does this function contain any clear" was tried and
+    // is too weak - a SIBLING handler's clear vouched for a path that had none
+    // (export onmessage cleared, so deleting the onerror one still passed).
+    // Per-function counting was also tried and is too strict, since a defensive
+    // clear (setFormDisabled-era code clears more often than it hides) breaks
+    // the equality. Counting hides vs clears per function is the check that
+    // survives both cases, and it is what runs below.
+    const HIDE = "document.getElementById('progress').classList.add('hidden')";
+    const fnStartAt = (at) => {
+        const i = html.lastIndexOf('\n        function ', at);
+        return i === -1 ? 0 : i;
+    };
+    const byFn = new Map();
+    let h;
+    while ((h = html.indexOf(HIDE, h === undefined ? 0 : h + 1)) !== -1) {
+        const key = fnStartAt(h);
+        byFn.set(key, (byFn.get(key) || 0) + 1);
+    }
+    ok(byFn.size >= 4,
+        `expected the panel to be hidden across several functions, found ${byFn.size}`);
+
+    const short = [];
+    for (const [key, hides] of byFn) {
+        const name = (html.slice(key).match(/function ([A-Za-z0-9_]+)/) || [])[1] || '?';
+        const next = html.indexOf('\n        function ', key + 1);
+        const body = html.slice(key, next === -1 ? undefined : next);
+        // Count only STATEMENT calls, excluding ones inside comments - a
+        // comment mentioning clearStatusText() must not count as satisfying it.
+        const clears = (body.replace(/\/\/[^\n]*/g, '').match(/clearStatusText\(\)/g) || []).length;
+        if (clears < hides) short.push(`${name}: ${hides} hide(s), ${clears} clear(s)`);
+    }
+    ok(short.length === 0,
+        'every function that hides the live panel must call clearStatusText() '
+        + `at least as often as it hides it - ${short.join('; ')}`);
+});
+
+check('the rate graph cannot break the live figures', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+
+    // pushRateGraphSample() sits in the middle of the progress handler, with
+    // the progress percentage and the ETA BELOW it. An escaping throw would
+    // pushRateGraphSample() sits in the middle of the progress handler, with
+    // the progress percentage and the ETA BELOW it. An escaping throw would
+    // skip both, freezing the live figures on stale values. The graph is
+    // decoration; the figures are the product.
+    const at = html.indexOf('pushRateGraphSample(rate)');
+    ok(at !== -1, 'the progress handler must feed the graph');
+
+    // Scope the check to the try/catch that wraps THIS call. A fixed-width
+    // window was not enough: the next `try {` further down the file satisfied
+    // it, so removing the guard entirely still passed. Bound the search to the
+    // lines immediately surrounding the call instead.
+    const before = html.slice(Math.max(0, at - 200), at);
+    const after = html.slice(at, at + 200);
+    ok(/\{\s*$/.test(before.trimEnd()) && after.includes('} catch'),
+        'the graph call must be wrapped in a try/catch that closes after it');
+
+    // clearStatusText() is the FIRST statement in that same handler, so it must
+    // not be able to throw either. Scoped to the function body only, for the
+    // same reason.
+    const cStart = html.indexOf('function clearStatusText()');
+    ok(cStart !== -1, 'clearStatusText must exist');
+    const cEnd = html.indexOf('\n        }', cStart);
+    const body = html.slice(cStart, cEnd === -1 ? cStart + 600 : cEnd);
+    ok(body.includes('try {') && body.includes('catch'),
+        'clearStatusText must swallow its own errors, since it runs first in '
+        + 'the progress handler and a throw would skip every live figure');
+});
+
 check('rate graph: a keys/s trace sits behind the ETA digits', () => {
     const html = fs.readFileSync(pageHtmlPath, 'utf8');
 

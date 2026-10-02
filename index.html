@@ -1010,8 +1010,18 @@
 
         // Hide the transient status line. Called as soon as mining reports
         // real figures, so "Starting..." cannot survive into the running state.
+        //
+        // Swallows its own errors deliberately. This runs as the FIRST
+        // statement of the progress handler, so anything thrown here would skip
+        // every live figure behind it and leave them frozen on stale values.
+        // Retiring a cosmetic status line must never be able to stop the numbers
+        // updating.
         function clearStatusText() {
-            setStatusText('');
+            try {
+                setStatusText('');
+            } catch (err) {
+                console.warn('could not clear the status line', err);
+            }
         }
 
         // Report how many workers actually started, not how many were planned.
@@ -1067,6 +1077,11 @@ function detectOptimalWorkers() {
             } catch (e) {
                 starting = false;
                 startBtn.disabled = false;
+                // Clear the status as well as hiding the panel. Hiding alone
+                // leaves "Loading crypto library..." sitting in the DOM, and it
+                // is still there on the next attempt - the same stale-status
+                // class of bug the other terminal paths handle.
+                clearStatusText();
                 document.getElementById('progress').classList.add('hidden');
                 revokeBlobUrls();
                 alert('Failed to load cryptographic library: ' + e.message
@@ -1388,7 +1403,18 @@ function detectOptimalWorkers() {
                         // job is to make variance visible, and smoothing is what
                         // the headline number is for. Smoothing the trace would
                         // hide the droops the user is looking for.
-                        pushRateGraphSample(rate);
+                        //
+                        // Wrapped because everything BELOW this line in this
+                        // handler - the progress percentage and the ETA - would
+                        // be skipped by any throw escaping it, leaving the live
+                        // figures frozen on stale values. The graph is
+                        // decoration; the figures are the product, so the
+                        // decoration must never be able to break them.
+                        try {
+                            pushRateGraphSample(rate);
+                        } catch (err) {
+                            console.warn('rate graph draw failed', err);
+                        }
 
                         const haveExpected = isFinite(expected) && expected > 0;
                         const pct = haveExpected ? attempts / expected * 100 : 0;
@@ -1745,6 +1771,9 @@ function detectOptimalWorkers() {
             document.getElementById('suffix').value = '';
             document.getElementById('estimate').textContent = '';
             window.liveEstimateShown = false;
+            // Retire the status before hiding the panel, or its text is still in
+            // the DOM next time the panel opens.
+            clearStatusText();
             document.getElementById('progress').classList.add('hidden');
             starting = false;
             // Clearing the boxes must retire the notice. Goes through the same
@@ -2274,10 +2303,13 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
         }
 
         function exportHistoryInWorker(format) {
-            // Show progress indicator
-            const progressEl = document.getElementById('progress-text');
+            // Show progress indicator. Goes through setStatusText() rather than
+            // writing textContent directly: that is what keeps `hidden` in sync,
+            // and it means the completion paths below can retire the line with
+            // clearStatusText() instead of leaving "Preparing export..." in the
+            // DOM to reappear over the next mining run.
             const progressDiv = document.getElementById('progress');
-            progressEl.textContent = 'Preparing export...';
+            setStatusText('Preparing export...');
             progressDiv.classList.remove('hidden');
 
             const workerCode = `
@@ -2306,11 +2338,13 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                     downloadFile(e.data.filename, e.data.mime, e.data.data);
                     URL.revokeObjectURL(url);
                     worker.terminate();
+                    clearStatusText();
                     document.getElementById('progress').classList.add('hidden');
                 }
             };
             worker.onerror = function(e) {
                 alert('Export failed: ' + e.message);
+                clearStatusText();
                 document.getElementById('progress').classList.add('hidden');
                 worker.terminate();
                 URL.revokeObjectURL(url);
