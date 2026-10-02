@@ -1234,24 +1234,45 @@ def test_committed_icons_match_generator():
 
     Without this, editing the icon design and forgetting to re-run the script
     would silently ship stale assets.
+
+    Compares DECODED PIXELS, not file bytes. An earlier version compared bytes
+    and passed locally while failing in CI: PNG output is a lossy function of
+    the encoder, so the zlib build, Pillow version and platform all change the
+    bytes for identical artwork. That made the test report "icon is stale" when
+    the artwork was in fact current. Pixel equality is the invariant that
+    actually expresses the intent, and it is stable across environments.
     """
+    from PIL import Image
+
     make_icons = _load_make_icons()
 
-    def render(draw_fn, size):
+    def pixels(draw_fn, size):
+        # Rendered through an in-memory buffer rather than a temp file: on
+        # Windows a NamedTemporaryFile stays locked and PIL cannot reopen it.
         buf = io.BytesIO()
-        draw_fn(size).save(buf, format="PNG", optimize=True)
-        return buf.getvalue()
+        draw_fn(size).save(buf, format="PNG")
+        buf.seek(0)
+        with Image.open(buf) as img:
+            return img.size, img.convert("RGBA").tobytes()
 
-    for size in make_icons.SIZES:
-        name = f"icon-{size}.png"
-        assert (_REPO_ROOT / name).read_bytes() == render(make_icons.draw_icon, size), (
-            f"{name} is out of date; re-run `python tools/make_icons.py`"
+    def assert_matches(name, draw_fn, size):
+        path = _REPO_ROOT / name
+        assert path.exists(), f"{name} is missing"
+        with Image.open(path) as committed:
+            actual = (committed.size, committed.convert("RGBA").tobytes())
+        expected = pixels(draw_fn, size)
+        assert actual == expected, (
+            f"{name} artwork is out of date; re-run `python tools/make_icons.py`"
         )
 
-    name = f"icon-maskable-{make_icons.MASKABLE_SIZE}.png"
-    assert (_REPO_ROOT / name).read_bytes() == render(
-        make_icons.draw_maskable, make_icons.MASKABLE_SIZE
-    ), f"{name} is out of date; re-run `python tools/make_icons.py`"
+    for size in make_icons.SIZES:
+        assert_matches(f"icon-{size}.png", make_icons.draw_icon, size)
+
+    assert_matches(
+        f"icon-maskable-{make_icons.MASKABLE_SIZE}.png",
+        make_icons.draw_maskable,
+        make_icons.MASKABLE_SIZE,
+    )
 
 
 def test_index_html_has_history_obfuscation():

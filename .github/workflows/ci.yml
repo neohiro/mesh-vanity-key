@@ -15,12 +15,20 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python deps
-        # Pillow is optional: it enables the full icon-decode test and lets CI
-        # prove the committed icons match tools/make_icons.py exactly.
-        run: pip install PyNaCl pytest Pillow
+        # requirements.txt carries PyNaCl (runtime) plus the test-only Pillow
+        # and PyYAML. PyYAML in particular matters: without it the
+        # workflow-integrity tests silently SKIP, leaving the CI config
+        # unguarded while the build still looks green - the exact failure mode
+        # those tests exist to prevent.
+        run: pip install -r requirements.txt
 
       - name: Python tests
-        run: python -m pytest -q
+        run: |
+          python -m pytest -q
+          # A test that skipped on a missing optional dependency would let the
+          # icon check silently stop proving anything. Fail loudly instead.
+          python -m pytest -q -rs -k "icons_match" | tee /dev/stderr | grep -q "1 passed" \
+            || { echo "::error::icon reproducibility test did not run"; exit 1; }
 
       - uses: actions/setup-node@v4
         with:
