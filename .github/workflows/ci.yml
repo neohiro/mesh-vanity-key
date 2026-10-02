@@ -58,8 +58,29 @@ jobs:
       - name: Keypair validity (sign/verify + RFC 8032 vector)
         run: node tools/verify_keypair.mjs
 
+      # Records WHY the hot loop cannot be made faster at the wrapper level
+      # (~99% of a candidate is the scalar multiplication) and how the CLI
+      # scales on this host. Not a gate; it fails the build only if the tool
+      # itself breaks.
+      - name: Mining cost breakdown and parallel scaling
+        run: python tools/bench_mining.py
+
+  # REQUIRED GATE, not advisory.
+  #
+  # Every other check in this workflow runs the extracted page JS inside a
+  # Node vm against mocks. None of them exercise real libsodium WASM, real Web
+  # Workers, real localStorage, or a real DOM. This job is the only thing that
+  # can prove the app actually works in a browser, so a green `test` job says
+  # nothing on its own about whether the page runs.
+  #
+  # `needs: test` keeps it fast (only runs when the cheap checks pass) while
+  # `smoke` remains a job that must succeed for the workflow to pass. Dropping
+  # the `needs` or renaming this job back to something advisory would be a
+  # regression in itself.
   smoke:
+    name: Browser smoke (required)
     runs-on: ubuntu-latest
+    needs: test
     steps:
       - uses: actions/checkout@v4
 

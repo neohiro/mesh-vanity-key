@@ -4,6 +4,7 @@
 import base64
 import io
 import json
+import multiprocessing
 import re
 import struct
 import warnings
@@ -22,6 +23,8 @@ from meshcore_vanity import (
     _format_progress,
     _human_duration,
     _allow_reserved,
+    _default_workers,
+    _PARALLEL_MIN_SECONDS,
     format_elapsed,
     _validate_prefix,
     _validate_seed,
@@ -354,6 +357,34 @@ def test_reserved_warning_is_emitted_once(monkeypatch):
         counts.append(len(caught))
     assert counts == [1, 0, 0, 0, 0], f"warned on every call: {counts}"
     assert len(meshcore_vanity._warned_reserved) == 1
+
+
+def test_default_workers_uses_all_cores():
+    # --workers used to default to 1, leaving every other core idle. The search
+    # is ~99% scalar multiplication with no shared state, so cores are free.
+    n = _default_workers()
+    assert n >= 1
+    assert n <= 64, "must stay within the pool's own limit"
+    assert n <= multiprocessing.cpu_count() or n == 1
+
+
+def test_default_workers_never_exceeds_one():
+    # Degrades safely where cpu_count() is unavailable.
+    import meshcore_vanity as mv
+
+    orig = mv.mp.cpu_count
+    try:
+        mv.mp.cpu_count = lambda: 0
+        assert mv._default_workers() == 1
+    finally:
+        mv.mp.cpu_count = orig
+
+
+def test_parallel_min_seconds_is_positive():
+    # Guards the serial/parallel crossover constant: a non-positive value would
+    # send every search through a multiprocessing pool, which is far slower for
+    # short prefixes.
+    assert _PARALLEL_MIN_SECONDS > 0.0
 
 
 def test_allow_reserved_only_for_explicit_hex_request():

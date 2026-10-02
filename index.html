@@ -1039,55 +1039,138 @@
         // localStorage key that copies the ciphertext is self-defeating, so it
         // is cleared once at load to shrink the exposure window for anyone
         // who already ran the old build.
-        const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
-        // SECURITY MODEL (read before trusting this with real value):
-        // History is XOR-obfuscated, NOT encrypted. The key is *derived* from a
-        // machine+storage fingerprint rather than stored next to the data, so
-        // lifting localStorage off this machine - a stolen backup, a shared
-        // profile, a synced profile, a stray backup file - yields ciphertext
-        // that cannot be decoded on any other machine or browser profile.
-        //
-        // That is deliberately scoped to "unique to the storage's location but
-        // not bound to it": it stops data-at-rest theft from another machine.
-        // It does NOT stop an attacker who can run JavaScript here, because
-        // such code can recompute the fingerprint and derive the key itself.
-        // Against XSS or a malicious extension you are still fully exposed;
-        // only a real passphrase (PBKDF2/Argon2, key never derived from
-        // anything the page can read) would fix that.
-        const OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
+const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
 
-        // Stable per-machine/per-profile inputs. Deliberately excludes anything
-        // that changes between visits (time, viewport) or that is trivially
-        // copied with the data, and includes a fixed salt so the derivation is
-        // domain-separated from any other use of these same values.
+        // SECURITY MODEL (read before trusting this with real value):
+        // History is XOR-obfuscated, NOT encrypted.
+        //
+        // Key derivation, in priority order:
+        //   1. SHA-256( secret || origin )   -- the normal path
+        //   2. SHA-256( fingerprint )        -- fallback when IndexedDB is
+        //                                         unavailable (private mode,
+        //                                         storage disabled)
+        //
+        // `secret` is 32 random bytes minted once and kept in IndexedDB. Two
+        // properties fall out of making it the PRIMARY input:
+        //
+        //   * Stability. The key does not depend on anything the browser can
+        //     change under the user, so saved history survives a browser
+        //     update that alters the user-agent string, a timezone change
+        //     while travelling, or a window resize. The previous scheme derived
+        //     the key purely from such a fingerprint, and every one of those
+        //     permanently orphaned the history.
+        //   * Not stored beside the data. The ciphertext lives in localStorage
+        //     and the secret in IndexedDB, so lifting only the localStorage
+        //     blob (backup, sync, shared profile, a stray export) does not
+        //     yield the key. `origin` binds it to this site, so a copy of both
+        //     stores still only decodes here.
+        //
+        // What this does NOT do: stop an attacker who can run JavaScript here.
+        // Such code can read IndexedDB. Only a real passphrase (PBKDF2/Argon2
+        // over something the page never sees) would close that, and that is a
+        // product decision rather than a fix.
+        const OBFUSCATION_SECRET_DB = 'meshcoreVanityObf';
+        const OBFUSCATION_SECRET_STORE = 'secrets';
+
+        // Used only when IndexedDB is unavailable. Deliberately excludes
+        // anything that changes during ordinary use, because in this fallback
+        // path any change to the fingerprint changes the key: window and
+        // screen metrics, and the timezone offset.
         function machineFingerprint() {
             const nav = (typeof navigator !== 'undefined' && navigator) || {};
-            const scr = (typeof screen !== 'undefined' && screen) || {};
             return [
-                'meshcore-vanity-obf-v1',
+                'meshcore-vanity-obf-v2-fallback',
                 location.origin || '',
-                nav.userAgent || '',
-                nav.language || '',
-                (nav.languages || []).join(','),
-                nav.hardwareConcurrency || 0,
-                nav.maxTouchPoints || 0,
                 nav.platform || '',
-                nav.deviceMemory || 0,
-                scr.width || 0,
-                scr.height || 0,
-                scr.colorDepth || 0,
-                new Date().getTimezoneOffset(),
+                nav.language || '',
+                nav.hardwareConcurrency || 0,
             ].join('|');
         }
 
-        // Derive a 32-byte key from the fingerprint. Uses SHA-256 when
-        // available (all target browsers) so the key is not simply the
-        // fingerprint string XORed against the data.
+        // Read (or create) the install-scoped secret from IndexedDB.
+        // Resolves to a hex string, or null when IndexedDB is unavailable
+        // (private mode, disabled storage) - in which case callers fall back
+        // to fingerprint-only derivation so history still round-trips.
+        function getOrCreateObfuscationSecret() {
+            return new Promise((resolve) => {
+                let idb;
+                try {
+                    idb = (typeof indexedDB !== 'undefined') ? indexedDB : null;
+                    if (!idb) return resolve(null);
+                } catch (e) {
+                    return resolve(null);
+                }
+
+                let settled = false;
+                const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+
+                let openReq;
+                try {
+                    openReq = idb.open(OBFUSCATION_SECRET_DB, 1);
+                } catch (e) {
+                    return done(null);
+                }
+                openReq.onerror = () => done(null);
+                openReq.onblocked = () => done(null);
+                openReq.onsuccess = () => {
+                    const db = openReq.result;
+                    let store;
+                    try {
+                        db.onversionchange = () => db.close();
+                        store = db.transaction(OBFUSCATION_SECRET_STORE, 'readwrite')
+                            .objectStore(OBFUSCATION_SECRET_STORE);
+                    } catch (e) {
+                        return done(null);
+                    }
+
+                    const readReq = store.get('secret');
+                    readReq.onerror = () => done(null);
+                    readReq.onsuccess = () => {
+                        const existing = readReq.result;
+                        if (existing && /^[0-9a-f]{64}$/.test(existing)) {
+                            return done(existing);
+                        }
+                        // First run: mint one and persist it. getRandomValues is
+                        // mandatory - a weak secret would undermine the whole
+                        // point, so fail closed rather than fall back.
+                        const c = (typeof crypto !== 'undefined' ? crypto : null);
+                        if (!c || !c.getRandomValues) return done(null);
+                        const bytes = new Uint8Array(32);
+                        c.getRandomValues(bytes);
+                        const hex = Array.from(bytes)
+                            .map(b => b.toString(16).padStart(2, '0')).join('');
+                        try {
+                            const putReq = store.put(hex, 'secret');
+                            putReq.onsuccess = () => done(hex);
+                            // A failed write would silently orphan history on
+                            // the next load, so report failure instead.
+                            putReq.onerror = () => done(null);
+                        } catch (e) {
+                            done(null);
+                        }
+                    };
+                };
+                // Never hang the caller: history must load even if IndexedDB
+                // stalls (some privacy modes open but never fire events).
+                setTimeout(() => done(null), 2000);
+            });
+        }
+
+        // Derive a 32-byte key. Uses SHA-256 so the key is not a trivially reversible
+        // function of its inputs.
         async function deriveObfuscationKey() {
             const subtle = (typeof crypto !== 'undefined' && crypto.subtle) || null;
             if (!subtle || !subtle.digest) return null;
             try {
-                const enc = new TextEncoder().encode(machineFingerprint());
+                const secret = await getOrCreateObfuscationSecret();
+                // Primary: the install-scoped secret, so the key is stable
+                // across every environment change. `origin` keeps the key bound
+                // to this site rather than shared across origins.
+                // Fallback: fingerprint only, when IndexedDB is unavailable.
+                const material = secret
+                    ? 'meshcore-vanity-obf-v2|' + location.origin + '|' + secret
+                    : machineFingerprint();
+                const enc = new TextEncoder().encode(material);
                 const digest = await subtle.digest('SHA-256', enc);
                 return Array.from(new Uint8Array(digest))
                     .map(b => b.toString(16).padStart(2, '0')).join('');

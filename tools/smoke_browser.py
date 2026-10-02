@@ -141,6 +141,20 @@ def main() -> int:
                     f"obfuscation key must not be stored in localStorage: {obf_key!r}"
                 )
 
+                # The install secret lives in IndexedDB, never localStorage.
+                secret = page.evaluate(
+                    "async () => await getOrCreateObfuscationSecret()"
+                )
+                assert secret and len(secret) == 64, (
+                    f"expected a 32-byte secret in IndexedDB: {secret!r}"
+                )
+                dumped = page.evaluate(
+                    "() => JSON.stringify(Object.entries(localStorage))"
+                )
+                assert secret not in dumped, (
+                    "the obfuscation secret leaked into localStorage"
+                )
+
                 # Past the expected mean the ETA must not vanish or go
                 # negative: the overshoot has to be stated.
                 over = page.evaluate("() => formatProgressLine(1500, 10, 1000)")

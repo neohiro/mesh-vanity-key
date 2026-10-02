@@ -86,4 +86,23 @@ if (r.err) {
 console.log(`stub-keygen throughput: ${Math.round(r.rate).toLocaleString()} keys/s`);
 console.log(`  candidates: ${r.keys.toLocaleString()} in ${r.seconds.toFixed(2)}s`);
 if (r.found) console.log(`  matched after ${r.found.attempts.toLocaleString()} attempts`);
+
+// Regression gate.
+//
+// The threshold is deliberately set far below the observed ~10-14M keys/s but
+// far ABOVE the 9,182 keys/s of the original per-16-candidate-yield loop. A
+// very low gate (the previous 200k) could only catch a catastrophic
+// regression, so an ordinary 5-20x slowdown would have shipped green. 3M still
+// leaves ~3x headroom for slower CI runners while catching a genuine
+// regression in the wrapper.
+const MIN_KEYS_PER_SEC = 3_000_000;
+if (r.rate < MIN_KEYS_PER_SEC) {
+    console.error(
+        `\nFAILED: wrapper throughput ${Math.round(r.rate).toLocaleString()} keys/s `
+        + `is below the ${MIN_KEYS_PER_SEC.toLocaleString()} keys/s floor. `
+        + 'The mining wrapper has regressed (per-candidate overhead).'
+    );
+    process.exit(1);
+}
+console.log(`  regression floor: ${MIN_KEYS_PER_SEC.toLocaleString()} keys/s — OK`);
 process.exit(0);

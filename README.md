@@ -39,29 +39,28 @@ Browser-specific behaviour, for comparison with the CLI below:
 | Private key | shown per result, stored in history | only with `--output-private` |
 | History display | newest first, scroll stays at the top | n/a |
 
-> **Security:** the browser app obfuscates saved keys in `localStorage` by XOR-ing
-> them with a key derived from a SHA-256 of a machine + storage-origin
-> fingerprint. The key is **not** stored alongside the data, so lifting
-> `localStorage` to another machine or browser profile yields unreadable
-> ciphertext.
+> **Security:** the browser app obfuscates saved keys in `localStorage` with an
+> XOR keystream. The key is `SHA-256(secret || origin)`, where `secret` is 32
+> random bytes minted once and kept in **IndexedDB** — a different storage
+> backend from the ciphertext. So lifting `localStorage` on its own (backup,
+> sync, shared profile, a stray export) does not yield the key, while
+> `origin` binds the key to this site so a copy of both stores only decodes
+> here.
+>
+> Because the key does not depend on anything the browser can change under the
+> user, saved history survives browser updates that alter the user-agent
+> string, timezone changes while travelling, and window resizes. (An earlier
+> version derived the key purely from a hardware fingerprint and every one of
+> those permanently orphaned the history.)
 >
 > This is **obfuscation, not encryption**, and it has a deliberate scope. It
-> stops data-at-rest theft from a different machine or profile. It does **not**
-> protect against script running on the origin (XSS, a malicious extension),
-> because such code can recompute the fingerprint and derive the key itself.
-> Treat the history as a secret store, and clear it when done.
+> stops data-at-rest theft from a copied storage blob. It does **not** protect
+> against script running on the origin (XSS, a malicious extension), because
+> such code can read IndexedDB. Treat the history as a secret store, and clear
+> it when done.
 >
-> Because the key comes from a fingerprint, anything that changes it makes
-> existing history unreadable: a different browser, a moved profile, a changed
-> screen size, or travelling to another timezone. The stored data is never
-> deleted when this happens — it simply cannot be decoded, and the page says so
-> rather than pretending the history is empty.
->
-> In that state the page also **refuses to write** history. The stored blob may
-> be the only remaining copy of those keys, so overwriting it with a freshly
-> mined key would destroy them irrecoverably. New keys stay in memory for the
-> session, and **Clear All Keys** deliberately discards the unreadable blob if
-> you decide it is not worth keeping.
+> If IndexedDB is unavailable (private mode, storage disabled) the key falls back
+> to `SHA-256(fingerprint)`, so history still round-trips rather than being lost.
 
 Reserved hex prefixes `00` and `ff` are **mined with a warning** rather than
 rejected, in both the browser app and the CLI — some users deliberately want
@@ -221,7 +220,7 @@ Prints the private key in multiple formats to stderr:
 | `--progress-interval` | 100000 | Progress report frequency |
 | `--output-private` | off | Also output private key to stderr |
 | `--seed` | random | 64 hex chars (32 bytes) for deterministic search |
-| `--workers` | 1 | Number of parallel processes |
+| `--workers` | all CPU cores | Number of parallel processes (forced to 1 for searches expected to finish in under a second) |
 | `-f`, `--force` | off | Skip the pre-search estimate confirmation |
 
 ## Supported Encodings
@@ -263,8 +262,10 @@ Hex prefixes `00` and `ff` are reserved for MeshCore framework devices and are r
 - **Browser app is hex-only.** It has no bech32/base58/base64 output; use the CLI for those encodings.
 - **Browser app must be served over HTTP(S).** Blob Web Workers are blocked on `file://` URLs.
 - **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency - 1` (capped at 16), which can over- or under-estimate on constrained or shared hardware.
-- **Browser key history is obfuscated, not encrypted.** The XOR key is derived from a machine + origin fingerprint rather than stored, so stolen storage cannot be decoded elsewhere. Script on the origin can recompute it, so this is not XSS protection. Moving a browser profile to a new machine loses the ability to read previously saved history.
+- **Browser key history is obfuscated, not encrypted.** The XOR key is derived from an IndexedDB secret plus the origin, so a copied `localStorage` blob cannot be decoded elsewhere. Script on the origin can read IndexedDB, so this is not XSS protection. Clearing site data deletes the secret and orphans the history.
 - **Progress is not capped at 100%.** Expected attempts are the mean of a geometric distribution, so ~37% of searches legitimately run past it. The CLI and browser show the overshoot as `+105.00%` plus how far past the mean the search has run. Once past the mean there is no meaningful "time remaining", so the ETA is replaced by the overshoot instead of being dropped or shown negative.
+- **The hot loop is already at the maths limit.** ~99% of a candidate is the Ed25519 scalar multiplication inside libsodium; encoding and prefix testing run ~175x faster than key derivation, so wrapper micro-optimisation is worth under 1% (measured with `python tools/bench_mining.py`). The only throughput lever is core count.
+- **The CLI uses every core by default.** `--workers` defaults to all CPUs, but stays serial when the search is expected to finish in under a second, because creating a `spawn` pool costs a few tenths of a second and made short prefixes dramatically slower. Pass `--workers N` to override.
 - **Browser prefix + suffix are limited to 64 hex digits combined.** A key is exactly 64 hex digits, so longer patterns would overlap and could never match; the app refuses to start such a search.
 
 ## Output

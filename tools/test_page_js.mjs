@@ -125,6 +125,61 @@ const URLMock = {
     },
 };
 
+// Minimal in-memory IndexedDB: enough for the obfuscation secret store. Tests
+// the real async code path (open -> transaction -> get -> put) without a DOM.
+const OBF_DB = 'meshcoreVanityObf';
+const OBF_STORE = 'secrets';
+const idbData = new Map();   // dbName -> Map(store -> Map(key -> value))
+let idbAvailable = true;
+
+function makeIndexedDB() {
+    return {
+        open(name) {
+            const req = { onsuccess: null, onerror: null, onblocked: null, result: null };
+            queueMicrotask(() => {
+                if (!idbAvailable) {
+                    if (req.onerror) req.onerror(new Error('unavailable'));
+                    return;
+                }
+                if (!idbData.has(name)) idbData.set(name, new Map());
+                const stores = idbData.get(name);
+                if (!stores.has(OBF_STORE)) stores.set(OBF_STORE, new Map());
+                req.result = {
+                    close() {},
+                    onversionchange: null,
+                    transaction(storeName) {
+                        const data = stores.get(storeName) || new Map();
+                        return {
+                            objectStore() {
+                                return {
+                                    get(key) {
+                                        const r = { onsuccess: null, onerror: null, result: undefined };
+                                        queueMicrotask(() => {
+                                            r.result = data.get(key);
+                                            if (r.onsuccess) r.onsuccess(r);
+                                        });
+                                        return r;
+                                    },
+                                    put(value, key) {
+                                        const r = { onsuccess: null, onerror: null };
+                                        queueMicrotask(() => {
+                                            data.set(key, value);
+                                            if (r.onsuccess) r.onsuccess(r);
+                                        });
+                                        return r;
+                                    },
+                                };
+                            },
+                        };
+                    },
+                };
+                if (req.onsuccess) req.onsuccess(req);
+            });
+            return req;
+        },
+    };
+}
+
 const sandbox = {
     document: documentMock,
     navigator: navigatorMock,
@@ -164,6 +219,7 @@ const sandbox = {
     // built-ins that the vm context does not provide.
     btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
     atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+    indexedDB: makeIndexedDB(),
     Worker: class {
         constructor(url) {
             this.url = url;
@@ -189,7 +245,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKey, formatProgressLine, progressEtaClause, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKey, getOrCreateObfuscationSecret, formatProgressLine, progressEtaClause, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -684,8 +740,6 @@ await asyncCheck('fingerprint includes the storage origin', async () => {
     const fp = api.machineFingerprint();
     ok(fp.includes('https://example.test'),
         `fingerprint must bind the origin: ${fp}`);
-    ok(fp.includes('meshcore-vanity-obf-v1'),
-        'fingerprint must be domain-separated by a fixed salt');
 });
 
 await asyncCheck('history round-trips through obfuscation', async () => {
@@ -696,27 +750,167 @@ await asyncCheck('history round-trips through obfuscation', async () => {
     eq(await api.decryptHistoryData(encoded), plain, 'round-trip must be lossless');
 });
 
-await asyncCheck('a foreign machine cannot decode stolen history', async () => {
-    // Simulate stealing the ciphertext, then reading it on another machine by
-    // forcing a different fingerprint. The stored blob must not decode.
+await asyncCheck('history is portable across machines at the same origin', async () => {
+    // Intended behaviour: the key is bound to the storage LOCATION, not to the
+    // machine. Moving a profile, or opening the same origin on another device
+    // with synced storage, must still decode. That is the whole point of
+    // deriving from an install secret + origin rather than hardware.
+    idbData.clear();
+    storage.clear();
+    api.__resetObfKeyCache();
+    const plain = JSON.stringify([{ publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1 }]);
+    const encoded = await api.encryptHistoryData(plain);
+
+    const origCores = navigatorMock.hardwareConcurrency;
+    const origPlatform = navigatorMock.platform;
+    navigatorMock.hardwareConcurrency = 64;
+    navigatorMock.platform = 'Linux x86_64';
+    api.__resetObfKeyCache();
+    try {
+        eq(await api.decryptHistoryData(encoded), plain,
+            'history must follow the storage, not the hardware');
+    } finally {
+        navigatorMock.hardwareConcurrency = origCores;
+        navigatorMock.platform = origPlatform;
+        api.__resetObfKeyCache();
+        storage.clear();
+    }
+});
+
+await asyncCheck('history does not decode at a different origin', async () => {
+    // The key is bound to location.origin, so a copy of the ciphertext
+    // replayed on another site must not decode.
+    idbData.clear();
+    storage.clear();
+    api.__resetObfKeyCache();
     const plain = JSON.stringify([{ publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1 }]);
     const stolen = await api.encryptHistoryData(plain);
 
-    // A different machine -> different fingerprint -> different keystream.
-    // The key is cached per page load, so drop the cache to emulate a reload.
-    const origCores = navigatorMock.hardwareConcurrency;
+    const origOrigin = sandbox.location.origin;
+    sandbox.location.origin = 'https://evil.example';
+    api.__resetObfKeyCache();
+    try {
+        ok((await api.decryptHistoryData(stolen)) !== plain,
+            'ciphertext must not decode under a different origin');
+    } finally {
+        sandbox.location.origin = origOrigin;
+        api.__resetObfKeyCache();
+        storage.clear();
+    }
+});
+
+await asyncCheck('the secret lives in IndexedDB, never localStorage', async () => {
+    // Clear both stores first so the scan below is unambiguous.
+    idbData.clear();
+    storage.clear();
+    api.__resetObfKeyCache();
+    const secret = await api.getOrCreateObfuscationSecret();
+    ok(/^[0-9a-f]{64}$/.test(secret), `expected a 32-byte hex secret: ${secret}`);
+    // The whole point: a localStorage-only dump must not contain the key.
+    let leaked = null;
+    for (const [k, v] of storage) {
+        if (String(v).includes(secret)) leaked = `value at ${k}`;
+        if (/secret|obf.*key/i.test(k)) leaked = `key name ${k}`;
+    }
+    ok(!leaked, `the secret must never appear in localStorage (${leaked})`);
+    // And it must actually be persisted in IndexedDB.
+    const stores = idbData.get(OBF_DB);
+    ok(stores && stores.get(OBF_STORE).get('secret') === secret,
+        'secret should be stored in IndexedDB');
+});
+
+await asyncCheck('the IndexedDB secret is stable across calls', async () => {
+    const a = await api.getOrCreateObfuscationSecret();
+    const b = await api.getOrCreateObfuscationSecret();
+    eq(a, b, 'the secret must be minted once and reused');
+    ok(!/^[0-9a-f]{64}$/.test(b) || b === a, 'existing secret must be reused');
+});
+
+await asyncCheck('fingerprint fallback excludes volatile values', async () => {
+    // Only used when IndexedDB is unavailable, so anything that changes during
+    // normal use must be absent: a UA update, timezone travel, a resize.
+    const fp = api.machineFingerprint();
+    ok(!/timezone|getTimezoneOffset/i.test(fp), `no timezone: ${fp}`);
+    ok(!/useragent/i.test(fp), `no user agent: ${fp}`);
+    ok(!/screen|colorDepth|width|height/i.test(fp), `no screen metrics: ${fp}`);
+    ok(fp.includes('meshcore-vanity-obf-v2-fallback'),
+        'fallback fingerprint must be versioned');
+    ok(fp.includes('https://example.test'), 'must still bind the origin');
+});
+
+await asyncCheck('the secret, not the fingerprint, decides the key', async () => {
+    // The whole point of v2: changing anything the browser controls must NOT
+    // change the key, because the secret is the primary input.
+    idbData.clear();
+    api.__resetObfKeyCache();
+    const before = await api.deriveObfuscationKey();
+
+    const origOffset = Date.prototype.getTimezoneOffset;
+    const origUA = navigatorMock.userAgent;
+    const origPlatform = navigatorMock.platform;
     const origLang = navigatorMock.language;
-    navigatorMock.hardwareConcurrency = origCores + 7;
-    navigatorMock.language = 'xx-YY';
+    const origCores = navigatorMock.hardwareConcurrency;
+    Date.prototype.getTimezoneOffset = () => -840;      // fly to UTC-14
+    navigatorMock.userAgent = 'Mozilla/5.0 (Upgraded)';
+    navigatorMock.platform = 'Win32';
+    navigatorMock.language = 'zz-ZZ';
+    navigatorMock.hardwareConcurrency = 2;
     api.__resetObfKeyCache();
-    const decodedElsewhere = await api.decryptHistoryData(stolen);
+    try {
+        eq(await api.deriveObfuscationKey(), before,
+            'key must be unchanged by UA, timezone, platform, language or cores');
+    } finally {
+        Date.prototype.getTimezoneOffset = origOffset;
+        navigatorMock.userAgent = origUA;
+        navigatorMock.platform = origPlatform;
+        navigatorMock.language = origLang;
+        navigatorMock.hardwareConcurrency = origCores;
+        api.__resetObfKeyCache();
+    }
+});
 
-    navigatorMock.hardwareConcurrency = origCores;
-    navigatorMock.language = origLang;
+await asyncCheck('history survives a browser user-agent change', async () => {
+    // The concrete failure v1 had: an ordinary browser update silently made
+    // every saved key unreadable.
+    idbData.clear();
+    storage.clear();
     api.__resetObfKeyCache();
+    const plain = JSON.stringify([{ publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64), n: 1 }]);
+    const encoded = await api.encryptHistoryData(plain);
 
-    ok(decodedElsewhere !== plain,
-        'ciphertext from another machine must not decode to the history');
+    const origUA = navigatorMock.userAgent;
+    navigatorMock.userAgent = 'Mozilla/5.0 (Chrome 999)';
+    api.__resetObfKeyCache();
+    try {
+        eq(await api.decryptHistoryData(encoded), plain,
+            'history must survive a user-agent change');
+    } finally {
+        navigatorMock.userAgent = origUA;
+        api.__resetObfKeyCache();
+        storage.clear();
+    }
+});
+
+await asyncCheck('history falls back gracefully when IndexedDB is blocked', async () => {
+    // Private mode / disabled storage: history must still round-trip using the
+    // fingerprint alone rather than throwing or silently losing data.
+    const savedAvailable = idbAvailable;
+    const savedData = new Map(idbData);
+    idbData.clear();
+    idbAvailable = false;
+    api.__resetObfKeyCache();
+    try {
+        const plain = JSON.stringify([{ publicKey: 'c'.repeat(64), privateKey: 'd'.repeat(64), n: 1 }]);
+        const encoded = await api.encryptHistoryData(plain);
+        eq(await api.decryptHistoryData(encoded), plain,
+            'must still round-trip without IndexedDB');
+    } finally {
+        idbAvailable = savedAvailable;
+        idbData.clear();
+        for (const [k, v] of savedData) idbData.set(k, v);
+        api.__resetObfKeyCache();
+        storage.clear();
+    }
 });
 
 await asyncCheck('the legacy stored key is removed at load', async () => {

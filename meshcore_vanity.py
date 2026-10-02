@@ -784,6 +784,29 @@ def serialize_public_key(key: nacl.signing.VerifyKey) -> bytes:
     return bytes(key)
 
 
+# Serial seconds of expected work below which spawning a multiprocessing pool
+# is not worth it. Measured: the "spawn" pool costs ~0.3s to create (fresh
+# interpreter plus re-importing PyNaCl in every child), and a 1-hex-char search
+# finishes in under 10ms serially -- so going parallel made those ~40x SLOWER.
+# Only pay the startup when the search is expected to outlast it.
+_PARALLEL_MIN_SECONDS = 1.0
+
+
+def _default_workers() -> int:
+    """Worker count used when --workers is not given.
+
+    Every core: the search is ~99% Ed25519 scalar multiplication (measured in
+    tools/bench_mining.py), which is independent per candidate and shares
+    nothing, so it scales with cores. Capped to stay inside the pool's own
+    limit and to leave the machine responsive.
+    """
+    try:
+        cpus = mp.cpu_count() or 1
+    except NotImplementedError:  # pragma: no cover - platform dependent
+        cpus = 1
+    return max(1, min(cpus, 64))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="MeshCore Ed25519 vanity key generator",
@@ -840,8 +863,13 @@ def main() -> int:
     parser.add_argument(
         "--workers",
         type=int,
-        default=1,
-        help="Number of parallel workers (multiprocessing)",
+        # Default to every core. The search is ~99% Ed25519 scalar
+        # multiplication (see tools/bench_mining.py), which is pure CPU work
+        # with no shared state, so it scales almost linearly. Defaulting to 1
+        # left the machine's remaining cores completely idle -- the browser
+        # app has always auto-detected. Pass --workers 1 to force serial mode.
+        default=None,
+        help="Number of parallel workers (default: all CPU cores)",
     )
     parser.add_argument(
         "-f",
@@ -875,7 +903,14 @@ def main() -> int:
     try:
         expected = _expected_attempts(args.encoding, len(args.prefix), args.both)
         measured = _benchmark_rate()
-        workers_n = args.workers if args.workers and args.workers > 0 else 1
+        workers_n = _default_workers() if args.workers is None else args.workers
+        # Spawning the pool costs a few tenths of a second. If the search is
+        # expected to finish sooner than that, staying serial is dramatically
+        # faster (measured ~40x for short prefixes). Only apply this to the
+        # automatic default: an explicit --workers is always honoured.
+        if args.workers is None and measured > 0 and workers_n > 1:
+            if expected / measured < _PARALLEL_MIN_SECONDS:
+                workers_n = 1
         if measured > 0:
             rate = measured * workers_n
             rate_str = (
@@ -928,7 +963,7 @@ def main() -> int:
             hrp=args.hrp,
             suffix=args.suffix,
             both=args.both,
-            workers=args.workers,
+            workers=workers_n,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
