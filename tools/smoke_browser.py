@@ -148,7 +148,49 @@ def main() -> int:
                 assert "past expected" in over, f"overshoot not explained: {over!r}"
                 assert "ETA: -" not in over, f"negative ETA rendered: {over!r}"
 
-                # The stored history must be ciphertext, not readable JSON.
+                # An undecodable stored history must not be silently overwritten by the
+                # next mined key: that blob may be the only copy of the user's
+                # existing keys.
+                page.evaluate(
+                    "() => localStorage.setItem('meshcoreVanityKeys', '7b3d6a7f8271615b')"
+                )
+                page.reload(wait_until="load")
+                page.wait_for_timeout(500)
+                warn = page.text_content("#history-warn") or ""
+                assert "could not be decoded" in warn, (
+                    f"decode failure must be explained: {warn!r}"
+                )
+                assert page.evaluate(
+                    "() => localStorage.getItem('meshcoreVanityKeys')"
+                ) == "7b3d6a7f8271615b", "unreadable history must not be deleted"
+
+                # Persist the new key while the unreadable blob is present: the write must
+                # be refused so the only copy of the old keys survives.
+                page.evaluate(
+                    "() => addKeyToHistory({publicKey: 'a'.repeat(64),"
+                    " privateKey: 'b'.repeat(64), attempts: 1, elapsed: 1})"
+                )
+                page.wait_for_timeout(300)
+                assert page.evaluate(
+                    "() => localStorage.getItem('meshcoreVanityKeys')"
+                ) == "7b3d6a7f8271615b", (
+                    "a new key must not clobber unreadable stored history"
+                )
+
+                # Clear All Keys is the documented escape hatch and must work
+                # even though the decoded in-memory list is empty.
+                page.once("dialog", lambda d: d.accept())
+                page.click(".clear-all-btn")
+                page.wait_for_timeout(300)
+                after_clear = page.evaluate(
+                    "() => localStorage.getItem('meshcoreVanityKeys')"
+                )
+                assert after_clear != "7b3d6a7f8271615b", (
+                    f"Clear All Keys must discard unreadable history: {after_clear!r}"
+                )
+
+                # With a decodable history present again, the stored value must
+                # be ciphertext rather than readable JSON.
                 stored = page.evaluate(
                     f"() => localStorage.getItem('{HISTORY_KEY}')"
                 )

@@ -189,7 +189,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), machineFingerprint, deriveObfuscationKey, formatProgressLine, progressEtaClause, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKey, formatProgressLine, progressEtaClause, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; } };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -655,6 +655,11 @@ if (process.argv[3]) {
 }
 
 // ---- history obfuscation key derivation ------------------------------------
+
+// clearHistory() prompts before destroying anything; auto-accept so the
+// deletion paths can be exercised.
+sandbox.confirm = () => true;
+
 // The key must be DERIVED from a machine/storage fingerprint, not read from
 // localStorage. Storing it next to the ciphertext meant that anyone who
 // lifted the stored history also lifted the key, so the "obfuscation" bought
@@ -727,6 +732,43 @@ await asyncCheck('the legacy stored key is removed at load', async () => {
     storage.delete(api.HISTORY_KEY);
 });
 
+await asyncCheck('undecodable history is never overwritten by a new key', async () => {
+    // Regression: the stored blob may be the user's ONLY copy of older keys.
+    // Mining a new key and persisting would silently destroy them, which would
+    // make the "not deleted" reassurance a lie.
+    storage.set(api.HISTORY_KEY, '7b3d6a7f8271615b');  // undecodable
+    await api.loadHistory();
+
+    api.addKeyToHistory({
+        publicKey: 'a'.repeat(64), privateKey: 'b'.repeat(64),
+        attempts: 1, elapsed: 1, pattern: "prefix 'a'", minedAt: 'now',
+    });
+    await api.persistHistory();
+
+    eq(storage.get(api.HISTORY_KEY), '7b3d6a7f8271615b',
+        'the unreadable stored history must survive a new key being added');
+    // The key is still usable in-memory for this session.
+    eq(api.getSavedKeys().length, 1, 'new key should be available in memory');
+    const warn = getElementById('history-warn');
+    ok(/session only|read-only/i.test(warn.textContent),
+        `must explain session-only behaviour: ${warn.textContent}`);
+    storage.delete(api.HISTORY_KEY);
+});
+
+await asyncCheck('clearHistory can discard unreadable history', async () => {
+    // The warning tells the user to use "Clear All Keys" as the escape hatch,
+    // so it must work even though savedKeys is empty in this state.
+    storage.set(api.HISTORY_KEY, '7b3d6a7f8271615b');
+    await api.loadHistory();
+    api.clearHistory();
+    await api.persistHistory();
+    const after = storage.get(api.HISTORY_KEY);
+    ok(after !== '7b3d6a7f8271615b', 'clear must overwrite the unreadable blob');
+    // Writing must work again after an explicit clear.
+    ok(after === 'W10=' || after !== null, `storage should hold empty history: ${after}`);
+    storage.clear();
+});
+
 await asyncCheck('undecodable history warns instead of looking lost', async () => {
     // Ciphertext that this machine's key cannot read (fingerprint changed).
     storage.set(api.HISTORY_KEY, '7b3d6a7f8271615b');
@@ -746,6 +788,11 @@ await asyncCheck('undecodable history warns instead of looking lost', async () =
 await asyncCheck('concurrent persists serialise, last write wins', async () => {
     // persistHistory is async; overlapping calls must not interleave writes.
     storage.clear();
+    // Load a decodable history first: this also clears any read-only state left
+    // by an earlier decode-failure test.
+    storage.set(api.HISTORY_KEY, '[]');
+    await api.loadHistory();
+    eq(api.isHistoryUnreadable(), false, 'precondition: writes must be allowed');
     api.getSavedKeys().length = 0;
     const realDigest = globalThis.crypto.subtle.digest.bind(globalThis.crypto.subtle);
     let release;

@@ -1040,7 +1040,6 @@
         // is cleared once at load to shrink the exposure window for anyone
         // who already ran the old build.
         const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
-        //
         // SECURITY MODEL (read before trusting this with real value):
         // History is XOR-obfuscated, NOT encrypted. The key is *derived* from a
         // machine+storage fingerprint rather than stored next to the data, so
@@ -1146,8 +1145,16 @@
             }
         }
 
+        // Set when stored history exists but cannot be decoded (usually a changed
+        // machine fingerprint). While set, writes are refused: the stored blob
+        // is the user's only copy of those keys, and overwriting it with a
+        // fresh single-key history would destroy them irrecoverably. New keys
+        // stay in memory for the session instead.
+        let historyUnreadable = false;
+
         async function loadHistory() {
             savedKeys = [];
+            historyUnreadable = false;
             if (!storageAvailable) {
                 showHistoryWarn('Browser storage unavailable: keys will not persist across sessions.');
                 return;
@@ -1166,12 +1173,19 @@
                     // fingerprint-derived key the overwhelmingly likely cause is
                     // that the fingerprint changed (different browser/machine,
                     // zoom or window resize, timezone travel), not corruption.
-                    // Say so plainly instead of showing an empty history with a
-                    // generic message, or the user thinks their keys are lost.
+                    //
+                    // Freeze writes: this blob is the only remaining copy of the
+                    // user's existing keys. Persisting a newly mined key would
+                    // silently destroy it, which would make the reassurance
+                    // below a lie.
+                    historyUnreadable = true;
                     showHistoryWarn(
                         'Saved history could not be decoded on this browser. '
-                        + 'It is still stored and is not deleted, but it can only be '
-                        + 'read where it was written (same browser and device).'
+                        + 'It is still stored and has NOT been deleted, but it can '
+                        + 'only be read where it was written (same browser and '
+                        + 'device). Newly found keys will be kept for this session '
+                        + 'only, to avoid overwriting the stored history. Use '
+                        + '"Clear All Keys" to discard it deliberately.'
                     );
                     return;
                 }
@@ -1207,6 +1221,16 @@
 
         async function doPersistHistory() {
             if (!storageAvailable) return;
+            if (historyUnreadable) {
+                // Refuse to overwrite history we cannot read. Keep the in-memory
+                // list so the session is still usable, and say so once.
+                showHistoryWarn(
+                    'Storage is read-only this session: the saved history could not '
+                    + 'be decoded, so new keys are kept in memory only. Use '
+                    + '"Clear All Keys" to start a fresh history.'
+                );
+                return;
+            }
             try {
                 const jsonText = JSON.stringify(savedKeys);
                 const encrypted = await encryptHistoryData(jsonText);
@@ -1357,8 +1381,18 @@
         }
 
         function clearHistory() {
-            if (!savedKeys.length) return;
-            if (!confirm('Delete all ' + savedKeys.length + ' saved key(s) from this browser?')) return;
+            // Do NOT bail out just because the in-memory list is empty: when
+            // historyUnreadable is set, savedKeys is empty precisely because the
+            // stored blob could not be decoded, and that blob still needs a way
+            // to be discarded. The warning text points here as the escape hatch,
+            // so it has to work in exactly that state.
+            const unreadableCount = historyUnreadable ? 1 : 0;
+            if (!savedKeys.length && !unreadableCount) return;
+            const what = unreadableCount
+                ? 'the unreadable saved history in this browser'
+                : savedKeys.length + ' saved key(s)';
+            if (!confirm('Delete ' + what + '? This cannot be undone.')) return;
+            historyUnreadable = false;
             savedKeys = [];
             persistHistory();
             renderHistory(false);

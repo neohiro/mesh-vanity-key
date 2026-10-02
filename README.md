@@ -56,6 +56,12 @@ Browser-specific behaviour, for comparison with the CLI below:
 > screen size, or travelling to another timezone. The stored data is never
 > deleted when this happens — it simply cannot be decoded, and the page says so
 > rather than pretending the history is empty.
+>
+> In that state the page also **refuses to write** history. The stored blob may
+> be the only remaining copy of those keys, so overwriting it with a freshly
+> mined key would destroy them irrecoverably. New keys stay in memory for the
+> session, and **Clear All Keys** deliberately discards the unreadable blob if
+> you decide it is not worth keeping.
 
 Reserved hex prefixes `00` and `ff` are **mined with a warning** rather than
 rejected, in both the browser app and the CLI — some users deliberately want
