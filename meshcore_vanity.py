@@ -31,6 +31,11 @@ import nacl.signing
 
 Encoding = Literal["base64", "base64url", "base58", "hex", "bech32"]
 
+# Bumped when behaviour changes in a way that matters to a caller (output
+# format, defaults, validation rules). Surfaced by --version, which also prints
+# the resolved file path so a stale copy elsewhere is obvious immediately.
+__version__ = "1.1.0"
+
 BASE58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 
@@ -105,7 +110,8 @@ def _worker_search(args: tuple) -> tuple:
     _b64encode = base64.b64encode
     _urlsafe_b64encode = base64.urlsafe_b64encode
     _hex_encode = bytes.hex
-    _SigningKey = nacl.signing.SigningKey
+    # Only the raw public key is needed per candidate; the SigningKey object is
+    # rebuilt by the parent only once, on a match.
     _seed_keypair = nacl.bindings.crypto_sign_seed_keypair
 
     attempts = 0
@@ -823,7 +829,8 @@ def main() -> int:
         description="MeshCore Ed25519 vanity key generator",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("prefix", help="Target prefix (e.g., neohiro)")
+    # nargs="?" so `--version` works standalone; validated below when omitted.
+    parser.add_argument("prefix", nargs="?", help="Target prefix (e.g., neohiro)")
     parser.add_argument(
         "--encoding",
         choices=["base64", "base64url", "base58", "hex", "bech32"],
@@ -888,7 +895,26 @@ def main() -> int:
         action="store_true",
         help="Skip the pre-search estimate confirmation",
     )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Print version and the file's own location, then exit",
+    )
     args = parser.parse_args()
+
+    # --version exists because a stale copy of this script in a parent
+    # directory is an easy and very confusing mistake: it runs, produces
+    # plausible output, and silently uses an older code path (for example a
+    # single worker instead of all cores). Printing the resolved path makes
+    # that immediately visible instead of showing up as "it got slower".
+    if args.version:
+        print(f"meshcore-vanity {__version__}")
+        print(f"loaded from: {os.path.abspath(__file__)}")
+        return 0
+
+    if not args.prefix:
+        print("Error: a target prefix is required (see --help)", file=sys.stderr)
+        return 2
 
     # Validate seed if provided (strict: exactly 64 hex chars, no whitespace).
     if args.seed:

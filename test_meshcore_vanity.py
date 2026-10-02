@@ -432,6 +432,77 @@ def test_hot_loop_keygen_matches_pynacl_over_random_seeds():
         ), f"seed {seed.hex()}: keys differ"
 
 
+def test_hot_loops_have_no_dead_local_bindings():
+    """The hot loops bind module-level functions to locals for speed.
+
+    That optimisation is easy to leave behind: the refactor that replaced
+    PyNaCl's SigningKey with libsodium's seed_keypair in _worker_search left
+    an orphan `_SigningKey` binding which nothing referenced. This catches that
+    class of leftover statically rather than by eye.
+    """
+    import ast
+
+    src = Path(__file__).resolve().parent / "meshcore_vanity.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+
+    targets = {"_worker_search", "generate_vanity_key"}
+    seen = set()
+    for fn in ast.walk(tree):
+        if not (isinstance(fn, ast.FunctionDef) and fn.name in targets):
+            continue
+        seen.add(fn.name)
+        bound = {}
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        bound[t.id] = node.lineno
+        used = {
+            n.id for n in ast.walk(fn)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        }
+        dead = {
+            name: line for name, line in bound.items()
+            if name.startswith("_") and name not in used
+        }
+        assert not dead, (
+            f"{fn.name} has dead local bindings: {dead} "
+            f"(remove them or use them)"
+        )
+
+    assert seen == targets, f"hot loops not found: {targets - seen}"
+
+
+def test_version_flag_works_without_a_prefix(monkeypatch, capsys):
+    # A stale copy of this script in a parent directory is easy to run by
+    # accident and silently uses older behaviour, so --version reports the
+    # version AND the resolved path. It must also work without a positional
+    # prefix, which is why `prefix` is nargs="?".
+    import meshcore_vanity as mv
+
+    monkeypatch.setattr(sys, "argv", ["meshcore_vanity.py", "--version"])
+    assert mv.main() == 0
+    out = capsys.readouterr().out
+    assert mv.__version__ in out, out
+    assert "loaded from:" in out, out
+    # The printed path must be this file, not some other copy.
+    assert out.strip().endswith("meshcore_vanity.py"), out
+
+
+def test_missing_prefix_is_reported(monkeypatch, capsys):
+    import meshcore_vanity as mv
+
+    monkeypatch.setattr(
+        sys, "argv", ["meshcore_vanity.py", "--encoding", "hex"]
+    )
+    assert mv.main() == 2
+    err = capsys.readouterr().err
+    assert "prefix is required" in err, err
+    # Must not print a traceback or a bare argparse usage dump.
+    assert "Traceback" not in err, err
+    assert "usage:" not in err, err
+
+
 def test_default_workers_uses_all_cores():
     # --workers used to default to 1, leaving every other core idle. The search
     # is ~99% scalar multiplication with no shared state, so cores are free.

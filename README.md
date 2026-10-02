@@ -124,9 +124,25 @@ pip install -r requirements.txt
 
 ### Single-Command Usage
 
+Run these **from the repository root** (the directory containing
+`meshcore_vanity.py`):
+
 ```bash
 python meshcore_vanity.py <prefix> [options]
 ```
+
+> **Check you are running the right copy.** If a copy of `meshcore_vanity.py`
+> is left in a *parent* directory, `python meshcore_vanity.py` will silently run
+> that older copy — it produces valid-looking output but uses an older code
+> path (for example a single worker instead of all cores), which looks like the
+> tool "getting slower". Confirm what you are executing with:
+>
+> ```bash
+> python meshcore_vanity.py --version
+> ```
+>
+> This prints the version and the absolute path of the file that was actually
+> loaded.
 
 The encoded public key is printed to **stdout**. Progress and statistics go to **stderr**, so you can pipe the result directly:
 
@@ -229,6 +245,7 @@ Prints the private key in multiple formats to stderr:
 | `--seed` | random | 64 hex chars (32 bytes) for deterministic search |
 | `--workers` | all CPU cores (max 256) | Number of parallel processes (forced to 1 for searches expected to finish in under a second) |
 | `-f`, `--force` | off | Skip the pre-search estimate confirmation |
+| `--version` | | Print version and the loaded file path, then exit |
 
 ## Supported Encodings
 
