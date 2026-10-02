@@ -1254,6 +1254,19 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 }
                 openReq.onerror = () => done(null);
                 openReq.onblocked = () => done(null);
+                // The store must be created during the version upgrade. Without
+                // this the DB opens with no object stores, the transaction below
+                // throws NotFoundError, and the secret is never stored - which
+                // is exactly what happened in a real browser while the unit-test
+                // mock, which pre-created the store, reported green.
+                openReq.onupgradeneeded = () => {
+                    try {
+                        const db = openReq.result;
+                        if (!db.objectStoreNames.contains(OBFUSCATION_SECRET_STORE)) {
+                            db.createObjectStore(OBFUSCATION_SECRET_STORE);
+                        }
+                    } catch (e) { /* handled by the transaction failing */ }
+                };
                 openReq.onsuccess = () => {
                     const db = openReq.result;
                     // Release the connection once the read/write settles.

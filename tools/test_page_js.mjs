@@ -141,21 +141,37 @@ let idbAvailable = true;
 
 function makeIndexedDB() {
     return {
-        open(name) {
-            const req = { onsuccess: null, onerror: null, onblocked: null, result: null };
+        open(name, version) {
+            const req = {
+                onsuccess: null, onerror: null, onblocked: null,
+                onupgradeneeded: null, result: null,
+            };
             queueMicrotask(() => {
                 if (!idbAvailable) {
                     if (req.onerror) req.onerror(new Error('unavailable'));
                     return;
                 }
-                if (!idbData.has(name)) idbData.set(name, new Map());
+                const existed = idbData.has(name);
+                if (!existed) idbData.set(name, new Map());
                 const stores = idbData.get(name);
-                if (!stores.has(OBF_STORE)) stores.set(OBF_STORE, new Map());
-                req.result = {
+
+                const db = {
+                    // Faithful to the real API: the object store only exists
+                    // after createObjectStore during onupgradeneeded. An earlier
+                    // mock pre-created it, which hid a real bug where the page
+                    // never created the store and Chromium returned None.
+                    objectStoreNames: {
+                        contains: (s) => stores.has(s),
+                    },
+                    createObjectStore(s) { stores.set(s, new Map()); },
                     close() {},
                     onversionchange: null,
                     transaction(storeName) {
-                        const data = stores.get(storeName) || new Map();
+                        if (!stores.has(storeName)) {
+                            // Real IndexedDB throws NotFoundError here.
+                            throw new Error('NotFoundError: no object store ' + storeName);
+                        }
+                        const data = stores.get(storeName);
                         return {
                             objectStore() {
                                 return {
@@ -180,6 +196,8 @@ function makeIndexedDB() {
                         };
                     },
                 };
+                req.result = db;
+                if (!existed && req.onupgradeneeded) req.onupgradeneeded({ target: req });
                 if (req.onsuccess) req.onsuccess(req);
             });
             return req;
