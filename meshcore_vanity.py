@@ -380,13 +380,19 @@ def _expected_attempts(encoding: Encoding, prefix_len: int, both: bool) -> int:
 
 
 def format_elapsed(seconds: float) -> str:
-    """Human-readable duration: ``42.3s`` / ``2m 10s`` / ``1h 2m 9s``.
+    """Human-readable duration: ``0.04s`` / ``42.3s`` / ``2m 10s`` / ``1h 2m 9s``.
 
     Long searches routinely run for hours, so a bare seconds figure stops
     being readable ("127453.4s"). Matches the browser's formatElapsed().
+
+    Precision follows magnitude: two decimals below 10s (a search that found a
+    key in 40ms used to render as a useless "0.0s"), one decimal below a
+    minute, whole seconds inside a compound duration.
     """
     if seconds != seconds or seconds in (float("inf"), float("-inf")) or seconds < 0:
         return "unknown"
+    if seconds < 10:
+        return f"{seconds:.2f}s"
     if seconds < 60:
         return f"{seconds:.1f}s"
     total = int(round(seconds))

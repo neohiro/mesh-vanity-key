@@ -813,7 +813,7 @@ def test_format_progress():
     s = _format_progress(1000, 2.0, 10000)
     assert "attempts=1,000" in s
     assert "rate=500/s" in s
-    assert "elapsed=2.0s" in s
+    assert "elapsed=2.00s" in s
     assert "progress=10.00%" in s
     # Past the expected mean the overshoot is shown with a "+" prefix rather
     # than being clamped: ~37% of searches legitimately run past 100%.
@@ -844,8 +844,18 @@ def test_format_progress_zero_rate_is_explicit():
     assert "NaN" not in s
 
 
+def test_format_elapsed_precision_follows_magnitude():
+    # Two decimals below 10s, one below a minute, whole inside compound.
+    assert format_elapsed(0.0) == "0.00s"
+    assert format_elapsed(0.04) == "0.04s"   # was a useless "0.0s"
+    assert format_elapsed(9.99) == "9.99s"
+    assert format_elapsed(10.0) == "10.0s"
+    assert format_elapsed(59.9) == "59.9s"
+    assert format_elapsed(60.0) == "1m 0s"
+
+
 def test_format_elapsed_units():
-    assert format_elapsed(0.0) == "0.0s"
+    assert format_elapsed(0.0) == "0.00s"
     assert format_elapsed(42.34) == "42.3s"
     assert format_elapsed(59.99) == "60.0s"
     assert format_elapsed(60.0) == "1m 0s"

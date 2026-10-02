@@ -286,10 +286,13 @@ function ok(cond, msg = 'expected truthy') {
 // ---- formatElapsed ---------------------------------------------------------
 
 check('formatElapsed: sub-minute keeps tenths', () => {
-    eq(api.formatElapsed(0), '0.0s');
-    eq(api.formatElapsed(0.04), '0.0s');
+    // Precision follows magnitude: 2dp below 10s, 1dp from 10s to a minute.
+    eq(api.formatElapsed(0), '0.00s');
+    eq(api.formatElapsed(0.04), '0.04s', 'a 40ms search must not read as 0.0s');
+    eq(api.formatElapsed(9.99), '9.99s');
+    eq(api.formatElapsed(10), '10.0s');
     eq(api.formatElapsed(45.23), '45.2s');
-    eq(api.formatElapsed(1.5), '1.5s');
+    eq(api.formatElapsed(1.5), '1.50s');
 });
 
 check('formatElapsed: minutes', () => {
@@ -820,7 +823,7 @@ check('resetLiveLogs clears every cell for a new search', () => {
 });
 
 check('formatElapsed: human units for long searches', () => {
-    eq(api.formatElapsed(0), '0.0s');
+    eq(api.formatElapsed(0), '0.00s');
     eq(api.formatElapsed(42.34), '42.3s');
     eq(api.formatElapsed(60), '1m 0s');
     eq(api.formatElapsed(130), '2m 10s');

@@ -76,15 +76,24 @@ def main() -> int:
                 assert len(codes) == 2, f"expected public+private key, got: {codes!r}"
                 assert all(len(c) == 64 for c in codes), f"keys must be 64 hex chars: {codes!r}"
 
-                # Elapsed renders via formatElapsed() ("45.2s" / "2m 10s" / "1h 2m 9s"),
+                # Elapsed renders via formatElapsed() ("45.20s" / "2m 10s" / "1h 2m 9s"),
                 # never a raw float or NaN.
                 stats = page.text_content(".result-frame .result-stats") or ""
                 assert "attempts (" in stats, f"unexpected stats line: {stats!r}"
                 assert "NaN" not in stats and "undefined" not in stats, (
                     f"unformatted time in stats: {stats!r}"
                 )
-                assert not re.search(r"\(\d+\.\d+s\)", stats), (
+                # A RAW float looks like "(0.04)" - digits then a closing
+                # paren, with no unit. The previous pattern also matched the
+                # correctly humanized "(0.00s)", so every search finishing under
+                # a minute failed here. This was latent until CI first ran the
+                # smoke test to completion.
+                assert not re.search(r"\(\d+\.\d+\)", stats), (
                     f"elapsed should be humanized, not a raw float: {stats!r}"
+                )
+                # And it must carry a real unit or a compound duration.
+                assert re.search(r"\((\d+\.\d+s|[\dhm ]*s)\)", stats), (
+                    f"elapsed lacks a unit: {stats!r}"
                 )
 
                 # "Clear All Keys" must match the export buttons' height.

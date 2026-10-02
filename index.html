@@ -361,6 +361,11 @@
             if (typeof seconds !== 'number' || !isFinite(seconds) || seconds < 0) {
                 return 'unknown';
             }
+            // Precision follows magnitude: two decimals below 10s (a search that
+            // found a key in 40ms used to render as a useless "0.0s"), one
+            // decimal below a minute, whole seconds inside a compound
+            // duration. Matches format_elapsed() in the Python CLI.
+            if (seconds < 10) return seconds.toFixed(2) + 's';
             if (seconds < 60) return seconds.toFixed(1) + 's';
             const total = Math.round(seconds);
             const h = Math.floor(total / 3600);
