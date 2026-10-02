@@ -1307,6 +1307,105 @@ def test_worker_wrapper_throughput_is_not_the_bottleneck():
     )
 
 
+def test_worker_bench_takes_several_trials_and_reports_the_best():
+    """The throughput gate must not depend on one lucky sample.
+
+    A CI run failed `test_worker_wrapper_throughput_is_not_the_bottleneck` at
+    921,735 keys/s against the 1,000,000 floor on a commit whose extracted
+    worker source was byte-identical to main (sha256 03a8ce1c02faec71). The
+    bench took a single short sample with no warm-up, so module parsing, JIT
+    warm-up, or a descheduled shared vCPU could each drag it under on their
+    own.
+
+    This pins the two properties that make the gate trustworthy:
+
+      1. it samples more than once, and reports the BEST trial, because
+         warm-up and contention can only ever make a trial slower;
+      2. the floor is NOT lowered to paper over noise. 1,000,000 sits ~109x
+         above the 9,182/s functional cliff, and a real regression is orders of
+         magnitude below it, so the fix belongs in the measurement rather than
+         in eroding that margin.
+
+    It also guards the contract the pytest parser above depends on: the
+    reported figure must remain parseable as `throughput: N keys/s`.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    runtime = shutil.which("node") or shutil.which("bun")
+    if runtime is None:
+        pytest.skip("no node/bun runtime available")
+
+    bench_src = (Path(__file__).parent / "tools" / "bench_worker.mjs").read_text(
+        encoding="utf-8"
+    )
+
+    m = re.search(r"const TRIALS\s*=\s*(\d+)", bench_src)
+    assert m, "bench_worker.mjs must declare a TRIALS count"
+    trials = int(m.group(1))
+    assert trials >= 3, (
+        f"the throughput gate samples {trials} time(s); a single sample is not "
+        "robust to JIT warm-up or a descheduled shared vCPU (this exact "
+        "failure turned CI red at 921,735 keys/s on unchanged code)"
+    )
+
+    # The reported figure must be the maximum across trials, not the last one
+    # and not the mean: a slow final trial must not fail an otherwise healthy
+    # run, but a slow *first* trial must not either.
+    assert re.search(r"rate:\s*Math\.max\(\.\.\.rates\)", bench_src), (
+        "bench_worker.mjs must report the best trial (Math.max), so that "
+        "warm-up or contention in any one trial cannot fail the gate"
+    )
+    assert re.search(r"const r\s*=\s*\{\s*\.\.\.last,\s*rate:\s*Math\.max", bench_src) or \
+        re.search(r"Math\.max\(\.\.\.rates\)", bench_src), (
+        "the reported rate must be derived from the collected trial rates"
+    )
+
+    # The floor must stay where the threat model puts it, not be lowered to
+    # make a noisy run pass.
+    fm = re.search(r"const MIN_KEYS_PER_SEC\s*=\s*([\d_]+)", bench_src)
+    assert fm, "bench_worker.mjs must declare MIN_KEYS_PER_SEC"
+    floor = int(fm.group(1).replace("_", ""))
+    assert floor >= 1_000_000, (
+        f"the throughput floor is {floor:,} keys/s; it must stay at or above "
+        "1,000,000, which is ~109x the 9,182/s functional cliff. Lowering it to "
+        "absorb runner noise would remove the margin that makes this gate "
+        "worth having."
+    )
+
+    # And the output contract the pytest assertion parses must be preserved.
+    assert re.search(r"throughput:.*keys/s", bench_src), (
+        "bench_worker.mjs must keep printing 'throughput: N keys/s'; "
+        "test_worker_wrapper_throughput_is_not_the_bottleneck parses that line"
+    )
+
+    # Prove the whole pipeline still runs end to end and reports a parseable
+    # number, rather than only asserting on the file's text.
+    mod = _load_check_inline_js()
+    with tempfile.TemporaryDirectory() as tmp:
+        worker = Path(tmp) / "worker.js"
+        worker.write_text(
+            mod.extract(Path(__file__).parent)["worker.js"], encoding="utf-8"
+        )
+        proc = subprocess.run(
+            [runtime, str(Path(__file__).parent / "tools" / "bench_worker.mjs"), str(worker)],
+            capture_output=True, text=True, timeout=180,
+        )
+    assert proc.returncode == 0, f"benchmark failed:\n{proc.stdout}\n{proc.stderr}"
+    parsed = re.search(r"throughput: ([\d,]+) keys/s", proc.stdout)
+    assert parsed, f"could not parse 'throughput: N keys/s' from:\n{proc.stdout}"
+    # Multiple trials must actually be reported, so a reader can see the
+    # spread rather than a single number that hides it.
+    assert len(re.findall(r"trial \d+/", proc.stdout)) >= 3, (
+        f"expected per-trial output, got:\n{proc.stdout}"
+    )
+    assert int(parsed.group(1).replace(",", "")) > floor, (
+        f"reported {parsed.group(1)} keys/s, expected above the {floor:,} floor"
+    )
+
+
 def test_invalid_character_error_explains_allowed_and_why():
     """The rejection must teach, not just scold: what is allowed, and why."""
     with pytest.raises(ValueError) as exc:

@@ -42,6 +42,7 @@ function makeEl(id = '') {
         innerHTML: '',
         className: '',
         disabled: false,
+        hidden: false,   // mirrors the HTML hidden property (see setStatusText)
         style: {},
         children: [],
         // Real DOM: assigning textContent replaces all child nodes.
@@ -270,7 +271,7 @@ sandbox.self = sandbox;
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_EXPONENT, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -889,6 +890,43 @@ check('workerScale: concave and sublinear', () => {
         `per-worker efficiency must fall: ${eff2.toFixed(2)} > ${eff8.toFixed(2)} > ${eff32.toFixed(2)}`);
 });
 
+check('workerScale: the documented exponent matches the code', () => {
+    // The page's comment block spells out the exponent and the interpolated
+    // multipliers. Those went stale unnoticed for a long time (they claimed
+    // ~0.457 / 1.37x / 1.87x while the code computes 0.4005 / 1.32x / 1.74x),
+    // because every other test here checks SHAPE - concave, sublinear, anchored
+    // - and shape is identical whichever exponent you fit. This pins the actual
+    // values, and cross-checks them against the comment text, so a comment that
+    // drifts from the code fails the build instead of misleading the next
+    // person who re-measures.
+    const expected = Math.log(api.WORKER_SCALE_MEASURED[8]) / Math.log(8);
+    eq(api.WORKER_SCALE_EXPONENT.toFixed(4), expected.toFixed(4),
+        'the exponent is exactly log(measured)/log(8)');
+
+    // Recompute from first principles rather than trusting the constant.
+    for (const n of [2, 4, 8, 16, 32]) {
+        eq(api.workerScale(n).toFixed(3), Math.pow(n, expected).toFixed(3),
+            `workerScale(${n}) must follow the documented power law`);
+    }
+
+    // The figures the page's comment quotes, asserted against the code. These
+    // are the exact numbers stated in the MEASUREMENT BASIS comment block.
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+    const exp = api.WORKER_SCALE_EXPONENT.toFixed(4);
+    // The comment writes the exponent with a leading '~' (it is an approximation).
+    ok(html.includes(`exponent ~${exp}`) || html.includes(`exponent ${exp}`),
+        `the comment must state the real exponent (~${exp})`);
+    ok(!/exponent ~0\.457/.test(html),
+        'the stale 0.457 exponent must not come back');
+    ok(!/1\.37x at 2 threads/.test(html) && !/1\.87x at 4/.test(html),
+        'the stale interpolated figures must not come back');
+
+    // And the README quotes the same exponent; keep the two in agreement.
+    const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+    ok(readme.includes(expected.toFixed(4)),
+        `the README must state the same exponent (${expected.toFixed(4)})`);
+});
+
 // ---- Live ETA layout ------------------------------------------------------
 // As one string the ETA reflowed whenever a field changed digit count, so the
 // figures visibly hopped. It is now split into slots that each reserve their
@@ -1019,12 +1057,21 @@ check('background: subtle gradient and rare star flickers, reduced-motion safe',
 
 check('estimate: states the measured scale instead of hedging', () => {
     const html = fs.readFileSync(pageHtmlPath, 'utf8');
-    ok(/scale derived from 2\.3x at 8 threads/.test(html),
-        'the estimate must disclose where the scaling factor came from');
+    // The scaling factor's provenance now lives only in WORKER_SCALE_MEASURED
+    // and the README's "Worker scaling" section. It was also printed inline,
+    // where it added a long clause that wrapped the whole line on a narrow
+    // screen, so it is asserted ABSENT to keep it from creeping back.
+    ok(!/scale derived from 2\.3x at 8 threads/.test(html),
+        'the estimate must not print the scaling factor\'s provenance inline');
     ok(/improvement is only ~/.test(html),
         'the estimate must state the improvement multiplier');
     ok(!/so actual will be lower/.test(html),
         'the vague "actual will be lower" caveat must be gone');
+    // The multiplier itself must survive the removal, otherwise the estimate
+    // would go back to quietly implying linear scaling.
+    ok(/improvement is only ~['"]?\s*\+?\s*scale\.toFixed/.test(html)
+        || /improvement is only ~/.test(html),
+        'the estimate must still disclose the actual multiplier');
 });
 
 check('progress: no duplicate id and no stale status under the panel', () => {
@@ -1045,6 +1092,292 @@ check('progress: no duplicate id and no stale status under the panel', () => {
     // status line no longer updates during mining.
     ok(/id="live-logs"[^>]*aria-live="polite"/.test(html),
         'the live panel must be aria-live, or mining updates are silent');
+});
+
+check('progress: "Starting..." is retired once mining reports', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+
+    // The bug: startMining() wrote 'Starting...' and nothing ever cleared it,
+    // so it stayed on screen above the figures for the entire run.
+    ok(html.includes("setStatusText('Starting...')"),
+        'the startup message should be set through setStatusText');
+
+    // The clear must sit INSIDE the progress branch. Asserted structurally by
+    // slicing the branch body (rather than with a proximity regex, which broke
+    // the moment a comment was added between the two lines) and requiring no
+    // other handler to appear in between.
+    const pStart = html.indexOf("e.data.type === 'progress'");
+    ok(pStart !== -1, 'the progress branch must exist');
+    const pEnd = html.indexOf("e.data.type === 'found'", pStart);
+    const branch = html.slice(pStart, pEnd);
+    ok(branch.includes('clearStatusText()'),
+        'the first progress report must retire the startup status');
+    ok(branch.indexOf('clearStatusText()') < branch.indexOf('pushRateGraphSample('),
+        'the status must be cleared before the figures are updated');
+
+    // A short search can match inside the FIRST batch (BATCH_SIZE 256) and so
+    // deliver 'found' before any 'progress' message fires. Clearing only in the
+    // progress branch left "Starting..." in the DOM for the next search's
+    // startup. Every terminal branch must retire it too.
+    for (const kind of ['found', 'error']) {
+        const bStart = html.indexOf(`e.data.type === '${kind}'`);
+        ok(bStart !== -1, `the ${kind} branch must exist`);
+        const bEnd = html.indexOf('} else if (', bStart + 10);
+        const body = html.slice(bStart, bEnd === -1 ? undefined : bEnd);
+        ok(body.includes('clearStatusText()'),
+            `the ${kind} branch must also retire the startup status`);
+    }
+
+    // Hiding the element (not just emptying it) is what removes the line box.
+    // Emptying alone left a blank row that pushed the figures down.
+    ok(/function setStatusText\(text\)[\s\S]{0,400}?\.hidden = !text/.test(html),
+        'setStatusText must toggle the hidden property');
+    ok(/\.status-text\[hidden\]\s*\{\s*display:\s*none/.test(html),
+        'a hidden status line must not reserve a blank row');
+});
+
+check('rate graph: a keys/s trace sits behind the ETA digits', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+
+    // A canvas, inside the ETA cell, and decorative.
+    ok(/<canvas class="rate-graph" id="rate-graph"/.test(html),
+        'the rate graph canvas must exist');
+    const cell = html.indexOf('class="live-cell live-cell-eta"');
+    const canvas = html.indexOf('id="rate-graph"');
+    ok(cell !== -1 && canvas > cell && canvas < html.indexOf('</div>', html.indexOf('id="live-eta"')),
+        'the graph must live inside the ETA cell');
+
+    // Decorative: the numbers it shows are already announced by the live region.
+    ok(/<canvas class="rate-graph" id="rate-graph"\s+aria-hidden="true"/.test(html)
+        || /aria-hidden="true"[^>]*class="rate-graph"/.test(html)
+        || /class="rate-graph"[^>]*aria-hidden="true"/.test(html),
+        'the graph must be hidden from assistive tech');
+
+    // Behind the digits: absolutely positioned, pointer-events off, and the
+    // ETA row is its positioning context.
+    ok(/\.rate-graph\s*\{[^}]*position:\s*absolute/.test(html),
+        'the graph must be taken out of flow');
+    ok(/\.rate-graph\s*\{[^}]*pointer-events:\s*none/.test(html),
+        'the graph must not intercept clicks');
+    ok(/\.live-cell-eta\s*\{[^}]*position:\s*relative/.test(html),
+        'the ETA cell must anchor the absolutely-positioned graph');
+
+    // It must be a bounded window, not an unbounded buffer that grows all run.
+    ok(/RATE_GRAPH_POINTS\s*=\s*\d+/.test(html),
+        'the sample buffer must be bounded');
+    ok(/function pushRateGraphSample\(/.test(html),
+        'the graph needs a sample-push entry point');
+    ok(/function resetRateGraph\(/.test(html),
+        'the graph must be resettable per search');
+    // Feeding it the raw rate, not the EMA: smoothing is what would hide the
+    // variation the graph exists to reveal.
+    ok(/pushRateGraphSample\(rate\)/.test(html),
+        'the graph should plot the raw per-batch rate');
+});
+
+check('visitor badge: proportions match the SVG so it is not stretched', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+    const img = html.match(/<img\s+src="https:\/\/api\.visitorbadge\.io[\s\S]*?>/);
+    ok(img, 'the badge img must exist');
+    const w = Number((img[0].match(/width="(\d+)"/) || [])[1]);
+    const h = Number((img[0].match(/height="(\d+)"/) || [])[1]);
+    ok(w && h, 'the badge must declare width and height');
+    // visitorbadge.io serves ~123.5x28 (4.4:1). It used to be declared 120x20
+    // (6:1), which stretched it wide and squashed it short.
+    const ratio = w / h;
+    ok(ratio < 5 && ratio > 4,
+        `the badge should keep its ~4.4:1 aspect ratio, got ${ratio.toFixed(2)}:1`);
+    ok(w < 120, 'the badge should be narrower than the old 120px box');
+    ok(/\.visitor-counter img\s*\{[^}]*height:\s*auto/.test(html),
+        'the badge should follow its own ratio rather than a fixed height');
+});
+
+check('setStatusText: shows a status and hides it again', () => {
+    // The "Starting..." bug was that it was written and never cleared. These
+    // assert the set/clear pair that fixes it, including that clearing HIDES
+    // the element rather than only emptying it (an emptied <p> still reserves
+    // a line box, which is what left a blank row under the figures).
+    api.setStatusText('Starting...');
+    eq(api.getStatusText(), 'Starting...', 'the message is shown');
+    eq(api.getStatusHidden(), false, 'and the line is visible');
+
+    api.clearStatusText();
+    eq(api.getStatusText(), '', 'the text is cleared');
+    eq(api.getStatusHidden(), true, 'and the line is hidden, not left as a blank row');
+
+    // Empty text must be treated as "no status", not as a visible empty line.
+    api.setStatusText('');
+    eq(api.getStatusHidden(), true, 'an empty status stays hidden');
+});
+
+check('rate graph: samples accumulate and stay bounded', () => {
+    api.resetRateGraph();
+    eq(api.rateGraphState().length, 0, 'a new search starts with no samples');
+
+    api.pushRateGraphSample(100);
+    eq(api.rateGraphState().length, 1, 'one sample stored');
+    // Samples carry a timestamp alongside the value, so the on-screen window
+    // is a fixed span of TIME rather than a fixed number of reports.
+    eq(api.rateGraphState()[0].v, 100, 'the raw rate is stored');
+    ok(Number.isFinite(api.rateGraphState()[0].t),
+        'each sample must carry the time it was taken');
+
+    // Nonsense must not reach the trace.
+    api.pushRateGraphSample(NaN);
+    api.pushRateGraphSample(-5);
+    api.pushRateGraphSample(Infinity);
+    api.pushRateGraphSample(undefined);
+    eq(api.rateGraphState().length, 1, 'invalid samples are rejected');
+
+    // The buffer must not grow without bound: a long search cannot leak
+    // memory or flatten the early samples into nothing.
+    const cap = api.RATE_GRAPH_POINTS;
+    for (let i = 0; i < cap * 4; i++) api.pushRateGraphSample(200 + (i % 7));
+    const n = api.rateGraphState().length;
+    ok(n > 1 && n <= cap,
+        `the buffer must stay within its window: ${n} samples, cap ${cap}`);
+
+    // Halving on overflow must keep the newest value: the dot marking "now"
+    // has to be the reading that was just pushed, not a stale neighbour.
+    const state = api.rateGraphState();
+    eq(state[state.length - 1].v, 200 + ((cap * 4 - 1) % 7),
+        'the newest sample is the one just pushed');
+
+    api.resetRateGraph();
+    eq(api.rateGraphState().length, 0, 'a new search clears the trace');
+});
+
+check('rate graph: the window is a fixed span of time, not the whole run', () => {
+    // Regression: the trace used to keep halving the buffer without ever
+    // dropping anything, so after a long enough run it spanned 100% of the
+    // search. The first samples were then so far apart that recent rate
+    // variation - the entire point of the graph - flattened into a straight
+    // line. Timestamps let stale samples fall off the left edge instead.
+    const t0 = Date.now();
+    const realNow = Date.now;
+    try {
+        api.resetRateGraph();
+        // 20 minutes of history at one sample a second, with a clear rate
+        // swing in the LAST few minutes (simulated by the varying value).
+        let clock = 0;
+        Date.now = () => t0 + clock * 1000;
+        for (let s = 0; s < 1200; s++) {
+            // Constant 1000/s for the first 15 min, then noisy 1000-1400/s.
+            const v = s < 900 ? 1000 : 1000 + (s % 5) * 100;
+            api.pushRateGraphSample(v);
+            clock++;
+        }
+        const state = api.rateGraphState();
+        const newest = state[state.length - 1].t;
+        const oldest = state[0].t;
+        const spanSec = (newest - oldest) / 1000;
+
+        // The window must be bounded by the configured time, not unbounded.
+        ok(spanSec <= api.RATE_GRAPH_WINDOW_MS / 1000 + 5,
+            `the window must not exceed RATE_GRAPH_WINDOW_MS, got ${spanSec}s`);
+        // ...and once the run is long enough it must actually fill it, rather
+        // than showing the whole search back to the beginning.
+        ok(spanSec < 1200 * 0.5,
+            `after 20 min the trace must not span the whole run, got ${spanSec}s`);
+
+        // The recent variation must still be visible as variation: the
+        // newest samples must not all be identical.
+        const recent = state.slice(-5).map((s) => s.v);
+        ok(new Set(recent).size > 1,
+            `recent samples must still vary, got ${JSON.stringify(recent)}`);
+    } finally {
+        Date.now = realNow;
+        api.resetRateGraph();
+    }
+});
+
+check('rate graph: decimation keeps the newer of each pair, and terminates', () => {
+    // The halving loop once kept index i (the OLDER of each adjacent pair)
+    // while its comment claimed the newer, so every decimated reading was up
+    // to one sample stale and the trace lagged real rate changes. Exercised
+    // across every length from 1 to 400 so both parities and every shrink
+    // step are covered, not just one convenient size.
+    const cap = api.RATE_GRAPH_POINTS;
+    const t0 = Date.now();
+    const realNow = Date.now;
+    let clock = 0;
+    try {
+        Date.now = () => t0 + clock * 1000;
+        for (let n = 1; n <= 400; n++) {
+            api.resetRateGraph();
+            for (let i = 0; i < n; i++) {
+                // Distinct, increasing, and identifiable by value.
+                api.pushRateGraphSample(1000 + i);
+                clock++;
+            }
+            const st = api.rateGraphState();
+            ok(st.length >= 1, `n=${n}: the buffer must not be emptied`);
+            ok(st.length <= cap, `n=${n}: must stay within the cap (${st.length} > ${cap})`);
+            // The newest reading must always survive, since the dot marking
+            // "now" is drawn from it.
+            eq(st[st.length - 1].v, 1000 + n - 1,
+                `n=${n}: the newest sample must survive decimation`);
+            // Timestamps must stay strictly increasing: no reordering, and no
+            // duplicated point from the re-append.
+            let ordered = true;
+            for (let i = 1; i < st.length; i++) {
+                if (st[i].t <= st[i - 1].t) { ordered = false; break; }
+            }
+            ok(ordered, `n=${n}: timestamps must stay strictly increasing`);
+        }
+    } finally {
+        Date.now = realNow;
+        api.resetRateGraph();
+    }
+
+    // The specific defect: halving (0,1),(2,3),... and keeping the older of
+    // each pair instead of the newer. This is only observable on data where
+    // the choice matters: on a uniform ramp both choices give a stride of 2,
+    // so an arithmetic series cannot tell them apart. Here every sample is
+    // either a low or a high value, and the survivors must be the HIGH one of
+    // each pair, because those are the readings closer to the real rate at the
+    // moment they were kept.
+    const CAP = api.RATE_GRAPH_POINTS;
+    api.resetRateGraph();
+    let c = 0;
+    Date.now = () => t0 + c * 1000;
+    try {
+        for (let i = 0; i < CAP; i++) {
+            // Strictly increasing within a pair, and the second of each pair is
+            // always the larger value, so index parity is observable.
+            api.pushRateGraphSample(i % 2 === 0 ? 1000 : 2000);
+            c++;
+        }
+        api.pushRateGraphSample(1000);   // overflows by one, forcing one halving
+        c++;
+        const st = api.rateGraphState();
+        eq(st[st.length - 1].v, 1000, 'the newest sample survives the halving');
+        const body = st.slice(0, -1);
+        ok(body.length > 0, 'expected retained samples to inspect');
+        // Every survivor from a (low, high) pair must be the high one.
+        const wrong = body.filter((s) => s.v !== 2000);
+        ok(wrong.length === 0,
+            `decimation must keep the newer (higher) of each pair, but retained `
+            + `${wrong.length} stale reading(s) of 1000 in ${JSON.stringify(body.map((s) => s.v))}`);
+    } finally {
+        Date.now = realNow;
+        api.resetRateGraph();
+    }
+});
+
+check('estimate omits the scaling provenance clause', () => {
+    getElementById('prefix').value = 'ab';
+    getElementById('suffix').value = '';
+    api.updateEstimate();
+    const txt = api.getEstimateText();
+    ok(!/scale derived from/.test(txt),
+        `the provenance clause must not be printed: ${txt}`);
+    // The multiplier is the part that carries the meaning, so it must stay.
+    ok(/improvement is only ~\d/.test(txt),
+        `the multiplier must still be stated: ${txt}`);
+    ok(/keys\/s/.test(txt), 'the rate must still be stated');
+    getElementById('prefix').value = '';
+    api.updateEstimate();
 });
 
 check('live logs: a titled 2x2 grid carries the four figures', () => {

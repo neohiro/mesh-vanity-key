@@ -69,9 +69,64 @@ def main() -> int:
 
                 # 1-char hex pattern: ~16 expected attempts, instant even headless.
                 page.fill("#prefix", "a")
-                page.click("#start-btn")
 
+                # 'Starting...' was written once and never cleared, so it sat
+                # above the figures for the whole run. Assert the invariant
+                # rather than a specific moment: whatever the search's timing,
+                # once it has finished there must be no stale status text left
+                # in the DOM. Waiting for the clear DURING the run would be
+                # wrong - a 1-char pattern can match inside the first batch and
+                # finish before any progress report fires. The result frame
+                # appearing is the signal that the search has finished.
+                page.click("#start-btn")
                 page.wait_for_selector(".result-frame", timeout=120_000)
+                assert page.evaluate(
+                    "() => { const el = document.getElementById('progress-text');"
+                    " return el && (el.textContent || '').trim() === ''; }"
+                ), (
+                    "the startup status must not linger in the DOM after a search"
+                )
+
+                # The rate graph is a backdrop on the ETA row. The panel is
+                # display:none once the search ends, and a hidden box measures
+                # 0x0, so reveal it, measure, then put the page back - the same
+                # approach the ETA-slot metrics below use.
+                graph = page.evaluate(
+                    "() => {"
+                    "  const panel = document.getElementById('progress');"
+                    "  const wasHidden = panel.classList.contains('hidden');"
+                    "  if (wasHidden) panel.classList.remove('hidden');"
+                    "  const c = document.getElementById('rate-graph');"
+                    "  const r = c.getBoundingClientRect();"
+                    "  const out = {"
+                    "    w: r.width, h: r.height,"
+                    "    cw: c.width, ch: c.height,"
+                    "    position: getComputedStyle(c).position,"
+                    "    pointerEvents: getComputedStyle(c).pointerEvents,"
+                    "  };"
+                    "  if (wasHidden) panel.classList.add('hidden');"
+                    "  return out;"
+                    "}"
+                )
+                assert graph["w"] > 0 and graph["h"] > 0, (
+                    f"the rate graph must be laid out with a real box, got "
+                    f"{graph['w']}x{graph['h']}"
+                )
+                assert graph["cw"] > 0 and graph["ch"] > 0, (
+                    f"the canvas backing store must be sized, got "
+                    f"{graph['cw']}x{graph['ch']}"
+                )
+                # Absolutely positioned, or it would sit in flow and make the
+                # live panel taller instead of being a backdrop.
+                assert graph["position"] == "absolute", (
+                    f"the rate graph must be taken out of flow, got {graph['position']}"
+                )
+                # Decorative: it must never intercept a click aimed at the
+                # figures sitting on top of it.
+                assert graph["pointerEvents"] == "none", (
+                    f"the rate graph must not intercept clicks, got {graph['pointerEvents']}"
+                )
+
                 heading = page.text_content(".result-frame h2")
                 assert heading and "Key 1 Found!" in heading, f"unexpected heading: {heading!r}"
 
@@ -323,6 +378,16 @@ def main() -> int:
                     "() => getComputedStyle(document.querySelector('.visitor-counter'))"
                     ".textAlign"
                 ) == "center", "the counter badge must be centred"
+                # The badge was declared 120x20 for a ~123.5x28 SVG, stretching
+                # it wide and squashing it short. Assert the RENDERED box keeps
+                # the SVG's own proportions, not merely the declared attributes.
+                badge_ratio = page.evaluate(
+                    "() => { const r = document.querySelector('.visitor-counter img')"
+                    ".getBoundingClientRect(); return r.height ? r.width / r.height : 0; }"
+                )
+                assert 4.0 < badge_ratio < 5.0, (
+                    f"the badge should keep its ~4.4:1 aspect ratio, rendered {badge_ratio:.2f}:1"
+                )
 
                 # A single transient status line, above the panel. Two of these
                 # is what left 'Starting...' stranded under the figures.
