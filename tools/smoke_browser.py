@@ -415,7 +415,7 @@ def main() -> int:
                     # every box would measure 0. Reveal it, measure, then put
                     # the page back exactly as it was.
                     "  if (wasHidden) panel.classList.remove('hidden');"
-                    "  const widths = ['live-eta-h', 'live-eta-m', 'live-eta-s']"
+                    "  const widths = ['live-eta-h', 'live-eta-m', 'live-eta-s', 'live-eta-days']"
                     "    .map((id) => document.getElementById(id)"
                     "      .getBoundingClientRect().width);"
                     # Probe inside .eta-fields so it inherits the ETA's own
@@ -444,10 +444,23 @@ def main() -> int:
                     f"2ch slots must fit two digits: minute/second reserved "
                     f"{reserved[1]}/{reserved[2]} for a {glyph}px glyph"
                 )
-                # Hours must hold far more than minutes/seconds: that headroom is
-                # what keeps a multi-week ETA from shifting as it grows.
-                assert reserved[0] >= glyph * 8, (
-                    f"hour slot must reserve 20+ digits, got {reserved[0]} "
+                # Hours no longer need extra headroom: the days slot carries
+                # the magnitude, so hours is the hours WITHIN the day and is
+                # never more than two digits. What must hold is that the hour
+                # slot is wide enough for those two digits, the same as minutes
+                # and seconds, and that the days slot has room for a multi-digit
+                # day count -- that is now the field that grows.
+                assert reserved[0] >= glyph * 1.5, (
+                    f"hour slot must fit two digits (0-23), got {reserved[0]} "
+                    f"for a {glyph}px glyph"
+                )
+                # And the day slot must not be the field that clips. Measured in
+                # the same evaluate that reveals the panel: #progress is
+                # display:none until mining starts, so measuring it afterwards
+                # would read 0 for every slot.
+                day_reserved = reserved[3]
+                assert day_reserved >= glyph * 2, (
+                    f"the day slot must fit a multi-digit day count, got {day_reserved} "
                     f"for a {glyph}px glyph"
                 )
                 assert page.evaluate(
