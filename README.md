@@ -425,7 +425,7 @@ identical.
 ```bash
 # A different prefix AND a different suffix, in one search
 uv run --from git+https://github.com/neohiro/meshcore-vanity-key \
-  meshcore-vanity ab --suffix cd
+  meshcore-vanity ab --suffix Yc
 
 # A MeshCore bech32 address
 uv run --from git+https://github.com/neohiro/meshcore-vanity-key \
@@ -528,10 +528,10 @@ Finds a bech32-encoded key starting with `mc1neoh`.
 ### Separate prefix and suffix
 
 ```bash
-python meshcore_vanity.py ab --suffix cd
+python meshcore_vanity.py ab --suffix Yc
 ```
 
-Finds a key that starts with `ab` **and** ends with `cd`, checked in the same
+Finds a key that starts with `ab` **and** ends with `Yc`, checked in the same
 search — as the browser does with its two input boxes.
 
 ### Suffix instead of prefix
@@ -618,10 +618,16 @@ with *different* text, give the suffix to `--suffix`:
 | Goal | Command | Matches |
 |---|---|---|
 | Start only (default) | `run.sh abcd` | keys **starting with** `abcd` |
-| End only | `run.sh 7f --suffix` | keys **ending with** `7f` |
-| Both ends, different text | `run.sh ab --suffix cd` | keys **starting with** `ab` **and ending with** `cd` |
+| End only | `run.sh 7c --suffix` | keys **ending with** `7c` |
+| Both ends, different text | `run.sh ab --suffix Yc` | keys **starting with** `ab` **and ending with** `Yc` |
 | Both ends, same text | `run.sh abcd --both` | keys **starting and ending with** `abcd` |
-| End only, no prefix | `run.sh --suffix cd` | keys **ending with** `cd` |
+| End only, no prefix | `run.sh --suffix Yc` | keys **ending with** `Yc` |
+
+Those examples use the default `base64` encoding, whose final character is
+constrained — see [Suffixes and base64 padding](#suffixes-and-base64-padding).
+Suffix patterns there must end in one of `048AEIMQUYcgkosw`, so `cd` and `7f`
+are rejected. With `--encoding hex` every digit is reachable and any suffix
+works.
 
 This mirrors the browser, which has always taken an independent prefix and
 suffix box and checked both in the same pass.
@@ -685,7 +691,7 @@ you asked for.
 
 A 32-byte key is 44 base64 characters, the last of which is the `=` pad. Suffix
 matching compares against the end of the **key data**, not the padding, so
-`--suffix 7f` matches keys whose last two *data* characters are `7f`.
+`--suffix Yc` matches keys whose last two *data* characters are `Yc`.
 
 There is a second base64 quirk worth knowing, because it makes a suffix
 *impossible* rather than merely rare. 256 bits do not divide evenly into 6-bit

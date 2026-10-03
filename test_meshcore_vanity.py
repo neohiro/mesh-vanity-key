@@ -22,7 +22,7 @@ from meshcore_vanity import (
     _base58_encode,
     _bech32_encode,
     _benchmark_rate,
-    _expected_attempts,
+    _estimate_search_space,
     _format_progress,
     _human_duration,
     _allow_reserved,
@@ -1052,22 +1052,77 @@ def test_hex_suffixes_are_never_refused_for_reachability() -> None:
 
 
 def test_expected_attempts():
-    # One constrained end.
-    assert _expected_attempts("hex", 2) == 16**2
-    assert _expected_attempts("base64", 1) == 64
-    assert _expected_attempts("base58", 1) == 58
-    assert _expected_attempts("bech32", 1) == 32
-    # Two constrained ends multiply, they do not add: --both with a 2-char
-    # pattern is 16**4, and a 2-char prefix with a separate 3-char suffix is
-    # 16**5.
-    assert _expected_attempts("hex", 2, 2) == 16**4
-    assert _expected_attempts("hex", 2, 3) == 16**5
-    # Uneven ends, which is the separate prefix/suffix case: the ends are
-    # independent so the cost is the product of both.
-    assert _expected_attempts("base64", 2, 2) == 64**4
+    # Only the start is constrained.
+    assert _estimate_search_space("hex", 2, None) == 16**2
+    assert _estimate_search_space("base64", 1, None) == 64
+    assert _estimate_search_space("base58", 1, None) == 58
+    assert _estimate_search_space("bech32", 1, None) == 32
+    # Both ends multiply, they do not add. For hex and base58 the end alphabet
+    # is the same as the start, so this is simply the product.
+    assert _estimate_search_space("hex", 2, 2) == 16**4
+    assert _estimate_search_space("hex", 2, 3) == 16**5
+    assert _estimate_search_space("base58", 2, 2) == 58**4
+    # A base64 suffix is cheaper than a base64 prefix of the same length,
+    # because the key's final character only carries 4 significant bits. The
+    # reduction applies to the LAST character of the pattern only.
+    assert _estimate_search_space("base64", 2, 2) == 64**2 * 64 * 16
+    assert _estimate_search_space("base64", 0, 1) == 16
+    assert _estimate_search_space("base64", 1, 1) == 64 * 16
+    assert _estimate_search_space("base64url", 1, 1) == 64 * 16
     # An empty pattern constrains nothing.
-    assert _expected_attempts("hex", 0) == 1
-    assert _expected_attempts("hex", 2, 0) == 16**2
+    assert _estimate_search_space("hex", 2, 0) == 16**2
+    assert _estimate_search_space("hex", 0, 2) == 16**2
+
+
+def test_the_base64_suffix_estimate_matches_the_reachable_alphabet() -> None:
+    """The estimate must agree with what the validator will accept.
+
+    These two used to be derived separately, and disagreed: the estimate charged
+    a base64 suffix a full 6 bits per character while the validator rejected
+    patterns whose final character only has 4. A pattern the estimate priced as
+    reachable could be refused outright.
+    """
+    from meshcore_vanity import _base64_final_chars
+
+    reach = _base64_final_chars()
+    # A 1-character suffix costs exactly the number of reachable characters,
+    # because that character is the final one.
+    assert _estimate_search_space("base64", 0, 1) == len(reach)
+    # And a 2-character suffix costs (any of 64) x (the reachable subset).
+    assert _estimate_search_space("base64", 0, 2) == 64 * len(reach)
+
+
+def test_the_preflight_estimate_matches_the_in_search_estimate() -> None:
+    """The figure quoted before the search is the one used during it.
+
+    Both go through _estimate_search_space(); this pins the CLI's pre-flight
+    line to the same number the progress reporting will use, so they cannot
+    drift apart again.
+    """
+    import re
+
+    for argv in (
+        ["abcd"],
+        ["abcd", "--both", "--encoding", "hex"],
+        ["ab", "--suffix", "Yc"],
+        ["ab", "--suffix", "b", "--encoding", "hex"],
+    ):
+        proc = _run_cli(*argv, "--force", "--max-attempts", "1")
+        m = re.search(r"Estimate: ([\d,]+) expected", proc.stderr)
+        assert m, proc.stderr
+        quoted = int(m.group(1).replace(",", ""))
+        encoding = "hex" if "hex" in argv else "base64"
+        both = "--both" in argv
+        if both:
+            n = len(argv[0])
+            expected = _estimate_search_space(encoding, n, n)
+        elif "--suffix" in argv:
+            expected = _estimate_search_space(
+                encoding, len(argv[0]), len(argv[argv.index("--suffix") + 1])
+            )
+        else:
+            expected = _estimate_search_space(encoding, len(argv[0]), None)
+        assert quoted == expected, (argv, quoted, expected)
 
 
 def test_format_day_hint_uses_half_day_steps():
