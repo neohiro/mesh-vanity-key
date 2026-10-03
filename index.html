@@ -954,21 +954,33 @@
 
         // True once every live worker has enough samples to be trusted. Partial
         // data would understate the aggregate and so overstate the ETA.
+        //
+        // `liveWorkerRates` is keyed by worker index and is never pruned during a
+        // run, so it can hold entries for workers that have since died. Only the
+        // first `expectedWorkers` indices correspond to workers that are still
+        // running, so completeness is checked over THAT slice rather than over
+        // the map as a whole.
         function liveRateIsComplete(expectedWorkers) {
             const want = Number(expectedWorkers);
             if (!isFinite(want) || want <= 0) return false;
-            if (liveWorkerRates.size < want) return false;
-            for (const r of liveWorkerRates.values()) {
-                if (!isFinite(r) || r <= 0) return false;
+            for (let i = 0; i < want; i++) {
+                const r = liveWorkerRates.get(i);
+                if (r === undefined || !isFinite(r) || r <= 0) return false;
             }
             return true;
         }
 
         // Measured aggregate keys/s, or null when there is nothing trustworthy.
+        //
+        // Sums ONLY the live workers. Summing the whole map would keep counting
+        // a worker that has died since it last reported, inflating the aggregate
+        // and making the ETA look better than the search actually is - verified
+        // to overstate throughput by 33% when one of four workers fails.
         function liveAggregateKeysPerSecond(expectedWorkers) {
-            if (!liveRateIsComplete(expectedWorkers)) return null;
+            const want = Number(expectedWorkers);
+            if (!liveRateIsComplete(want)) return null;
             let sum = 0;
-            for (const r of liveWorkerRates.values()) sum += r;
+            for (let i = 0; i < want; i++) sum += liveWorkerRates.get(i);
             return sum > 0 ? sum : null;
         }
 
@@ -1032,7 +1044,15 @@
                     timeStr = (estSeconds / 86400).toFixed(1) + 'd';
                 }
             }
-            const workerLabel = numWorkers === 1 ? 'worker' : 'workers';
+            // Report the count that the rate actually describes.
+            //
+            // Pre-flight, that is the planned worker count. Once the rate is
+            // measured it is the number of workers actually running - if some
+            // failed to initialise, saying "8 workers" beside a figure derived
+            // from six would be a straight contradiction, and the whole point of
+            // this line is that its numbers are measurements.
+            const shownWorkers = usingLive ? (workers.length || numWorkers) : numWorkers;
+            const workerLabel = shownWorkers === 1 ? 'worker' : 'workers';
             // Only actual measurements go in the grey line: expected attempts,
             // estimated time, worker count and the measured keys/s rate.
             //
@@ -1046,7 +1066,7 @@
             // README's "Worker scaling" section.
             estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString()
                 + ' | Estimated time: ~' + timeStr
-                + ' (' + numWorkers + ' ' + workerLabel
+                + ' (' + shownWorkers + ' ' + workerLabel
                 + ', up to ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel
                 + ')';
         }

@@ -1120,7 +1120,14 @@ def test_page_estimates_and_formatting():
     html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
 
     # Singular vs plural must be conditional, not a hardcoded "workers".
-    assert "numWorkers === 1 ? 'worker' : 'workers'" in html
+    #
+    # The count it conditions on is `shownWorkers`, not `numWorkers`: once the
+    # rate is measured the line describes the workers actually running, so a
+    # search that lost some to an init failure must not still claim the planned
+    # count beside a figure derived from fewer.
+    assert "shownWorkers === 1 ? 'worker' : 'workers'" in html
+    assert "const shownWorkers = usingLive ? (workers.length || numWorkers) : numWorkers;" in html
+    assert "' (' + shownWorkers + ' ' + workerLabel" in html
     assert "1 workers" not in html
 
     # formatElapsed() powers the "Found in ... attempts (...)" line.

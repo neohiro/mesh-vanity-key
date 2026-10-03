@@ -1153,7 +1153,87 @@ check('the grey estimate flips from estimated to measured', () => {
     api.resetLiveRates();
     navigatorMock.hardwareConcurrency = 8;
 });
+check('the grey estimate reports the worker count its rate describes', () => {
+    // The line must never contradict itself. Pre-flight the count is the PLANNED
+    // one; once the rate is measured it is the number actually running. Saying
+    // "8 workers" beside a figure derived from six - because two failed to
+    // initialise - would be exactly the invented precision this line exists to
+    // avoid.
+    navigatorMock.hardwareConcurrency = 8;
+    getElementById('prefix').value = 'ab';
+    api.resetLiveRates();
+    api.updateEstimate();
+    ok(/\(8 workers,/.test(api.getEstimateText()),
+        `pre-flight must report the planned worker count: ${api.getEstimateText()}`);
 
+    // Stand in six running workers using the existing test hook, so no
+    // test-only production code is needed just to control the worker count.
+    api.terminateAllWorkers();
+    for (let i = 0; i < 6; i++) api.__trackWorker({ terminate() {} });
+
+    const need = api.LIVE_RATE_MIN_SAMPLES;
+    for (let k = 0; k < need; k++) {
+        for (let w = 0; w < 6; w++) api.recordLiveRate(w, 1000);
+    }
+    api.updateEstimate();
+    const txt = api.getEstimateText();
+    ok(/\(6 workers,/.test(txt),
+        `a measured rate over 6 workers must be labelled 6, not 8: ${txt}`);
+    ok(/up to 6,000 keys\/s measured/.test(txt),
+        `and the figure must be the sum over those same 6 workers: ${txt}`);
+
+    api.terminateAllWorkers();
+    api.resetLiveRates();
+    navigatorMock.hardwareConcurrency = 8;
+});
+
+check('live rate: a dead worker is excluded from the aggregate', () => {
+    // Regression. liveWorkerRates is keyed by worker index and is never pruned
+    // during a run, so an entry survives its worker. The aggregate used to sum
+    // the whole map, which kept counting a worker that had died since it last
+    // reported: with one of four workers failing it reported 4000 keys/s for
+    // three working at 1000 each - 33% inflation, and an ETA that looked better
+    // than the search actually was.
+    const need = api.LIVE_RATE_MIN_SAMPLES;
+    api.resetLiveRates();
+    for (let k = 0; k < need; k++) {
+        for (let w = 0; w < 4; w++) api.recordLiveRate(w, 1000);
+    }
+    eq(api.liveAggregateKeysPerSecond(4), 4000, 'all four reporting');
+
+    // Worker 3 dies: the main thread's worker count drops, the map does not.
+    eq(api.liveAggregateKeysPerSecond(3), 3000,
+        'the aggregate must count only the workers still running');
+    eq(api.liveAggregateKeysPerSecond(2), 2000,
+        'and shrink again as more workers go away');
+    eq(api.liveAggregateKeysPerSecond(1), 1000,
+        'down to a single worker');
+
+    // Completeness is now judged over the LIVE slice. A worker that never
+    // reported at all must still block the figure, even if dead workers filled
+    // the map to a sufficient size.
+    api.resetLiveRates();
+    for (let k = 0; k < need; k++) api.recordLiveRate(7, 5000);
+    eq(api.liveAggregateKeysPerSecond(2), null,
+        'an unreported live worker must block the figure even when the map is full');
+    api.resetLiveRates();
+});
+
+check('live rate: a worker that never reported blocks the figure', () => {
+    // The companion case to the above: the map can be large because many
+    // workers reported over the run, but if the LOWEST-indexed workers are not
+    // among them, there is no trustworthy aggregate.
+    const need = api.LIVE_RATE_MIN_SAMPLES;
+    api.resetLiveRates();
+    for (let k = 0; k < need; k++) api.recordLiveRate(1, 1000);
+    for (let k = 0; k < need; k++) api.recordLiveRate(2, 1000);
+    eq(api.liveAggregateKeysPerSecond(3), null,
+        'worker 0 never reported, so a 3-worker figure is not trustworthy');
+    for (let k = 0; k < need; k++) api.recordLiveRate(0, 1000);
+    eq(api.liveAggregateKeysPerSecond(3), 3000,
+        'once every live worker has reported, the figure appears');
+    api.resetLiveRates();
+});
 check('resetLiveRates drops the measurements with the run', () => {
     // A stale aggregate must not survive into the next search, or the estimate
     // would keep claiming to be measured after the workers that produced it are
