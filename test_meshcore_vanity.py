@@ -2484,17 +2484,24 @@ def test_reserved_warning_is_not_emitted_for_a_hex_suffix() -> None:
 
 
 def test_a_hex_suffix_starting_00_is_still_mined() -> None:
-    """End-to-end: the false warning is gone AND the search still runs."""
+    """End-to-end: the false warning is gone AND the search still runs.
+
+    The suffix is "00" rather than something longer on purpose. A 1-char prefix
+    plus a 2-char suffix is 3 nibbles, so it resolves in thousands of attempts;
+    "a" + "00ff" is 20 bits, roughly a million, which passes on an idle machine
+    and times out on a loaded CI runner. A test that only sometimes passes is
+    worse than no test.
+    """
     import warnings as _w
 
     meshcore_vanity._warned_reserved.clear()
     with _w.catch_warnings(record=True) as caught:
         _w.simplefilter("always")
         result = generate_vanity_key(
-            "a", encoding="hex", suffix_pattern="00ff", max_attempts=4_000_000
+            "a", encoding="hex", suffix_pattern="00", max_attempts=200_000
         )
     assert result.encoded.startswith("a"), result.encoded
-    assert result.encoded.endswith("00ff"), result.encoded
+    assert result.encoded.endswith("00"), result.encoded
     assert not [x for x in caught if "reserved" in str(x.message)]
 
 
@@ -2518,8 +2525,11 @@ def test_the_cli_renders_warnings_without_a_source_location() -> None:
     Python's default format leads with "meshcore_vanity.py:NNN:", which to
     someone running the tool looks like a bug report rather than advice.
     """
-    proc = _run_cli("00ff", "--encoding", "hex", "--force", "--max-attempts", "200")
+    # "00" not "00ff": 8 bits rather than 16, so the search completes inside the
+    # budget on a loaded machine too. The warning is emitted before any search.
+    proc = _run_cli("00", "--encoding", "hex", "--force", "--max-attempts", "20000")
     err = proc.stderr
+    assert proc.returncode == 0, err
     assert "reserved" in err, err
     assert "Warning:" in err, err
     assert "meshcore_vanity.py:" not in err, (
