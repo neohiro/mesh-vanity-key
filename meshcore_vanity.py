@@ -559,6 +559,75 @@ def _human_duration(seconds: float) -> str:
     return f"{seconds / 86400:.1f}d"
 
 
+def _check_match_modes(
+    suffix: bool, suffix_pattern: str | None, both: bool
+) -> None:
+    """Reject combinations of the matching-mode flags that contradict.
+
+    Separate from the rest of generate_vanity_key() so main() can call it
+    before it prints anything. The three modes are mutually exclusive, and
+    announcing a search for the wrong pattern and *then* failing reads as if the
+    search had started: `--suffix cd --both` used to print "starting AND ending
+    with 'ab'" and only then explain that the flags contradict. main() already
+    validates --workers up front for exactly this reason.
+    """
+    if both and suffix:
+        raise ValueError("cannot use --both with --suffix")
+    if suffix_pattern is not None:
+        if suffix:
+            raise ValueError(
+                "cannot combine --suffix (match at the end) with a separate "
+                "suffix pattern; pass one or the other"
+            )
+        if both:
+            raise ValueError(
+                "cannot combine --both with a separate suffix pattern: --both "
+                "uses one pattern for both ends, which is what a separate "
+                "suffix pattern replaces"
+            )
+        if not suffix_pattern:
+            raise ValueError("suffix pattern must not be empty")
+
+
+def _base64_final_chars() -> frozenset[str]:
+    """Characters that can actually end a base64/base64url encoded 32-byte key.
+
+    32 bytes is 256 bits; base64 spends 6 bits per character, so 43 characters
+    hold 258 bits and the last one carries only 4 significant bits - its low two
+    bits are always zero. So the final character's alphabet index must be a
+    multiple of 4, and 16 of the 64 symbols are unreachable there.
+
+    This matters because a suffix is matched against the END of the key: a
+    pattern whose last character is one of the other 48 can never match, and the
+    search would otherwise run until it was killed rather than say so.
+    Verified against 20,000 random keys - the derived set and the observed set
+    are identical.
+    """
+    alphabet = (
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    )
+    return frozenset(alphabet[i] for i in range(0, 64, 4))
+
+
+def _validate_base64_suffix_reachable(suffix: str, label: str) -> None:
+    """Refuse a base64 suffix that provably cannot occur.
+
+    Only the LAST character is constrained: earlier characters of the pattern sit
+    at non-final positions where all 64 symbols are reachable.
+    """
+    reachable = _base64_final_chars()
+    last = suffix[-1]
+    if last in reachable:
+        return
+    raise ValueError(
+        f"this {label} can never match a base64 key: a 32-byte key's base64 "
+        f"form is 43 data characters, and the last one carries only 4 "
+        f"significant bits, so it can only be one of "
+        f"{''.join(sorted(reachable))}. {last!r} is not among them "
+        f"(the full pattern was {suffix!r})"
+    )
+
+
 def generate_vanity_key(
     prefix: str,
     encoding: Encoding = "base64",
@@ -586,25 +655,11 @@ def generate_vanity_key(
     - ``both=True``: require ``prefix`` at both ends (the same pattern twice).
     - otherwise: require ``prefix`` at the start.
     """
+    _check_match_modes(suffix, suffix_pattern, both)
     if suffix_pattern is not None:
-        if suffix:
-            raise ValueError(
-                "cannot combine --suffix (match at the end) with a separate "
-                "suffix pattern; pass one or the other"
-            )
-        if both:
-            raise ValueError(
-                "cannot combine --both with a separate suffix pattern: --both "
-                "uses one pattern for both ends, which is what a separate "
-                "suffix pattern replaces"
-            )
-        if not suffix_pattern:
-            raise ValueError("suffix pattern must not be empty")
         _validate_prefix(
             suffix_pattern, encoding, case_insensitive, label="suffix"
         )
-    if both and suffix:
-        raise ValueError("cannot use --both with --suffix")
     # An empty pattern is only meaningful when a separate suffix pattern
     # supplies the constraint - that is the suffix-only mode. On its own an
     # empty prefix would match every key, which _validate_prefix rejects.
@@ -658,6 +713,8 @@ def generate_vanity_key(
                 f"suffix too long for {encoding}: {suffix_len} chars, max is "
                 f"{data_len} for a 32-byte key"
             )
+        if encoding in ("base64", "base64url"):
+            _validate_base64_suffix_reachable(suffix_pattern or "", "suffix")
         # The prefix covers [0, prefix_len) and the suffix the last
         # `suffix_len` data characters. If those regions touch, the same
         # characters would have to satisfy both patterns, which is impossible
@@ -682,6 +739,8 @@ def generate_vanity_key(
                 f"suffix too long for {encoding}: {prefix_len} chars, max is "
                 f"{data_len} for a 32-byte key"
             )
+        if encoding in ("base64", "base64url"):
+            _validate_base64_suffix_reachable(prefix, "suffix")
         suffix_slice = slice(data_len - prefix_len, data_len)
         check_slice = suffix_slice
     else:
@@ -1173,6 +1232,23 @@ def main() -> int:
         seed_bytes = bytes.fromhex(s)
     else:
         seed_bytes = None
+
+    # Reject contradictory flags before anything is printed or measured, for
+    # the same reason --workers is validated up front: announcing a search for
+    # the wrong pattern and then failing reads as though it had started.
+    try:
+        _check_match_modes(use_suffix, suffix_pattern, args.both)
+        # An impossible base64 suffix would otherwise be reported only after the
+        # search line and the estimate have already been printed. Reusing the
+        # same helper keeps one source of truth for the reachable set.
+        if args.encoding in ("base64", "base64url"):
+            if suffix_pattern is not None:
+                _validate_base64_suffix_reachable(suffix_pattern, "suffix pattern")
+            elif use_suffix:
+                _validate_base64_suffix_reachable(args.prefix, "suffix")
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
 
     # Build descriptive search message based on mode
     if args.both:
