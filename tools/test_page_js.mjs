@@ -2231,6 +2231,17 @@ check('worker count uses every core', () => {
     navigatorMock.hardwareConcurrency = 0;
     eq(api.detectOptimalWorkers(), 4, '0 is falsy so the documented fallback of 4 applies');
     navigatorMock.hardwareConcurrency = 4;
+
+    // Pin the README's worker-count prose to the code. It claimed
+    // "hardwareConcurrency - 1, capped at 16" long after the reserve was
+    // removed, which is the same doc-drift class as the stale scaling table.
+    const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+    ok(/every logical core\*\*, capped at 32/.test(readme),
+        'the README must describe the browser worker count as every logical core, '
+        + 'capped at 32, matching detectOptimalWorkers()');
+    ok(!/hardwareConcurrency - 1/.test(readme),
+        "the README must not still claim a reserved core (hardwareConcurrency - 1); "
+        + 'that reserve was removed as a 25% throughput loss with no UI benefit');
 });
 
 check('live log values are right-aligned, including on mobile', () => {

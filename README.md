@@ -33,7 +33,7 @@ Browser-specific behaviour, for comparison with the CLI below:
 | | Browser app | Python CLI |
 |---|---|---|
 | Pattern matching | hex only | hex, base64, base64url, base58, bech32 |
-| Parallelism | auto-detected Web Workers (`hardwareConcurrency - 1`, capped at 16) | `--workers N` processes |
+| Parallelism | auto-detected Web Workers (every logical core, capped at 32) | `--workers N` processes (CPU count for long searches, capped at 64) |
 | Key history | kept in `localStorage`, exportable as JSON/CSV | none |
 | Installable | yes (PWA with maskable icons) | n/a |
 | Private key | shown per result, stored in history | only with `--output-private` |
@@ -495,12 +495,12 @@ Hex prefixes `00` and `ff` are reserved for MeshCore framework devices and are r
 - **Deterministic mode requires a seed.** Without `--seed`, each run produces different results.
 - **Browser app is hex-only.** It has no bech32/base58/base64 output; use the CLI for those encodings.
 - **Browser app must be served over HTTP(S).** Blob Web Workers are blocked on `file://` URLs.
-- **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency - 1` (capped at 16), which can over- or under-estimate on constrained or shared hardware.
+- **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency` with no reserve (capped at 32), which can over- or under-estimate on constrained or shared hardware. The UI stays responsive anyway because the hot loop yields to the event loop every 30 ms.
 - **Browser key history is obfuscated, not encrypted.** The XOR key is derived from an IndexedDB secret plus the origin, so a copied `localStorage` blob cannot be decoded elsewhere. Script on the origin can read IndexedDB, so this is not XSS protection. Clearing site data deletes the secret and orphans the history. History is never written in plaintext: if no key can be derived, saving is refused instead.
 - **Progress is not capped at 100%.** Expected attempts are the mean of a geometric distribution, so ~37% of searches legitimately run past it. The CLI and browser show the overshoot as `+105.00%` plus how far past the mean the search has run. Once past the mean there is no meaningful "time remaining", so the ETA is replaced by the overshoot instead of being dropped or shown negative.
 - **The hot loop is already at the maths limit.** The cost of a candidate is the Ed25519 scalar multiplication, not our code. Measured per core: **Python/native libsodium ~25,000–32,000 keys/s**, **browser libsodium.wasm ~13,500 keys/s** (`python tools/bench_mining.py`, `bun tools/bench_real_browser.mjs`). Our wrapper adds per-candidate overhead measured at ~10M keys/s equivalent — roughly three orders of magnitude cheaper than the derivation it wraps — so optimising it further cannot help. OpenSSL (via `cryptography`) was measured as a separate backend and is ~20% *slower* than libsodium, so switching implementations is not a win either. The only throughput lever is core count.
-- **Browser workers default to `hardwareConcurrency - 1`** (capped at 16), leaving one core for the UI. The hot loop yields every 30 ms, so this may be more conservative than necessary, but it has never been measured in a real browser.
-- **The CLI uses every core by default.** `--workers` defaults to all CPUs, but stays serial when the search is expected to finish in under a second, because creating a `spawn` pool costs a few tenths of a second and made short prefixes dramatically slower. Pass `--workers N` to override.
+- **Browser workers use every logical core**, capped at 32. This previously reserved one core for the UI, which cost 25% throughput on a 4-core machine for no benefit: the hot loop already yields to the event loop every 30 ms, far more often than the browser needs to repaint, so the UI stays responsive anyway. Measured with the real keygen primitive, SMT siblings still add ~19% over four threads (see "Worker scaling"), so saturating every logical core is the right call and there is no throughput left on that axis.
+- **The CLI raises its worker count to the CPU count for long searches**, capped at 64, and refuses more than 256. It stays at 1 when the search is expected to finish in under a second (`_PARALLEL_MIN_SECONDS = 1.0`), because creating a `spawn` pool costs ~0.3s and made short prefixes dramatically slower. Pass `--workers N` to override either way.
 - **Browser prefix + suffix are limited to 64 hex digits combined.** A key is exactly 64 hex digits, so longer patterns would overlap and could never match; the app refuses to start such a search.
 
 ## Output
