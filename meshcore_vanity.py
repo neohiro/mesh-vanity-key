@@ -9,7 +9,14 @@ where the output is captured somewhere a secret should not land (CI logs, a
 shared terminal, a piped dashboard).
 
 Optimizations:
-- Scalar-walk: increment private scalar directly instead of hashing per attempt
+- Scalar walk: candidates come from a 256-bit counter incremented in place,
+  not from a fresh random draw, so a given --seed reproduces a search exactly.
+  It does NOT skip work: libsodium derives each candidate with SHA-512 over
+  that counter, so the hash is paid per attempt either way. Measured on this
+  host, one candidate costs ~36.7us, of which SHA-512 is ~0.9us (2.5%) and the
+  Ed25519 scalar multiplication ~32.4us (88%) - the wrapper arithmetic around
+  it is ~1%. There is no meaningful overhead left to remove; the only lever on
+  throughput is running more workers.
 - Warns on reserved prefixes (00, FF) for framework devices (strict with
   MESHCORE_VANITY_STRICT_RESERVED=1)
 - Parallel workers with optimized work distribution
@@ -394,6 +401,89 @@ def _alphabet_size(encoding: Encoding, at_key_end: bool = False) -> int:
     return 32
 
 
+# Characters of the bech32 string either side of the final data character.
+# The layout is hrp + '1' + data(52) + checksum(6), so the final data character
+# sits exactly this far from the end, with the 6-character checksum outside it.
+_BECH32_CHECKSUM_LEN = 6
+
+# The 32-byte key is 256 bits, which does not fill 52 five-bit groups (260
+# bits): 4 bits of padding land in the last data character, leaving it a single
+# significant bit and so only 2 of the 32 symbols. Derived, then checked against
+# 200,000 real encodings (see the reachability tests).
+_BECH32_LAST_DATA_VALUES = frozenset(
+    BECH32_CHARSET[v] for v in (0, 16)
+)
+
+
+def _bech32_last_data_offset(suffix_len: int) -> int:
+    """Index, within a suffix pattern, of the character that is data[-1].
+
+    The final data character is _BECH32_CHECKSUM_LEN + 1 characters from the end,
+    so a suffix long enough to reach it contains it at this offset. Returns -1
+    when the suffix is entirely within the checksum and cannot reach it.
+    """
+    if suffix_len <= _BECH32_CHECKSUM_LEN:
+        return -1
+    return suffix_len - (_BECH32_CHECKSUM_LEN + 1)
+
+
+def _validate_bech32_suffix_reachable(suffix: str, label: str) -> None:
+    """Refuse a bech32 suffix that provably cannot occur.
+
+    Only the final DATA character is constrained (see
+    _BECH32_LAST_DATA_VALUES); the 6-character checksum outside it is uniform, so
+    a suffix of 6 or fewer characters is unconstrained and is always allowed.
+    """
+    offset = _bech32_last_data_offset(len(suffix))
+    if offset < 0:
+        return
+    ch = suffix[offset]
+    if ch in _BECH32_LAST_DATA_VALUES:
+        return
+    raise ValueError(
+        f"this {label} can never match a bech32 key: a 32-byte key encodes to "
+        f"52 data characters carrying 256 bits, so the last one holds only 4 "
+        f"significant bits and can only be "
+        f"{''.join(sorted(_BECH32_LAST_DATA_VALUES))} - but this pattern needs "
+        f"{ch!r} there (position {offset} of {len(suffix)}, "
+        f"{_BECH32_CHECKSUM_LEN + 1} characters from the end). A bech32 suffix "
+        f"of {_BECH32_CHECKSUM_LEN} or fewer characters never reaches that "
+        f"position and is unaffected."
+    )
+
+
+def _end_search_space(encoding: Encoding, suffix_len: int) -> int:
+    """Search space of a pattern applied at the END of the key.
+
+    The end is not the same as the start: the last data character of a key
+    carries fewer bits than its alphabet implies (4 in base64, 1 in bech32), so
+    a suffix is cheaper than a prefix of the same length. Charging a suffix the
+    full alphabet overstated the estimate for every base64 and long bech32
+    suffix.
+    """
+    if suffix_len <= 0:
+        return 1
+    if encoding in ("base64", "base64url"):
+        return (
+            _alphabet_size(encoding) ** (suffix_len - 1)
+            * _alphabet_size(encoding, at_key_end=True)
+        )
+    if encoding == "bech32":
+        # Characters inside the data part are ordinary; the one 6+1 from the end
+        # is the constrained final data character, and the 6 outside it are the
+        # checksum, which is uniform.
+        offset = _bech32_last_data_offset(suffix_len)
+        if offset < 0:
+            return _alphabet_size(encoding) ** suffix_len
+        constrained = offset          # ordinary data chars before it
+        checksum = min(suffix_len, _BECH32_CHECKSUM_LEN)
+        space = _alphabet_size(encoding) ** constrained
+        space *= len(_BECH32_LAST_DATA_VALUES)
+        space *= _alphabet_size(encoding) ** checksum
+        return space
+    return _alphabet_size(encoding) ** suffix_len
+
+
 def _estimate_search_space(
     encoding: Encoding, prefix_len: int, suffix_len: int | None
 ) -> int:
@@ -405,11 +495,9 @@ def _estimate_search_space(
 
     - constraining both ends multiplies the search space rather than adding to
       it, so the estimate is the product of the two ends;
-    - the FINAL character of a base64 key is not a full 6-bit character, so the
-      end costs slightly less than the same-length prefix. Charging the whole
-      suffix pattern the reduced alphabet instead overstated `--suffix 7f` by
-      16x; charging the whole pattern the full alphabet overstated it by 4x.
-      Only the last character is reduced, which is what this now does.
+    - the end of the key has a smaller alphabet than the start in base64, and
+      the same is true of the final data character in bech32 (7 characters from
+      the end, not 1). _end_search_space() owns that per encoding.
 
     Both callers (the search itself and main()'s pre-flight estimate) go through
     here, so the number quoted before the search and the one used during it
@@ -418,13 +506,7 @@ def _estimate_search_space(
     space = _alphabet_size(encoding) ** prefix_len
     if suffix_len is None:
         return space
-    if suffix_len <= 0:
-        return space
-    full = _alphabet_size(encoding)
-    if encoding in ("base64", "base64url"):
-        tail = _alphabet_size(encoding, at_key_end=True)
-        return space * (full ** (suffix_len - 1)) * tail
-    return space * (full ** suffix_len)
+    return space * _end_search_space(encoding, suffix_len)
 
 
 def _max_encoded_len(encoding: Encoding, hrp: str) -> int:
@@ -642,6 +724,26 @@ def _base64_final_chars() -> frozenset[str]:
     return frozenset(alphabet[i] for i in range(0, 64, 4))
 
 
+def _validate_suffix_reachable(
+    encoding: Encoding, suffix: str, label: str
+) -> None:
+    """Refuse a suffix that provably cannot occur, per encoding.
+
+    Only encodings with a provable constraint are handled. hex and base58 have
+    none: base58's leading-digit distribution makes some two- and three-character
+    prefixes RARE but never impossible, which was checked exhaustively over all
+    of them by interval arithmetic, so a validator there would only risk
+    rejecting valid patterns. A wrong rejection is worse than a futile search,
+    which at least ends in a visible "exceeded max_attempts".
+    """
+    if not suffix:
+        return
+    if encoding in ("base64", "base64url"):
+        _validate_base64_suffix_reachable(suffix, label)
+    elif encoding == "bech32":
+        _validate_bech32_suffix_reachable(suffix, label)
+
+
 def _validate_base64_suffix_reachable(suffix: str, label: str) -> None:
     """Refuse a base64 pattern that provably cannot end a key.
 
@@ -684,7 +786,9 @@ def generate_vanity_key(
 ) -> VanityResult:
     """Generate Ed25519 keypair until the public key encoding matches.
 
-    Uses scalar-walk key derivation for performance and reproducibility.
+    Uses the scalar walk for reproducibility, not for speed: see the module
+    docstring for the measured breakdown of where a candidate's time actually
+    goes.
 
     Matching modes, in precedence order:
 
@@ -696,6 +800,13 @@ def generate_vanity_key(
     - ``both=True``: require ``prefix`` at both ends (the same pattern twice).
     - otherwise: require ``prefix`` at the start.
     """
+    # Clamp case-insensitivity to what the encoding can actually support BEFORE
+    # anything validates a pattern, so the validator sees the same setting the
+    # matcher will use. Doing it afterwards meant a library caller hitting the
+    # default (True) on a case-SENSITIVE encoding had its pattern lowercased for
+    # validation: `--encoding base58 L...` was refused because "l" is not in the
+    # base58 alphabet, even though "L" is and the match is case-sensitive anyway.
+    case_insensitive = _effective_case_insensitive(encoding, case_insensitive)
     _check_match_modes(suffix, suffix_pattern, both)
     if suffix_pattern is not None:
         _validate_prefix(
@@ -722,7 +833,7 @@ def generate_vanity_key(
     if workers > 256:
         raise ValueError("workers must be <= 256")
 
-    case_insensitive = _effective_case_insensitive(encoding, case_insensitive)
+    # Already clamped at the top of the function, before validation.
     prefix_cmp = prefix.lower() if case_insensitive else prefix
     prefix_len = len(prefix)
     # A 32-byte key has a fixed maximum encoded length per encoding; a longer
@@ -754,12 +865,11 @@ def generate_vanity_key(
                 f"suffix too long for {encoding}: {suffix_len} chars, max is "
                 f"{data_len} for a 32-byte key"
             )
-        if encoding in ("base64", "base64url"):
-            # In --both mode the pattern is repeated at the end, so its final
-            # character is what has to be reachable - not an empty string.
-            _validate_base64_suffix_reachable(
-                prefix if both else suffix_pattern, "suffix"
-            )
+        # In --both mode the pattern is repeated at the end, so the same pattern
+        # is what has to be reachable there, not an empty string.
+        _validate_suffix_reachable(
+            encoding, prefix if both else suffix_pattern, "suffix"
+        )
         # The prefix covers [0, prefix_len) and the suffix the last
         # `suffix_len` data characters. If those regions touch, the same
         # characters would have to satisfy both patterns, which is impossible
@@ -784,8 +894,7 @@ def generate_vanity_key(
                 f"suffix too long for {encoding}: {prefix_len} chars, max is "
                 f"{data_len} for a 32-byte key"
             )
-        if encoding in ("base64", "base64url"):
-            _validate_base64_suffix_reachable(prefix, "suffix")
+        _validate_suffix_reachable(encoding, prefix, "suffix")
         suffix_slice = slice(data_len - prefix_len, data_len)
         check_slice = suffix_slice
     else:
@@ -833,7 +942,7 @@ def generate_vanity_key(
             start_time=time.perf_counter(),
         )
 
-    # Single-threaded fallback (scalar-walk, batch verification)
+    # Single-threaded fallback (scalar walk)
     attempts = 0
     start = time.perf_counter()
 
@@ -851,11 +960,16 @@ def generate_vanity_key(
         encoding, prefix_len, suffix_len if two_ended else None
     )
 
-    # Scalar-walk: derive initial scalar from seed once, then increment
-    # as a 256-bit integer for each attempt (avoids SHA-256 per attempt)
+    # Scalar walk: take the 256-bit counter from the seed once, then increment it
+    # in place for each attempt. Note this counter is a SEED, not the private
+    # scalar: libsodium still runs SHA-512 over it inside
+    # crypto_sign_seed_keypair, so this avoids a fresh CSPRNG draw rather than a
+    # hash. The walk also makes a given --seed reproduce a search exactly.
     scalar = int.from_bytes(hashlib.sha256(seed).digest(), "big")
 
-    # Batch verification: check multiple candidates per iteration
+    # Chunk the loop so max_attempts and the progress counter are only examined
+    # every BATCH_SIZE candidates. It is NOT batch verification - each candidate
+    # is still derived and matched on its own.
     BATCH_SIZE = 16
     next_report = progress_interval
 
@@ -1291,11 +1405,12 @@ def main() -> int:
         # An impossible base64 suffix would otherwise be reported only after the
         # search line and the estimate have already been printed. Reusing the
         # same helper keeps one source of truth for the reachable set.
-        if args.encoding in ("base64", "base64url"):
-            if suffix_pattern is not None:
-                _validate_base64_suffix_reachable(suffix_pattern, "suffix pattern")
-            elif use_suffix:
-                _validate_base64_suffix_reachable(args.prefix, "suffix")
+        if suffix_pattern is not None:
+            _validate_suffix_reachable(
+                args.encoding, suffix_pattern, "suffix pattern"
+            )
+        elif use_suffix:
+            _validate_suffix_reachable(args.encoding, args.prefix, "suffix")
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2

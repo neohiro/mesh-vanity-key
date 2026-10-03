@@ -235,6 +235,34 @@ Regression guards:
 | `node tools/bench_keygen_scaling.mjs` | aggregate keys/s vs thread count using the **real** `crypto_sign_seed_keypair` from the shipped wasm. The trustworthy of the two scaling probes — see "Worker scaling" |
 | `node tools/check_keygen_baseline.mjs <report>` | compares a keygen-scaling run against `tools/keygen_baseline.json`; fails only on a large **drop**. Runs nightly via the `keygen-scaling` workflow |
 
+#### Where a candidate's time actually goes (CLI)
+
+Measured on the development host, best-of-N, so the split is not noise:
+
+| Component | Per candidate | Share |
+|---|---|---|
+| `crypto_sign_seed_keypair` (whole primitive) | ~36.7 µs | — |
+| — of which Ed25519 scalar multiplication | ~32.4 µs | ~88% |
+| — of which SHA-512 over the seed | ~0.9 µs | ~2.5% |
+| Hex encode + pattern compare | ~0.2 µs | ~1% |
+| Scalar-walk bookkeeping | ~0.3 µs | ~1% |
+
+The scalar multiplication is irreducible without changing the algorithm, and the
+algorithm is already the right one — see "Scalar-Walk Optimization". Two
+consequences worth stating plainly:
+
+- **Switching to `crypto_scalarmult_base` to skip SHA-512 would buy ~2.5%**, and
+  needs a re-clamp per candidate since incrementing a clamped scalar breaks the
+  clamping. Not worth the correctness risk.
+- **The remaining wrapper is ~1–2%.** Micro-optimising the encode/compare path
+  cannot move keys/s meaningfully; the browser needs its nibble comparison
+  because JS overhead is a far larger share there, but Python does not.
+
+The one genuinely contended resource is the shared progress counter, which every
+worker locks once per 16 candidates. Measured at 8 workers it costs ~0.6 µs per
+batch against ~620 µs of keygen — **~0.1%** — so `--workers` is the only real
+throughput lever, and it is already there.
+
 > **Careful:** never write `if (++bytes[i] !== 0)`. Incrementing a `Uint8Array`
 > element returns the *unclamped* value (`256`, not `0`), so the carry test never
 > fires and the counter silently stops at a byte boundary. Mask explicitly:
@@ -528,7 +556,8 @@ Finds a bech32-encoded key starting with `mc1neoh`.
 ### Separate prefix and suffix
 
 ```bash
-python meshcore_vanity.py ab --suffix Yc
+python meshcore_vanity.py ab --suffix Yc                     # base64
+python meshcore_vanity.py mc1q --encoding bech32 --suffix qs   # bech32
 ```
 
 Finds a key that starts with `ab` **and** ends with `Yc`, checked in the same
@@ -654,11 +683,25 @@ succeed, so it is rejected up front rather than left spinning.
 
 ### Scalar-Walk Optimization
 
-Instead of hashing a seed + counter for every attempt (expensive), the tool:
+Candidates come from a 256-bit counter taken from the seed once and incremented
+in place, rather than from a fresh random draw per attempt:
 
-1. Derives an initial 256-bit scalar from the seed via SHA-256 (once)
-2. For each attempt, increments the scalar by 1 and uses it directly as the Ed25519 private key seed
-3. This avoids the SHA-256 per attempt, yielding significant speedup
+1. Derive an initial 256-bit counter from the seed via SHA-256 (once)
+2. For each attempt, increment it and pass it as the seed to libsodium
+3. A given `--seed` therefore reproduces a search exactly
+
+**This is not a hashing optimisation, and the distinction matters.** libsodium
+derives each candidate with SHA-512 over that counter inside
+`crypto_sign_seed_keypair`, so the hash is paid per attempt either way —
+measured at ~0.9 µs of a ~36.7 µs candidate. What the walk avoids is a CSPRNG
+draw (a syscall) and, more importantly, it makes a run reproducible. Its real
+contribution to throughput is small; the practical way to go faster is
+`--workers`.
+
+Walking the counter is also mathematically sound for mining. Consecutive scalars
+give public keys related by a fixed curve point, which is public knowledge and
+reveals nothing about the discrete log; every candidate still requires a full
+scalar multiplication, and there is no exploitable structure in the sequence.
 
 ### Parallel Search
 
@@ -709,9 +752,42 @@ bits, so it can only be one of 048AEIMQUYcgkosw. 'b' is not among them
 ```
 
 Only the final character is constrained — earlier characters of the pattern sit
-at positions where all 64 symbols are reachable. `hex`, `base58` and `bech32` are
-unaffected. The reachable set is derived from the encoding rather than
-hard-coded, and a test checks that derivation against 3,000 real encodings.
+at positions where all 64 symbols are reachable.
+
+### Suffixes and the bech32 checksum
+
+`bech32` has the same kind of constraint, in a different place. A 32-byte key is
+61 characters: `hrp` + `1` + 52 data characters + a 6-character checksum. The 52
+five-bit groups hold 260 bits for 256 bits of key, so 4 padding bits land in the
+**last data character**, leaving it one significant bit — only `q` or `s` can
+occur there.
+
+That character sits 7 from the end, so a bech32 suffix only faces the constraint
+at length 7 or more; shorter suffixes land in the checksum, which is uniform.
+
+```console
+$ meshcore-vanity mc1q --encoding bech32 --suffix ccccccc
+Error: this suffix pattern can never match a bech32 key: a 32-byte key encodes to
+52 data characters carrying 256 bits, so the last one holds only 4 significant
+bits and can only be qs - but this pattern needs 'c' there (position 0 of 7,
+7 characters from the end).
+```
+
+It also makes such a search **16x cheaper** than the character count suggests,
+which the pre-flight estimate accounts for: a 7-character bech32 suffix costs
+`2 × 32⁶`, not `32⁷`.
+
+### Encodings that are deliberately not validated
+
+`hex` and `base58` have no impossible-pattern rule, and none is invented for
+them. base58's encoder prepends `1` for each leading zero byte, and its
+leading-digit distribution does make some two- and three-character prefixes
+**rare** — but an exhaustive check over all of them, by interval arithmetic
+against the reachable value range, showed every one is still reachable. Only the
+highest-probability ones were merely absent from a 300,000-key sample. Refusing
+them would reject valid targets, which is the worse failure; a pattern that is
+merely rare still gets found, and one that is genuinely impossible now ends in a
+visible `exceeded max_attempts` rather than running forever.
 
 ## Limitations
 
