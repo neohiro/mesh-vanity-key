@@ -2,7 +2,15 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <!-- Chrome on Android boosts the font size of text blocks it considers
+         "too small" relative to the viewport, unless told not to. That is why
+         the estimate line ran off the side of the page on a phone even though
+         the container is correctly sized: the text was being silently
+         enlarged, and the line is a single unbroken run with nothing to wrap
+         it. text-size-adjust=100% pins the authored size. viewport-fit=cover
+         is included so the layout reaches under a notch, where the existing
+         env(safe-area-inset-*) padding then keeps content clear of it. -->
     <title>MeshCore Vanity Key Generator</title>
     <link rel="manifest" href="manifest.json">
     <link rel="icon" href="icon-192.png" type="image/png">
@@ -68,10 +76,20 @@
             background: #161b22;
             border: 1px solid #30363d;
             border-radius: 12px;
-            padding: 40px;
+            /* 40px normally, but never less than the notch inset once
+               viewport-fit=cover is set. Without this the layout would extend
+               under a notch in landscape and the first row of controls would
+               sit partly beneath it. */
+            padding: max(40px, env(safe-area-inset-top)) max(40px, env(safe-area-inset-right))
+                     max(40px, env(safe-area-inset-bottom)) max(40px, env(safe-area-inset-left));
             max-width: 600px;
             width: 100%;
         }
+        /* Chrome on Android also boosts font size in wide blocks unless told
+           not to. Both halves are needed: this stops the boost, and the
+           wrapping rule on #estimate stops the (deliberately long) estimate
+           line from forcing the page wider than the screen. */
+        html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
         h1 { color: #58a6ff; margin-bottom: 8px; font-size: 24px; }
         .subtitle { color: #8b949e; margin-bottom: 32px; font-size: 14px; }
         .form { margin-bottom: 24px; }
@@ -285,7 +303,40 @@
             .eta-num { min-width: 10ch; }
             .eta-days { min-width: 6ch; }
         }
-        #estimate { margin-top: 12px; }
+        #estimate {
+            margin-top: 12px;
+            /* MUST WRAP. This line is one unbroken run of text - "Expected
+               attempts: 65,536 | Estimated time: ~2.1d (8 workers, up to 92,000
+               keys/s estimated)" - and it had no wrapping rule at all. On a
+               360px phone the container's content box is only 280px after its
+               40px padding, so the line overflowed the panel and the viewport
+               and the page scrolled sideways.
+               anywhere (not break-word) because the separators and digit groups
+               would otherwise be left stranded at a line end. */
+            overflow-wrap: anywhere;
+            /* Belt and braces: a single unbreakable run must never widen the
+               layout even if a future edit removes a space. */
+            min-width: 0;
+            max-width: 100%;
+            /* Honour the newlines in the estimate text (see updateEstimate).
+               Without pre-line they collapse to spaces and the lines run
+               together again. */
+            white-space: pre-line;
+            line-height: 1.5;
+        }
+        @media (max-width: 480px) {
+            /* 40px of padding each side leaves only 280px of content box on a
+               360px phone, which the estimate line and the 32-hex inputs do not
+               fit into comfortably. Tightening it to 16px recovers 48px, which
+               is the difference between the ETA wrapping mid-number and
+               wrapping between facts. */
+            .container {
+                padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+                         max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+                border-radius: 10px;
+            }
+            h1 { font-size: 21px; }
+        }
         #results { margin-top: 24px; display: flex; flex-direction: column; gap: 16px; max-height: 60vh; overflow-y: auto; }
         .result-frame { padding: 20px; background: #0d1117; border: 1px solid #238636; border-radius: 8px; }
         .result-frame h2 { color: #3fb950; font-size: 18px; margin-bottom: 16px; }
@@ -954,21 +1005,33 @@
 
         // True once every live worker has enough samples to be trusted. Partial
         // data would understate the aggregate and so overstate the ETA.
+        //
+        // `liveWorkerRates` is keyed by worker index and is never pruned during a
+        // run, so it can hold entries for workers that have since died. Only the
+        // first `expectedWorkers` indices correspond to workers that are still
+        // running, so completeness is checked over THAT slice rather than over
+        // the map as a whole.
         function liveRateIsComplete(expectedWorkers) {
             const want = Number(expectedWorkers);
             if (!isFinite(want) || want <= 0) return false;
-            if (liveWorkerRates.size < want) return false;
-            for (const r of liveWorkerRates.values()) {
-                if (!isFinite(r) || r <= 0) return false;
+            for (let i = 0; i < want; i++) {
+                const r = liveWorkerRates.get(i);
+                if (r === undefined || !isFinite(r) || r <= 0) return false;
             }
             return true;
         }
 
         // Measured aggregate keys/s, or null when there is nothing trustworthy.
+        //
+        // Sums ONLY the live workers. Summing the whole map would keep counting
+        // a worker that has died since it last reported, inflating the aggregate
+        // and making the ETA look better than the search actually is - verified
+        // to overstate throughput by 33% when one of four workers fails.
         function liveAggregateKeysPerSecond(expectedWorkers) {
-            if (!liveRateIsComplete(expectedWorkers)) return null;
+            const want = Number(expectedWorkers);
+            if (!liveRateIsComplete(want)) return null;
             let sum = 0;
-            for (const r of liveWorkerRates.values()) sum += r;
+            for (let i = 0; i < want; i++) sum += liveWorkerRates.get(i);
             return sum > 0 ? sum : null;
         }
 
@@ -1032,7 +1095,15 @@
                     timeStr = (estSeconds / 86400).toFixed(1) + 'd';
                 }
             }
-            const workerLabel = numWorkers === 1 ? 'worker' : 'workers';
+            // Report the count that the rate actually describes.
+            //
+            // Pre-flight, that is the planned worker count. Once the rate is
+            // measured it is the number of workers actually running - if some
+            // failed to initialise, saying "8 workers" beside a figure derived
+            // from six would be a straight contradiction, and the whole point of
+            // this line is that its numbers are measurements.
+            const shownWorkers = usingLive ? (workers.length || numWorkers) : numWorkers;
+            const workerLabel = shownWorkers === 1 ? 'worker' : 'workers';
             // Only actual measurements go in the grey line: expected attempts,
             // estimated time, worker count and the measured keys/s rate.
             //
@@ -1045,8 +1116,15 @@
             // advertised. Provenance stays in WORKER_SCALE_MEASURED and the
             // README's "Worker scaling" section.
             estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString()
-                + ' | Estimated time: ~' + timeStr
-                + ' (' + numWorkers + ' ' + workerLabel
+                // A real newline after each fact rather than a space. The
+                // `|` separators are a desktop affordance; on a narrow screen
+                // they end up dangling at the start of a wrapped line, and the
+                // estimate was the one element that could widen the page.
+                // A newline is a break opportunity the browser will use only if
+                // it has to, so wide screens keep the single-line summary and a
+                // phone gets one fact per line.
+                + '\nEstimated time: ~' + timeStr
+                + '\n(' + shownWorkers + ' ' + workerLabel
                 + ', up to ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel
                 + ')';
         }

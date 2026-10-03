@@ -1153,7 +1153,87 @@ check('the grey estimate flips from estimated to measured', () => {
     api.resetLiveRates();
     navigatorMock.hardwareConcurrency = 8;
 });
+check('the grey estimate reports the worker count its rate describes', () => {
+    // The line must never contradict itself. Pre-flight the count is the PLANNED
+    // one; once the rate is measured it is the number actually running. Saying
+    // "8 workers" beside a figure derived from six - because two failed to
+    // initialise - would be exactly the invented precision this line exists to
+    // avoid.
+    navigatorMock.hardwareConcurrency = 8;
+    getElementById('prefix').value = 'ab';
+    api.resetLiveRates();
+    api.updateEstimate();
+    ok(/\(8 workers,/.test(api.getEstimateText()),
+        `pre-flight must report the planned worker count: ${api.getEstimateText()}`);
 
+    // Stand in six running workers using the existing test hook, so no
+    // test-only production code is needed just to control the worker count.
+    api.terminateAllWorkers();
+    for (let i = 0; i < 6; i++) api.__trackWorker({ terminate() {} });
+
+    const need = api.LIVE_RATE_MIN_SAMPLES;
+    for (let k = 0; k < need; k++) {
+        for (let w = 0; w < 6; w++) api.recordLiveRate(w, 1000);
+    }
+    api.updateEstimate();
+    const txt = api.getEstimateText();
+    ok(/\(6 workers,/.test(txt),
+        `a measured rate over 6 workers must be labelled 6, not 8: ${txt}`);
+    ok(/up to 6,000 keys\/s measured/.test(txt),
+        `and the figure must be the sum over those same 6 workers: ${txt}`);
+
+    api.terminateAllWorkers();
+    api.resetLiveRates();
+    navigatorMock.hardwareConcurrency = 8;
+});
+
+check('live rate: a dead worker is excluded from the aggregate', () => {
+    // Regression. liveWorkerRates is keyed by worker index and is never pruned
+    // during a run, so an entry survives its worker. The aggregate used to sum
+    // the whole map, which kept counting a worker that had died since it last
+    // reported: with one of four workers failing it reported 4000 keys/s for
+    // three working at 1000 each - 33% inflation, and an ETA that looked better
+    // than the search actually was.
+    const need = api.LIVE_RATE_MIN_SAMPLES;
+    api.resetLiveRates();
+    for (let k = 0; k < need; k++) {
+        for (let w = 0; w < 4; w++) api.recordLiveRate(w, 1000);
+    }
+    eq(api.liveAggregateKeysPerSecond(4), 4000, 'all four reporting');
+
+    // Worker 3 dies: the main thread's worker count drops, the map does not.
+    eq(api.liveAggregateKeysPerSecond(3), 3000,
+        'the aggregate must count only the workers still running');
+    eq(api.liveAggregateKeysPerSecond(2), 2000,
+        'and shrink again as more workers go away');
+    eq(api.liveAggregateKeysPerSecond(1), 1000,
+        'down to a single worker');
+
+    // Completeness is now judged over the LIVE slice. A worker that never
+    // reported at all must still block the figure, even if dead workers filled
+    // the map to a sufficient size.
+    api.resetLiveRates();
+    for (let k = 0; k < need; k++) api.recordLiveRate(7, 5000);
+    eq(api.liveAggregateKeysPerSecond(2), null,
+        'an unreported live worker must block the figure even when the map is full');
+    api.resetLiveRates();
+});
+
+check('live rate: a worker that never reported blocks the figure', () => {
+    // The companion case to the above: the map can be large because many
+    // workers reported over the run, but if the LOWEST-indexed workers are not
+    // among them, there is no trustworthy aggregate.
+    const need = api.LIVE_RATE_MIN_SAMPLES;
+    api.resetLiveRates();
+    for (let k = 0; k < need; k++) api.recordLiveRate(1, 1000);
+    for (let k = 0; k < need; k++) api.recordLiveRate(2, 1000);
+    eq(api.liveAggregateKeysPerSecond(3), null,
+        'worker 0 never reported, so a 3-worker figure is not trustworthy');
+    for (let k = 0; k < need; k++) api.recordLiveRate(0, 1000);
+    eq(api.liveAggregateKeysPerSecond(3), 3000,
+        'once every live worker has reported, the figure appears');
+    api.resetLiveRates();
+});
 check('resetLiveRates drops the measurements with the run', () => {
     // A stale aggregate must not survive into the next search, or the estimate
     // would keep claiming to be measured after the workers that produced it are
@@ -2255,6 +2335,60 @@ check('rate graph: decimation keeps the newer of each pair, and terminates', () 
     } finally {
         Date.now = realNow;
         api.resetRateGraph();
+    }
+});
+check('the estimate line cannot widen a narrow screen', () => {
+    // Reported from an Android phone: the estimate ran off the side of the page
+    // and the page scrolled sideways.
+    //
+    // Two independent causes, both needed:
+    //
+    // 1. Chrome on Android boosts the font size of text blocks it thinks are
+    //    too small for the viewport. The viewport meta did not declare
+    //    text-size-adjust, so the text was silently enlarged - and this line is
+    //    a single unbroken run with nothing to wrap it.
+    // 2. #estimate had no wrapping rule at all. `width: 100%` plus a block child
+    //    that cannot break means the element is wider than its container.
+    //
+    // Both are load-bearing: with only (1) the line still overflows at the
+    // authored size, and with only (2) the boost pushes it back out.
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+
+    ok(/name="viewport"[^>]*text-size-adjust|viewport[^>]*initial-scale/.test(html)
+        || /text-size-adjust:\s*100%/.test(html),
+    'the page must disable Chrome\'s Android font boosting, or the estimate '
+        + 'is silently enlarged on a phone');
+
+    // The wrapping rule on the element itself.
+    const m = html.match(/#estimate\s*\{([^}]*)\}/);
+    ok(m, '#estimate must have a rule of its own');
+    ok(/overflow-wrap:\s*anywhere/.test(m[1]),
+        '#estimate must allow breaking, or one long run overflows the page');
+    ok(/max-width:\s*100%/.test(m[1]),
+        '#estimate must be capped at its container width');
+
+    // And the facts must be separated by real break opportunities. The `|`
+    // separators stranded at the start of wrapped lines and were the original
+    // overflow trigger.
+    ok(/white-space:\s*pre-line/.test(m[1]),
+        '#estimate must honour the newlines between facts');
+    ok(/\\nEstimated time: ~/.test(html),
+        'the estimate facts must be newline-separated');
+    ok(/\\n\(' \+ shownWorkers/.test(html),
+        'the worker/rate clause must start on its own line too');
+
+    // Narrow screens need the room: 40px of container padding on each side of a
+    // 360px phone leaves 280px, which is not enough.
+    ok(/@media \(max-width: 480px\)/.test(html),
+        'a narrow-screen breakpoint must exist to reclaim the container padding');
+    ok(/padding:\s*max\(16px, env\(safe-area-inset-top\)\)/.test(html),
+        'the container must tighten its padding on a phone');
+
+    // And if viewport-fit=cover is claimed, the safe-area padding has to be
+    // real. A comment claiming padding that does not exist is worse than none.
+    if (/viewport-fit=cover/.test(html)) {
+        ok(/env\(safe-area-inset-(top|right|bottom|left)\)/.test(html),
+            'viewport-fit=cover is declared, so the safe-area padding must be real');
     }
 });
 

@@ -1120,7 +1120,19 @@ def test_page_estimates_and_formatting():
     html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
 
     # Singular vs plural must be conditional, not a hardcoded "workers".
-    assert "numWorkers === 1 ? 'worker' : 'workers'" in html
+    #
+    # The count it conditions on is `shownWorkers`, not `numWorkers`: once the
+    # rate is measured the line describes the workers actually running, so a
+    # search that lost some to an init failure must not still claim the planned
+    # count beside a figure derived from fewer.
+    assert "shownWorkers === 1 ? 'worker' : 'workers'" in html
+    assert "const shownWorkers = usingLive ? (workers.length || numWorkers) : numWorkers;" in html
+    # The facts are newline-separated so the line can break between them; the
+    # `|` separators were a desktop affordance that stranded at wrapped line
+    # ends and could widen the page on a phone.
+    assert "\\nEstimated time: ~" in html
+    assert "+ '\\n(' + shownWorkers + ' ' + workerLabel" in html
+    assert "white-space: pre-line" in html
     assert "1 workers" not in html
 
     # formatElapsed() powers the "Found in ... attempts (...)" line.
@@ -1709,7 +1721,156 @@ def _load_make_icons():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+def test_private_key_is_printed_by_default() -> None:
+    """The key must print without a flag.
 
+    Re-running a search to recover the private key costs minutes to days of
+    CPU. That is why it used to be behind --output-private and no longer is.
+    """
+    import base64 as _b64
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).parent
+    proc = subprocess.run(
+        [sys.executable, str(root / "meshcore_vanity.py"), "ab", "--force"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(root)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    err = proc.stderr
+    assert "PRIVATE_KEY_BASE64=" in err, (
+        "the private key must be printed to stderr WITHOUT a flag:\n" + err
+    )
+    assert "MESHCORE_PRIV_HEX=" in err, "the expanded hex form must also print"
+    assert "set prv.key " in err, "and the copy-pasteable CLI command"
+
+    # The two forms must agree: base64 is the 32-byte seed, and the expanded
+    # hex is the 64-byte clamped-scalar||nonce form MeshCore's `set prv.key`
+    # expects (NOT a seed with a suffix - see meshcore_expanded_private_key).
+    b64 = _b64.b64decode(
+        next(
+            line.split("=", 1)[1]
+            for line in err.splitlines()
+            if line.startswith("PRIVATE_KEY_BASE64=")
+        )
+    )
+    expanded = next(
+        line.split("=", 1)[1]
+        for line in err.splitlines()
+        if line.startswith("MESHCORE_PRIV_HEX=")
+    )
+    assert len(b64) == 32, f"the seed must be 32 bytes, got {len(b64)}"
+    assert len(expanded) == 128, (
+        f"the expanded key must be 64 bytes of hex (128 chars), got {len(expanded)}"
+    )
+    import hashlib as _hashlib
+
+    # The first 32 bytes must be SHA-512(seed) with Ed25519 clamping applied -
+    # which means the LOW bits are cleared, so compare against a clamped copy
+    # rather than the raw digest.
+    want = bytearray(_hashlib.sha512(b64).digest()[:32])
+    want[0] &= 0xF8
+    want[31] &= 0x7F
+    want[31] |= 0x40
+    got = bytes.fromhex(expanded)
+    assert got[:32] == bytes(want), (
+        "the first half of the expanded key must be the clamped SHA-512 scalar"
+    )
+    # And the second half is the untouched nonce half of the same digest.
+    assert got[32:] == _hashlib.sha512(b64).digest()[32:], (
+        "the second half must be the SHA-512 nonce, unmodified"
+    )
+    # Ed25519 clamping, which is what makes it a valid scalar.
+    assert got[0] & 0x07 == 0, "scalar must have its low 3 bits cleared"
+    assert got[31] & 0x80 == 0, "scalar must have its high bit cleared"
+    assert got[31] & 0x40 == 0x40, "scalar must have bit 254 set"
+
+
+def test_no_output_private_suppresses_the_key() -> None:
+    """The opt-out must work, and must not touch the public key."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).parent
+    proc = subprocess.run(
+        [sys.executable, str(root / "meshcore_vanity.py"), "ab", "--force",
+         "--no-output-private"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(root)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "PRIVATE_KEY_BASE64" not in proc.stderr, (
+        "--no-output-private must suppress the key:\n" + proc.stderr
+    )
+    assert "MESHCORE_PRIV_HEX" not in proc.stderr
+    assert "set prv.key" not in proc.stderr
+    # The public key - the actual product - must still be there.
+    assert proc.stdout.strip(), "the public key must still be printed"
+    assert "Found in" in proc.stderr, "and the summary line must still print"
+
+
+def test_the_removed_output_private_flag_is_rejected() -> None:
+    """--output-private is gone; it must not silently become a no-op.
+
+    Silently accepting it would let a script keep passing it and believe it
+    were suppressing output, when it would now be *enabling* it.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).parent
+    proc = subprocess.run(
+        [sys.executable, str(root / "meshcore_vanity.py"), "ab", "--force",
+         "--output-private"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode != 0, "the removed flag must be rejected"
+    assert "unrecognized arguments" in proc.stderr, proc.stderr
+
+
+def test_the_launcher_documents_itself_without_installing() -> None:
+    """`run.sh --help` must answer before it tries to create a venv."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).parent
+    proc = subprocess.run(
+        [sys.executable, str(root / "run.py"), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "run.sh" in proc.stdout, "the help must show the short command"
+    assert "run.bat" in proc.stdout, "and the Windows one"
+    assert not (root / ".venv").exists(), (
+        "--help must not create a virtual environment as a side effect"
+    )
+
+
+def test_the_launcher_exists_for_both_platforms() -> None:
+    """Both wrappers must be present, or the documented command is wrong."""
+    from pathlib import Path
+
+    root = Path(__file__).parent
+    assert (root / "run.py").exists(), "run.py is the actual implementation"
+    assert (root / "run.sh").exists(), "run.sh is documented in the README"
+    assert (root / "run.bat").exists(), "run.bat is documented in the README"
+    for name in ("run.sh", "run.py"):
+        assert (root / name).read_text(encoding="utf-8").startswith(
+            "#!/usr/bin/env"
+        ), f"{name} needs a shebang to be directly executable"
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
