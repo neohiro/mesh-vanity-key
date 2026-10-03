@@ -164,16 +164,20 @@ into separate elements, each reserving its width:
 
 | Slot | Reserved | Why |
 |---|---|---|
-| days | `8ch` | the `(~5 days)` estimate leads, so the hours never shift under it |
-| hours | `20ch` | a multi-week run reaches 4-5 figures; reserve the widest case so the layout is identical from the first minute to the last |
+| days | `5ch` | carries the magnitude, so it is the field that grows |
+| hours | `2ch` | the hours *within* the day, so 0–23 and never wider |
 | minutes | `2ch` | always two digits, zero-padded |
 | seconds | `2ch` | as above |
 
+Hours used to be an unbounded total, reserved at `20ch`, which meant a five-day
+estimate rendered as `116h 25m` and the slot carried a wide dead gap beside every
+figure. Days now carry the magnitude (`4d 19h 05m 30s`), so hours never exceeds
+two digits and the reservation shrank to match.
+
 The panel also sets `font-variant-numeric: tabular-nums`, which is what actually
 stops a digit changing width — the reserved `min-width`s then hold the columns.
-On screens under 420px the hour slot drops to `10ch`: still far more than a
-three-week ETA needs (~500h), and still fixed rather than proportional, which is
-the part that matters. Minutes and seconds are always padded to two digits, so
+All three slots stay fixed on screens under 420px, since proportional space would
+reintroduce reflow. Minutes and seconds are always padded to two digits, so
 `05m` is exactly as wide as `15m`.
 
 **The ETA is also smoothed over time.** It is the most eye-catching number on the
@@ -211,7 +215,7 @@ layout plus a canvas repaint several times a second:
 
 | Was | Now | Why |
 |---|---|---|
-| Report every 500 ms per worker | every 3 s, plus one forced report at the start of each worker | 16 main-thread wake-ups a second at 8 workers, for figures that are an aggregate rate over seconds. The forced first report keeps the self-calibration converging in one interval rather than three. |
+| Report every 500 ms per worker | every 3 s | 16 main-thread wake-ups a second at 8 workers, for figures that are an aggregate rate over seconds. The first report is already immediate — the throttle compares against a counter starting at 0 — so no special case is needed. |
 | `canvas.clientWidth`/`clientHeight` read inside every draw | measured once, cached, refreshed by a `ResizeObserver` | Reading them forces a synchronous layout, so each report paid for a full reflow of the panel. |
 | Graph trace drawn from raw per-worker samples | exponential average (`α = 0.5`) in `pushRateGraphSample` | Consecutive samples come from different workers over different windows, so raw values differ by a lot and the line read as spikes rather than a trend. The headline rate figure is unchanged — this is display smoothing only. |
 | 48 calibration samples at load | 256, yielding every 32 rather than every 8 | 48 was short enough to be dominated by noise, and yielding every 8 spent most of the loop asleep on clamped timers. |
@@ -823,11 +827,11 @@ visible `exceeded max_attempts` rather than running forever.
 - **Deterministic mode requires a seed.** Without `--seed`, each run produces different results.
 - **Browser app is hex-only.** It has no bech32/base58/base64 output; use the CLI for those encodings.
 - **Browser app must be served over HTTP(S).** Blob Web Workers are blocked on `file://` URLs.
-- **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency` with no reserve (capped at 32), which can over- or under-estimate on constrained or shared hardware. The UI stays responsive anyway because the hot loop yields to the event loop every 30 ms.
+- **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency` with no reserve (capped at 32), which can over- or under-estimate on constrained or shared hardware. The UI stays responsive anyway because the hot loop yields to the event loop every 250 ms.
 - **Browser key history is obfuscated, not encrypted.** The XOR key is derived from an IndexedDB secret plus the origin, so a copied `localStorage` blob cannot be decoded elsewhere. Script on the origin can read IndexedDB, so this is not XSS protection. Clearing site data deletes the secret and orphans the history. History is never written in plaintext: if no key can be derived, saving is refused instead.
 - **Progress is not capped at 100%.** Expected attempts are the mean of a geometric distribution, so ~37% of searches legitimately run past it. The CLI and browser show the overshoot as `+105.00%` plus how far past the mean the search has run. Once past the mean there is no meaningful "time remaining", so the ETA is replaced by the overshoot instead of being dropped or shown negative.
 - **The hot loop is already at the maths limit.** The cost of a candidate is the Ed25519 scalar multiplication, not our code. Measured per core: **Python/native libsodium ~25,000–32,000 keys/s**, **browser libsodium.wasm ~13,500 keys/s** (`python tools/bench_mining.py`, `bun tools/bench_real_browser.mjs`). Our wrapper adds per-candidate overhead measured at ~10M keys/s equivalent — roughly three orders of magnitude cheaper than the derivation it wraps — so optimising it further cannot help. OpenSSL (via `cryptography`) was measured as a separate backend and is ~20% *slower* than libsodium, so switching implementations is not a win either. The only throughput lever is core count.
-- **Browser workers use every logical core**, capped at 32. This previously reserved one core for the UI, which cost 25% throughput on a 4-core machine for no benefit: the hot loop already yields to the event loop every 30 ms, far more often than the browser needs to repaint, so the UI stays responsive anyway. Measured with the real keygen primitive, SMT siblings still add ~19% over four threads (see "Worker scaling"), so saturating every logical core is the right call and there is no throughput left on that axis.
+- **Browser workers use every logical core**, capped at 32. This previously reserved one core for the UI, which cost 25% throughput on a 4-core machine for no benefit: the hot loop already yields to the event loop every 250 ms, far more often than the browser needs to repaint, so the UI stays responsive anyway. Measured with the real keygen primitive, SMT siblings still add ~19% over four threads (see "Worker scaling"), so saturating every logical core is the right call and there is no throughput left on that axis.
 - **The CLI raises its worker count to the CPU count for long searches**, capped at 64, and refuses more than 256. It stays at 1 when the search is expected to finish in under a second (`_PARALLEL_MIN_SECONDS = 1.0`), because creating a `spawn` pool costs ~0.3s and made short prefixes dramatically slower. Pass `--workers N` to override either way.
 - **Browser prefix + suffix are limited to 64 hex digits combined.** A key is exactly 64 hex digits, so longer patterns would overlap and could never match; the app refuses to start such a search.
 

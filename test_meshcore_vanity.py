@@ -2457,5 +2457,169 @@ def test_a_short_bech32_prefix_in_both_mode_is_not_refused():
         )
 
 
+def test_reserved_warning_is_not_emitted_for_a_hex_suffix() -> None:
+    """00/FF are reserved because framework keys *begin* with them.
+
+    Warning that a key merely ENDING in 00ff "may not work with standard
+    MeshCore clients" is simply wrong, and alarming. The check is on the
+    pattern that constrains the start of the key, nothing else.
+    """
+    import warnings as _w
+
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        _validate_prefix("00ff", "hex", label="suffix")
+    assert not [x for x in caught if "reserved" in str(x.message)], [
+        str(x.message) for x in caught
+    ]
+
+    # ...while a genuine prefix still warns.
+    meshcore_vanity._warned_reserved.clear()
+    with _w.catch_warnings(record=True) as caught2:
+        _w.simplefilter("always")
+        _validate_prefix("00ff", "hex", label="prefix")
+    assert [x for x in caught2 if "reserved" in str(x.message)], [
+        str(x.message) for x in caught2
+    ]
+
+
+def test_a_hex_suffix_starting_00_is_still_mined() -> None:
+    """End-to-end: the false warning is gone AND the search still runs.
+
+    The suffix is "00" rather than something longer on purpose. A 1-char prefix
+    plus a 2-char suffix is 3 nibbles, so it resolves in thousands of attempts;
+    "a" + "00ff" is 20 bits, roughly a million, which passes on an idle machine
+    and times out on a loaded CI runner. A test that only sometimes passes is
+    worse than no test.
+    """
+    import warnings as _w
+
+    meshcore_vanity._warned_reserved.clear()
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        result = generate_vanity_key(
+            "a", encoding="hex", suffix_pattern="00", max_attempts=200_000
+        )
+    assert result.encoded.startswith("a"), result.encoded
+    assert result.encoded.endswith("00"), result.encoded
+    assert not [x for x in caught if "reserved" in str(x.message)]
+
+
+def test_bare_suffix_starting_00_is_not_warned_either() -> None:
+    """`--suffix` with a reserved-looking pattern is a tail, not a head."""
+    import warnings as _w
+
+    meshcore_vanity._warned_reserved.clear()
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        with pytest.raises(RuntimeError):
+            generate_vanity_key(
+                "00ff", encoding="hex", suffix=True, max_attempts=1
+            )
+    assert not [x for x in caught if "reserved" in str(x.message)]
+
+
+def test_the_cli_renders_warnings_without_a_source_location() -> None:
+    """A warning must not read as an internal error pointing into the source.
+
+    Python's default format leads with "meshcore_vanity.py:NNN:", which to
+    someone running the tool looks like a bug report rather than advice.
+    """
+    # "00" not "00ff": 8 bits rather than 16, so the search completes inside the
+    # budget on a loaded machine too. The warning is emitted before any search.
+    proc = _run_cli("00", "--encoding", "hex", "--force", "--max-attempts", "20000")
+    err = proc.stderr
+    assert proc.returncode == 0, err
+    assert "reserved" in err, err
+    assert "Warning:" in err, err
+    assert "meshcore_vanity.py:" not in err, (
+        "the warning must not carry a file:line prefix:\n" + err
+    )
+    assert "UserWarning" not in err, err
+
+
+def test_the_cli_still_exits_correctly_with_the_clean_warning_renderer() -> None:
+    """The catch_warnings context must not disturb exits or --version."""
+    assert _run_cli("--version").returncode == 0
+    missing = _run_cli("--force")
+    assert missing.returncode == 2, missing.stderr
+    assert "pattern is required" in missing.stderr, missing.stderr
+
+
+def test_reserved_prefix_strict_env_still_rejects_a_real_prefix(monkeypatch) -> None:
+    """Opting into hard rejection must still work through the new renderer."""
+    monkeypatch.setenv("MESHCORE_VANITY_STRICT_RESERVED", "1")
+    meshcore_vanity._warned_reserved.clear()
+    with pytest.raises(ValueError, match="reserved"):
+        _validate_prefix("00ff", "hex", label="prefix")
+    # ...and must NOT reject a suffix that merely looks reserved.
+    _validate_prefix("00ff", "hex", label="suffix")
+
+
+def test_readme_documented_constants_match_the_code() -> None:
+    """The README quotes real numbers; a stale one is a small lie.
+
+    Every constant asserted here was changed at some point and the prose around
+    it did not always follow: a removed "forced first report", a worker yield
+    quoted at 30 ms after it moved to 250 ms, and an ETA slot documented at 20ch
+    after it shrank to 2ch. Cheap to pin, and it fails loudly instead of
+    misleading.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    page = (root / "index.html").read_text(encoding="utf-8")
+
+    # Browser constants the README states in prose.
+    yield_ms = re.search(r"const YIELD_EVERY_MS = (\d+)", page)
+    report_ms = re.search(r"const REPORT_EVERY_MS = (\d+)", page)
+    assert yield_ms and report_ms, "constants must be literals to be quotable"
+    report_s = int(report_ms.group(1)) // 1000
+    assert f"every {report_s} s" in readme, (
+        "the README's report interval must match REPORT_EVERY_MS"
+    )
+    assert f"every {yield_ms.group(1)} ms" in readme, (
+        "the README's worker-yield interval must match YIELD_EVERY_MS"
+    )
+
+    # The removed forced first report must not be documented as present.
+    assert "firstReportSent" not in readme, (
+        "the forced first report was removed as redundant; the README still "
+        "describes it"
+    )
+    assert "firstReportSent" not in page, (
+        "the redundant forced first report must not come back"
+    )
+
+    # ETA slot widths.
+    hours_ch = re.search(r"\.eta-num \{[^}]*min-width: (\d+)ch", page)
+    days_ch = re.search(r"\.eta-days \{[^}]*min-width: (\d+)ch", page)
+    assert hours_ch and days_ch, "the ETA slot reservations must be literal"
+    assert f"| hours | `{hours_ch.group(1)}ch` |" in readme, (
+        "the README's ETA hours reservation must match the CSS"
+    )
+    assert f"| days | `{days_ch.group(1)}ch` |" in readme, (
+        "the README's ETA days reservation must match the CSS"
+    )
+
+
+def test_the_readme_reserved_prefix_claim_matches_behaviour() -> None:
+    """The README says 00/FF warn rather than reject; verify that is true."""
+    # "00" rather than "00ff": 8 bits instead of 16, so the search still finishes
+    # inside the attempt budget and the test stays quick.
+    proc = _run_cli("00", "--encoding", "hex", "--force",
+                    "--max-attempts", "20000")
+    assert proc.returncode == 0, proc.stderr
+    assert "Warning:" in proc.stderr and "reserved" in proc.stderr, proc.stderr
+    assert proc.stdout.strip().startswith("00"), proc.stdout
+    # The warning must not claim the tool refused.
+    assert "Error:" not in proc.stderr, proc.stderr
+    # ...and it must not carry a source location, which reads as an internal
+    # error rather than advice about the key.
+    assert "meshcore_vanity.py:" not in proc.stderr, proc.stderr
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
