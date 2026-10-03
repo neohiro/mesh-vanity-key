@@ -1546,9 +1546,9 @@ function effectiveScalePoints() {
         // Use every logical core.
 //
 // This previously reserved one core for the UI. The hot loop already yields to
-// the event loop every 30ms, which is far more often than the browser needs to
-// repaint, so the UI stays responsive without sacrificing a core - and on a
-// 4-core machine that reserve was a 25% throughput loss for no benefit.
+// the event loop every 250ms, which is still far more often than the browser
+// needs to repaint, so the UI stays responsive without sacrificing a core - and
+// on a 4-core machine that reserve was a 25% throughput loss for no benefit.
 //
 // Capped at 32: past roughly the physical core count extra workers only add
 // context-switching overhead, and unbounded counts on a high-core machine can
@@ -1569,29 +1569,32 @@ function detectOptimalWorkers() {
             // available guess before we have measured one.
             const pts = loadCachedScale();
             if (pts) {
+                // Walk the curve and keep the last step that paid for itself.
+                //
+                // `prevSpeedup` is tracked directly rather than re-read from the
+                // array by index. It used to do `pts[best]`, where `best` holds a
+                // THREAD COUNT - so it indexed by 4 on a curve whose fourth entry
+                // is at index 3, and handed scalePointAt() a [threads, speedup]
+                // pair where a number was expected. That coerced to NaN, the
+                // comparison was always false, and the ratio degenerated to
+                // speedup/1 - so the 10% rule could never fire and the loop
+                // always returned the last point. It looked correct only
+                // because the curve it was tested with had every step paying,
+                // which is exactly the case the rule exists to catch.
                 let best = 1;
+                let prevSpeedup = 1;
                 for (const [threads, speedup] of pts) {
-                    const prev = pts[best];
-                    // Walk the measured curve and keep the last step that paid.
-                    if (threads <= cap && best > 1
-                        && speedup / scalePointAt(pts, prev) < SCALE_CAL_MIN_MARGINAL) {
-                        break;
+                    if (threads > cap) continue;         // beyond the cap
+                    if (threads > 1
+                        && speedup / prevSpeedup < SCALE_CAL_MIN_MARGINAL) {
+                        break;                           // not worth taking
                     }
                     best = threads;
+                    prevSpeedup = speedup;
                 }
-                if (best >= 1) return Math.max(1, Math.min(best, cap));
+                return Math.max(1, Math.min(best, cap));
             }
             return cap;
-        }
-
-        // Speedup the measured curve reports at an exact thread count, falling
-        // back to the nearest lower point.
-        function scalePointAt(pts, threads) {
-            let v = 1;
-            for (const [n, speedup] of pts) {
-                if (n <= threads) v = speedup;
-            }
-            return v;
         }
 
         async function startMining() {
@@ -1661,7 +1664,14 @@ function detectOptimalWorkers() {
                 } catch (e) {
                     scaleCalFailed = true;
                 }
-                if (!starting) return;   // cancelled while measuring
+                if (!starting) {
+                    // Cancelled while measuring. Clear the transient status
+                    // rather than leaving "Measuring this machine..." in the
+                    // DOM: the panel is hidden, but stopMining() does not clear
+                    // the text, and the other terminal paths all do.
+                    clearStatusText();
+                    return;
+                }
             }
 
             starting = false;
