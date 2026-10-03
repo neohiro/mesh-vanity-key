@@ -19,9 +19,13 @@ import meshcore_vanity
 from meshcore_vanity import (
     encode_public_key,
     generate_vanity_key,
+    _BECH32_CHECKSUM_LEN,
+    _BECH32_LAST_DATA_VALUES,
     _base58_encode,
     _bech32_encode,
+    _bech32_last_data_offset,
     _benchmark_rate,
+    _end_search_space,
     _estimate_search_space,
     _format_progress,
     _human_duration,
@@ -34,6 +38,7 @@ from meshcore_vanity import (
     _validate_prefix,
     _validate_seed,
     _validate_hrp,
+    _validate_suffix_reachable,
     meshcore_expanded_private_key,
     serialize_private_key,
     serialize_public_key,
@@ -2260,6 +2265,196 @@ def test_suffix_pattern_alone_needs_no_prefix() -> None:
     assert proc.returncode == 0, proc.stderr
     assert "ending with 'Yc'" in proc.stderr, proc.stderr
     assert proc.stdout.strip()[:-1].endswith("Yc")
+
+
+# --- per-encoding suffix reachability, and the estimate that shares it ---
+#
+# The rule these encode: refuse a suffix that provably CANNOT occur, and never
+# refuse one that merely does not occur. A wrong rejection costs the user a valid
+# target; a futile search at least ends in a visible "exceeded max_attempts".
+
+VALID_BASE58 = set(meshcore_vanity.BASE58_ALPHABET.decode())
+BECH32_PREFIX = "mc1q"
+
+
+def bech32_suffix(length, at_offset=None, ch="c"):
+    """Build a valid-charset bech32 suffix, optionally forcing one position."""
+    out = ["c"] * length
+    if at_offset is not None:
+        out[at_offset] = ch
+    return "".join(out)
+
+
+# --- bech32: the constrained character is the 7th from the end ---------------
+
+@pytest.mark.parametrize("length", [7, 8, 9, 10, 12])
+def test_bech32_suffix_allows_the_reachable_character_at_its_offset(length):
+    """The constrained slot is 7 from the end, whatever the suffix length."""
+    offset = length - (_BECH32_CHECKSUM_LEN + 1)
+    for good in sorted(_BECH32_LAST_DATA_VALUES):
+        # Must not raise a reachability error; exhausting the attempt budget is
+        # the expected outcome.
+        with pytest.raises(RuntimeError):
+            generate_vanity_key(
+                BECH32_PREFIX, encoding="bech32",
+                suffix_pattern=bech32_suffix(length, offset, good),
+                max_attempts=1,
+            )
+
+
+@pytest.mark.parametrize("length", [7, 8, 9, 10, 12])
+def test_bech32_suffix_refuses_an_impossible_character_at_its_offset(length):
+    offset = length - (_BECH32_CHECKSUM_LEN + 1)
+    for bad in "xz0":
+        with pytest.raises(ValueError, match="can never match a bech32 key"):
+            generate_vanity_key(
+                BECH32_PREFIX, encoding="bech32",
+                suffix_pattern=bech32_suffix(length, offset, bad),
+                max_attempts=1,
+            )
+
+
+@pytest.mark.parametrize("length", [7, 8, 9, 12])
+def test_bech32_reachable_character_in_the_wrong_place_is_still_refused(length):
+    """'q' is only allowed in the one constrained slot."""
+    offset = length - (_BECH32_CHECKSUM_LEN + 1)
+    positions = [offset + 1] if offset + 1 < length else [offset - 1]
+    for pos in positions:
+        with pytest.raises(ValueError, match="can never match a bech32 key"):
+            generate_vanity_key(
+                BECH32_PREFIX, encoding="bech32",
+                suffix_pattern=bech32_suffix(length, pos, "q"),
+                max_attempts=1,
+            )
+
+
+@pytest.mark.parametrize("pattern", ["c", "cc", "ccc", "cccccc", "zzzzzz"])
+def test_bech32_short_suffixes_are_never_refused(pattern):
+    """6 or fewer characters land in the checksum, which is uniform."""
+    assert len(pattern) <= _BECH32_CHECKSUM_LEN
+    with pytest.raises(RuntimeError):
+        generate_vanity_key(
+            BECH32_PREFIX, encoding="bech32", suffix_pattern=pattern,
+            max_attempts=1,
+        )
+
+
+def test_bech32_offset_helper():
+    assert _bech32_last_data_offset(1) == -1
+    assert _bech32_last_data_offset(_BECH32_CHECKSUM_LEN) == -1
+    assert _bech32_last_data_offset(7) == 0
+    assert _bech32_last_data_offset(8) == 1
+    assert _bech32_last_data_offset(20) == 13
+
+
+def test_the_derived_bech32_character_set_matches_real_encodings():
+    """The {0, 16} derivation is checked against 3,000 real encodings.
+
+    256 bits do not fill 52 five-bit groups (260 bits), so 4 padding bits land in
+    the last data character and only 2 of the 32 symbols can occur. That
+    derivation is the entire basis for refusing a suffix, so it is verified
+    rather than trusted - exactly as the base64 equivalent already is.
+    """
+    seen = set()
+    for _ in range(3000):
+        five = meshcore_vanity._bech32_convertbits(os.urandom(32), 8, 5, True)
+        seen.add(five[-1])
+    assert seen == {0, 16}, sorted(seen)
+    assert _BECH32_LAST_DATA_VALUES == frozenset(
+        meshcore_vanity.BECH32_CHARSET[v] for v in seen
+    )
+
+
+def test_bech32_suffix_space_accounts_for_the_constrained_character():
+    """A bech32 suffix of 7+ is 16x cheaper than 32**n, not 32**n."""
+    assert _end_search_space("bech32", 6) == 32 ** 6
+    assert _end_search_space("bech32", 7) == 2 * 32 ** 6
+    assert _end_search_space("bech32", 8) == 32 * 2 * 32 ** 6
+    assert _end_search_space("bech32", 10) == 32 ** 3 * 2 * 32 ** 6
+
+
+# --- base58 and hex: nothing may be refused ----------------------------------
+
+@pytest.mark.parametrize("pattern", [
+    "1", "1Z", "1z", "LZ", "abc", "1abc", "zzzz", "111", "L1Z", "1111",
+    "zzzzzzzz", "1zzzzzzz",
+])
+def test_base58_prefixes_are_never_refused(pattern):
+    """Exhaustively checked offline: all 1-3 character prefixes are reachable.
+
+    base58's leading-digit distribution makes some two- and three-character
+    prefixes RARE - a leading '1' comes from the encoder's zero-pad path, which
+    narrows the next digit - but none impossible. Refusing any would reject a
+    valid target, which is the worse failure.
+    """
+    assert set(pattern) <= VALID_BASE58, f"{pattern!r} is not valid base58"
+    _validate_suffix_reachable("base58", pattern, "suffix")
+    with pytest.raises(RuntimeError):
+        generate_vanity_key(pattern, encoding="base58", max_attempts=1)
+
+
+def test_base58_uppercase_L_is_accepted_despite_lowercase_l_being_excluded():
+    """Regression: validation used to lowercase a case-SENSITIVE pattern.
+
+    base58 excludes 'l' but includes 'L'. The validator folded the pattern to
+    lowercase, so a library caller on the default case_insensitive=True had a
+    valid 'L' prefix refused for containing an invalid 'l'.
+    """
+    assert "l" not in VALID_BASE58 and "L" in VALID_BASE58
+    with pytest.raises(RuntimeError):
+        generate_vanity_key("LZ", encoding="base58", max_attempts=1)
+
+
+@pytest.mark.parametrize("pattern", ["f", "0f", "abc", "0123456789abcdef"])
+def test_hex_suffixes_are_never_refused(pattern):
+    _validate_suffix_reachable("hex", pattern, "suffix")
+    with pytest.raises(RuntimeError):
+        generate_vanity_key(
+            "a", encoding="hex", suffix_pattern=pattern, max_attempts=1
+        )
+
+
+def test_the_dispatcher_accepts_every_encoding_and_an_empty_pattern():
+    """A new encoding must not be silently skipped, and '' must be harmless."""
+    for enc in ("hex", "base64", "base64url", "base58", "bech32"):
+        _validate_suffix_reachable(enc, "", "suffix")
+
+
+# --- the CLI surfaces it before announcing a search --------------------------
+
+def test_cli_reports_the_bech32_refusal_before_printing_anything():
+    proc = _run_cli(BECH32_PREFIX, "--encoding", "bech32", "--suffix",
+                    "ccccccc", "--force", "--max-attempts", "100")
+    assert proc.returncode == 2, proc.stderr
+    assert "can never match a bech32 key" in proc.stderr, proc.stderr
+    assert "Searching for" not in proc.stderr, proc.stderr
+    assert "Estimate:" not in proc.stderr, proc.stderr
+
+
+def test_both_mode_uses_the_prefix_for_the_bech32_check():
+    """--both puts the pattern at the end too, so it faces the same constraint.
+
+    Regression: the two-ended call sat under a base64/base64url guard, so bech32
+    --both skipped the reachability check entirely.
+
+    An 8-character pattern has its constrained slot at offset 1, which 'c' fails.
+    A SHORTER pattern cannot be tested this way, because a suffix below 7
+    characters does not reach the constrained slot at all - which is the whole
+    reason the check is length-dependent.
+    """
+    for pattern in ("mc1qcccc", "mc1qqccc"):
+        with pytest.raises(ValueError, match="can never match a bech32 key"):
+            generate_vanity_key(
+                pattern, encoding="bech32", both=True, max_attempts=1,
+            )
+
+
+def test_a_short_bech32_prefix_in_both_mode_is_not_refused():
+    """The complement: a pattern that cannot reach the slot must be allowed."""
+    with pytest.raises(RuntimeError):
+        generate_vanity_key(
+            "mc1qc", encoding="bech32", both=True, max_attempts=1,
+        )
 
 
 if __name__ == "__main__":
