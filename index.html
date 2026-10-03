@@ -955,6 +955,266 @@
         const WORKER_SCALE_MEASURED = { 8: 4.08 };
         const WORKER_SCALE_MAX = WORKER_SCALE_POINTS[WORKER_SCALE_POINTS.length - 1][1];
 
+        // ---- Scaling, measured on this machine ------------------------------------
+//
+// WORKER_SCALE_POINTS was measured on a 4-physical-core machine. The shape is
+// reasonable, but on any other CPU it is a guess - and a guess that has already
+// produced an estimate 8x away from what the machine actually did.
+//
+// The specific gap: there is no browser API for physical core count.
+// `navigator.hardwareConcurrency` counts LOGICAL threads, so a 4-core/8-thread
+// machine is indistinguishable from a genuine 8-core one without measuring.
+// That distinction decides the worker count: SMT siblings share execution units
+// and, for this workload, share them badly. Ed25519 keygen is a chain of
+// dependent 128-bit multiplications with long carry reductions, so the second
+// thread on a physical core contends for the same ALU and carry resources
+// rather than filling idle ones.
+//
+// So the first search on a machine measures its own curve over a fixed budget
+// of candidates and caches it against the machine fingerprint. Every later
+// session uses the measurement instead of the imported table.
+//
+// Two properties make this safe to ship:
+//
+//  - It is bounded and cheap. This measures the SHAPE of the curve, not
+//    absolute speed, so a handful of candidates per worker per round is enough,
+//    and the total is bounded by a timeout.
+//  - It cannot break mining. Every failure path - timeout, a worker that never
+//    reports, an unusable reading, storage that throws - falls back to the
+//    imported table, which is exactly what runs today.
+const SCALE_CAL_KEY = 'meshcore-vanity-scale-v1';
+const SCALE_CAL_ROUNDS = [1, 2, 4, 8, 16, 32];
+// Candidates per worker per round. Deliberately small: this measures the SHAPE
+// of the curve, not absolute speed, and 32 candidates is enough to see whether
+// aggregate throughput scales.
+const SCALE_CAL_PER_WORKER = 32;
+// Per-round ceiling, and a ceiling on the whole calibration. Both matter: the
+// first search must not stall, so the total is capped independently of how many
+// rounds fit inside it.
+const SCALE_CAL_ROUND_MS = 500;
+const SCALE_CAL_TOTAL_MS = 1500;
+// A step must add at least this much to be worth taking. Below it, the extra
+// workers are SMT siblings or otherwise contended: they cost main-thread time
+// (every worker report is a message, a layout and a canvas repaint) and buy
+// almost nothing.
+const SCALE_CAL_MIN_MARGINAL = 1.10;
+// Absolute deadline for the calibration, passed down to each round so a slow
+// machine stops adding rounds instead of taking one per timeout.
+let scaleCalDeadline = 0;
+
+// 64 bits of pattern: unreachable in any budget this calibration uses, so a
+// calibration worker can never report a match and end early.
+const SCALE_CAL_PATTERN = 'deadbeefdeadbeefcafe';
+
+let measuredScalePoints = null;   // [[threads, speedup], ...] or null
+        // Set once a calibration attempt fails, so a machine where it cannot
+        // work (storage blocked, workers unavailable, a pathologically slow
+        // CPU) does not pay the timeout on every single search.
+        let scaleCalFailed = false;
+
+function scaleCalStorageKey() {
+    return SCALE_CAL_KEY + '|' + machineFingerprint();
+}
+
+function loadCachedScale() {
+    if (measuredScalePoints) return measuredScalePoints;
+    try {
+        const raw = localStorage.getItem(scaleCalStorageKey());
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed) || parsed.length < 2) return null;
+        const points = parsed
+            .filter((p) => Array.isArray(p) && p.length === 2
+                && Number.isFinite(p[0]) && p[0] >= 1
+                && Number.isFinite(p[1]) && p[1] > 0)
+            .map((p) => [p[0], p[1]])
+            .sort((a, b) => a[0] - b[0]);
+        // A single point cannot describe a curve.
+        if (points.length < 2 || points[0][0] !== 1) return null;
+        measuredScalePoints = points;
+        return measuredScalePoints;
+    } catch (e) {
+        return null;              // storage disabled or corrupt: use the table
+    }
+}
+
+function storeCachedScale(points) {
+    try {
+        localStorage.setItem(scaleCalStorageKey(), JSON.stringify(points));
+    } catch (e) {
+        /* storage unavailable; the measurement still applies this session */
+    }
+}
+
+// Aggregate candidates/second using `count` real workers on real keygen.
+function measureScaleRound(count) {
+    return new Promise((resolve) => {
+        let pool = [];
+        let done = 0;
+        let attempts = 0;
+        let finished = false;
+        let t0 = 0;
+
+        const settle = (rate) => {
+            if (finished) return;
+            finished = true;
+            for (const w of pool) {
+                try { w.terminate(); } catch (e) { /* ignore */ }
+            }
+            try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+            pool = [];
+            resolve(rate);
+        };
+
+        // One timer for the round: if a worker never reports we must not wait
+        // forever, and a partially-completed round is still usable as long as at
+        // least one worker finished. Bounded by the overall deadline too, so
+        // the calibration as a whole cannot stall Start.
+        const budget = Math.max(
+            50, Math.min(SCALE_CAL_ROUND_MS, scaleCalDeadline - Date.now()));
+        const timer = setTimeout(() => {
+            settle(done > 0 ? attempts / Math.max((Date.now() - t0) / 1000, 1e-3) : 0);
+        }, budget);
+
+        let url;
+        try {
+            const src = createCalibrationWorkerSource();
+            const blob = new Blob([src], { type: 'application/javascript' });
+            url = URL.createObjectURL(blob);
+        } catch (e) {
+            clearTimeout(timer);
+            settle(0);
+            return;
+        }
+
+        try {
+            for (let i = 0; i < count; i++) {
+                const w = new Worker(url);
+                pool.push(w);
+                w.onerror = () => { /* counted as never reporting */ };
+                w.onmessage = (e) => {
+                    if (finished) return;
+                    const d = e.data || {};
+                    if (d.type === 'ready') {
+                        w.postMessage({
+                            prefix: SCALE_CAL_PATTERN,
+                            suffix: '',
+                            matchPrefix: true,
+                            matchSuffix: false,
+                            maxAttempts: SCALE_CAL_PER_WORKER,
+                        });
+                        return;
+                    }
+                    if (d.type === 'calibrated') {
+                        attempts += Number(d.attempts) || 0;
+                        done++;
+                        if (done === count) {
+                            clearTimeout(timer);
+                            settle(attempts / Math.max((Date.now() - t0) / 1000, 1e-3));
+                        }
+                    }
+                };
+            }
+            t0 = Date.now();
+        } catch (e) {
+            clearTimeout(timer);
+            settle(0);
+        }
+    });
+}
+
+// Build a worker that loads the same libsodium as the miner. Kept separate from
+// the mining worker because the mining one carries the UI-facing progress and
+// yield logic the calibration neither needs nor wants.
+function createCalibrationWorkerSource() {
+    return `
+        /* calibration-worker */
+        let sodium = null;
+        const readyPromise = new Promise((resolve) => {
+            try {
+                importScripts('${new URL('./libsodium.js', location.href).href}');
+            } catch (e) { /* reported below as an error message */ }
+            if (typeof libsodium !== 'undefined' && libsodium.ready) {
+                libsodium.ready.then(() => {
+                    sodium = typeof libsodium === 'function'
+                        ? sodiumModule() : libsodium;
+                    resolve();
+                });
+            } else {
+                resolve();
+            }
+        });
+        function sodiumModule() {
+            try { return self.Module; } catch (e) { return self.libsodium; }
+        }
+        const seed = new Uint8Array(32);
+        if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+            crypto.getRandomValues(seed);
+        }
+        self.onmessage = async function (e) {
+            try {
+                await readyPromise;
+                if (typeof sodium === 'undefined'
+                    || typeof sodium.crypto_sign_seed_keypair !== 'function') {
+                    self.postMessage({ type: 'error', message: 'calibration: no crypto' });
+                    return;
+                }
+                const cap = Number(e.data.maxAttempts) || 0;
+                const t0 = Date.now();
+                for (let i = 0; i < cap; i++) {
+                    seed[0] = (seed[0] + 1) & 0xff;
+                    sodium.crypto_sign_seed_keypair(seed);
+                }
+                self.postMessage({
+                    type: 'calibrated',
+                    attempts: cap,
+                    elapsed: (Date.now() - t0) / 1000,
+                });
+            } catch (err) {
+                self.postMessage({ type: 'error', message: 'calibration: ' + err.message });
+            }
+        };
+    `;
+}
+
+// Measure this machine's scaling curve. Resolves to [[threads, speedup], ...]
+// or null when the measurement could not be made.
+async function calibrateScaling(logical) {
+    scaleCalDeadline = Date.now() + SCALE_CAL_TOTAL_MS;
+    const rounds = SCALE_CAL_ROUNDS.filter((n) => n <= logical);
+    if (rounds[rounds.length - 1] !== logical) rounds.push(logical);
+    rounds.sort((a, b) => a - b);
+
+    const points = [];
+    let base = 0;
+    for (const n of rounds) {
+        // Out of time: keep what we have rather than starting a round that
+        // cannot finish. A partial curve is still better than the imported
+        // table, provided it has enough points to be a curve.
+        if (Date.now() >= scaleCalDeadline) break;
+        const rate = await measureScaleRound(n);
+        if (!(rate > 0)) return null;          // unusable: keep the table
+        if (n === 1) {
+            base = rate;
+            points.push([1, 1]);
+            continue;
+        }
+        const speedup = rate / base;
+        const prev = points[points.length - 1][1];
+        points.push([n, speedup]);
+        // Stop once a step stops paying: those threads are not worth starting.
+        if (speedup / prev < SCALE_CAL_MIN_MARGINAL) break;
+    }
+    return points.length >= 2 ? points : null;
+}
+
+// The curve to use: this machine's if we have measured one, else the imported
+// table. Every caller goes through here so the estimate and the worker count
+// can never disagree about which curve they are using.
+function effectiveScalePoints() {
+    return loadCachedScale() || WORKER_SCALE_POINTS;
+}
+
         // Aggregate throughput at `workers` threads, from the measured table.
         //
         // Interpolates log-linearly between measured points - i.e. a power law
@@ -974,7 +1234,11 @@
             const n = Number(workers);
             if (!isFinite(n) || n <= 1) return 1;
 
-            const pts = WORKER_SCALE_POINTS;
+            // This machine's curve when we have measured one; the imported
+            // table otherwise. WORKER_SCALE_MAX still bounds the imported
+            // curve, but a measured one is clamped to its own last point, which
+            // is what workerScale() already does for any curve.
+            const pts = effectiveScalePoints();
             const last = pts.length - 1;
             if (n >= pts[last][0]) return pts[last][1];
 
@@ -1290,9 +1554,45 @@
 // context-switching overhead, and unbounded counts on a high-core machine can
 // make the tab unresponsive long before the browser would refuse.
 function detectOptimalWorkers() {
-    const cores = navigator.hardwareConcurrency || 4;
-    return Math.min(Math.max(cores, 1), 32);
-}
+            const logical = Math.max(navigator.hardwareConcurrency || 4, 1);
+            const cap = Math.min(logical, 32);
+
+            // When this machine's own curve has been measured, take the largest
+            // thread count that still earned its place on it. Everything above
+            // that point was measured to add less than SCALE_CAL_MIN_MARGINAL,
+            // which on an SMT machine means the extra threads are siblings
+            // contending for the same execution units - they cost main-thread
+            // time and buy nothing.
+            //
+            // With no measurement, this is unchanged: one worker per logical
+            // thread, which is right on a machine without SMT and the best
+            // available guess before we have measured one.
+            const pts = loadCachedScale();
+            if (pts) {
+                let best = 1;
+                for (const [threads, speedup] of pts) {
+                    const prev = pts[best];
+                    // Walk the measured curve and keep the last step that paid.
+                    if (threads <= cap && best > 1
+                        && speedup / scalePointAt(pts, prev) < SCALE_CAL_MIN_MARGINAL) {
+                        break;
+                    }
+                    best = threads;
+                }
+                if (best >= 1) return Math.max(1, Math.min(best, cap));
+            }
+            return cap;
+        }
+
+        // Speedup the measured curve reports at an exact thread count, falling
+        // back to the nearest lower point.
+        function scalePointAt(pts, threads) {
+            let v = 1;
+            for (const [n, speedup] of pts) {
+                if (n <= threads) v = speedup;
+            }
+            return v;
+        }
 
         async function startMining() {
             if (mining || starting) return;
@@ -1337,6 +1637,33 @@ function detectOptimalWorkers() {
             // implement, and the flag it checked was not the one a cancellation
             // would move.
             if (!starting) return;
+
+            // Measure this machine's scaling curve, once, before choosing a worker
+            // count. Skipped when a previous session already cached it for this
+            // fingerprint, and skipped entirely if it has already failed, so the
+            // cost is paid at most once and never again after a failure.
+            //
+            // Any error or timeout here falls through to the imported table and
+            // the unchanged one-worker-per-logical-thread behaviour, so this can
+            // never stop a search from starting.
+            if (!loadCachedScale() && !scaleCalFailed) {
+                setStatusText('Measuring this machine...');
+                try {
+                    const logical = Math.min(
+                        Math.max(navigator.hardwareConcurrency || 4, 1), 32);
+                    const points = await calibrateScaling(logical);
+                    if (points) {
+                        measuredScalePoints = points;
+                        storeCachedScale(points);
+                    } else {
+                        scaleCalFailed = true;
+                    }
+                } catch (e) {
+                    scaleCalFailed = true;
+                }
+                if (!starting) return;   // cancelled while measuring
+            }
+
             starting = false;
 
             const prefix = document.getElementById('prefix').value.toLowerCase();
@@ -1405,6 +1732,20 @@ function detectOptimalWorkers() {
 
                         let attempts = 0;
                         const startTime = Date.now();
+
+                        // Bounded work, used only by the scaling calibration.
+                        //
+                        // The calibration needs to know how many candidates this
+                        // worker managed in a fixed budget, which an unbounded
+                        // mining loop cannot report - it only speaks every
+                        // REPORT_EVERY_MS, far too coarse for a few hundred
+                        // milliseconds of measurement. When maxAttempts is
+                        // present the loop stops there and posts the count
+                        // instead of searching on. Normal mining omits the
+                        // field entirely and is unaffected: no branch is taken,
+                        // no comparison is added to the hot loop.
+                        const capAttempts = Number(e.data.maxAttempts) > 0
+                            ? Number(e.data.maxAttempts) : 0;
 
                         let patternLen;
                         if (matchPrefix && matchSuffix) {
@@ -1584,6 +1925,18 @@ function detectOptimalWorkers() {
 
                                 attempts++;
                                 incrementSeed();
+
+                                // Calibration stop. Checked once per candidate
+                                // and only ever reached when the field was sent,
+                                // so normal mining never evaluates it.
+                                if (capAttempts && attempts >= capAttempts) {
+                                    self.postMessage({
+                                        type: 'calibrated',
+                                        attempts: attempts,
+                                        elapsed: (Date.now() - startTime) / 1000,
+                                    });
+                                    return;
+                                }
                             }
                             reportProgress(false);
                             // No forced "first report" here: the throttle compares

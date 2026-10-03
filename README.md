@@ -832,6 +832,31 @@ visible `exceeded max_attempts` rather than running forever.
 - **Progress is not capped at 100%.** Expected attempts are the mean of a geometric distribution, so ~37% of searches legitimately run past it. The CLI and browser show the overshoot as `+105.00%` plus how far past the mean the search has run. Once past the mean there is no meaningful "time remaining", so the ETA is replaced by the overshoot instead of being dropped or shown negative.
 - **The hot loop is already at the maths limit.** The cost of a candidate is the Ed25519 scalar multiplication, not our code. Measured per core: **Python/native libsodium ~25,000–32,000 keys/s**, **browser libsodium.wasm ~13,500 keys/s** (`python tools/bench_mining.py`, `bun tools/bench_real_browser.mjs`). Our wrapper adds per-candidate overhead measured at ~10M keys/s equivalent — roughly three orders of magnitude cheaper than the derivation it wraps — so optimising it further cannot help. OpenSSL (via `cryptography`) was measured as a separate backend and is ~20% *slower* than libsodium, so switching implementations is not a win either. The only throughput lever is core count.
 - **Browser workers use every logical core**, capped at 32. This previously reserved one core for the UI, which cost 25% throughput on a 4-core machine for no benefit: the hot loop already yields to the event loop every 250 ms, far more often than the browser needs to repaint, so the UI stays responsive anyway. Measured with the real keygen primitive, SMT siblings still add ~19% over four threads (see "Worker scaling"), so saturating every logical core is the right call and there is no throughput left on that axis.
+
+  **This is now measured rather than assumed.** `navigator.hardwareConcurrency`
+  counts *logical* threads, and there is no browser API for physical cores — so a
+  4-core/8-thread machine is indistinguishable from a real 8-core one without
+  measuring. That matters here, because SMT siblings contend rather than
+  complement: Ed25519 keygen is a chain of dependent 128-bit multiplications with
+  long carry reductions, so the second thread on a physical core fights the first
+  for the same ALU and carry resources. On such a machine one worker per logical
+  thread is simply the wrong count, and it also starves the main thread.
+
+  So the first search on a machine measures its own curve — a handful of
+  candidates per worker per round, over a hard 1.5 s budget — and caches it
+  against the machine fingerprint. Later sessions use the measurement for both
+  the worker count and the estimate, instead of the imported table. A step that
+  adds less than 10% is not worth taking: those threads cost main-thread time
+  (every worker report is a message, a forced layout and a canvas repaint) and
+  buy almost nothing.
+
+  Every failure path falls back to the imported table, which is exactly what
+  runs today, so this can never stop a search from starting; a failed attempt is
+  remembered and not retried. A corrupt or stale cache is rejected rather than
+  trusted. To discard a measurement, clear this site's storage.
+
+  The imported `WORKER_SCALE_POINTS` table remains the fallback and is still
+  used on any machine whose calibration has not completed.
 - **The CLI raises its worker count to the CPU count for long searches**, capped at 64, and refuses more than 256. It stays at 1 when the search is expected to finish in under a second (`_PARALLEL_MIN_SECONDS = 1.0`), because creating a `spawn` pool costs ~0.3s and made short prefixes dramatically slower. Pass `--workers N` to override either way.
 - **Browser prefix + suffix are limited to 64 hex digits combined.** A key is exactly 64 hex digits, so longer patterns would overlap and could never match; the app refuses to start such a search.
 
