@@ -63,12 +63,37 @@ _SUFFIX_MEANS_END = "--suffix"
 _warned_reserved: set[str] = set()
 
 
+class ReservedPrefixWarning(UserWarning):
+    """A pattern was accepted but may not be usable by standard clients."""
+
+
 def _warn_reserved_once(message: str) -> None:
     """Emit ``message`` as a warning, at most once per process."""
     if message in _warned_reserved:
         return
     _warned_reserved.add(message)
-    warnings.warn(message, stacklevel=3)
+    warnings.warn(message, ReservedPrefixWarning, stacklevel=3)
+
+
+def _install_clean_warnings() -> warnings.catch_warnings:
+    """Render warnings without the ``file:line:`` prefix, for the CLI.
+
+    Python's default formatting leads with the source location, so a warning
+    raised inside this file prints as ``meshcore_vanity.py:812: UserWarning: ...``.
+    To someone running the tool that reads as an internal error pointing into the
+    implementation, not as advice about their key. The library still emits a
+    normal warning (so ``pytest.warns`` and any embedding application behave
+    normally); only the CLI's own rendering is changed, and it is restored on the
+    way out.
+    """
+    ctx = warnings.catch_warnings()
+
+    def show(message, category, filename, lineno, file=None, line=None):
+        print(f"Warning: {message}", file=sys.stderr)
+
+    ctx.__enter__()
+    warnings.showwarning = show
+    return ctx
 
 
 def _allow_reserved(prefix: str, encoding: str) -> bool:
@@ -253,7 +278,12 @@ def _validate_prefix(
     # (00, FF). They are still mineable - some users deliberately want one -
     # so the CLI matches the browser's behaviour of allowing it with a clear
     # warning. Set MESHCORE_VANITY_STRICT_RESERVED=1 to restore hard rejection.
-    if encoding == "hex" and len(prefix) >= 2:
+    # Only meaningful when the pattern constrains the START of the key. 00 and FF
+    # are reserved because MeshCore framework devices are addressed by keys
+    # *beginning* with them; a key that merely ENDS in 00ff is unremarkable, and
+    # warning that it "may not work with standard MeshCore clients" would be
+    # simply wrong.
+    if encoding == "hex" and label == "prefix" and len(prefix) >= 2:
         prefix_lower = prefix[:2].lower()
         if prefix_lower in RESERVED_PREFIXES:
             message = (
@@ -1256,6 +1286,15 @@ def _default_workers() -> int:
 
 
 def main() -> int:
+    # Warnings are rendered without the "file:line:" prefix for the whole run.
+    _warn_ctx = _install_clean_warnings()
+    try:
+        return _main()
+    finally:
+        _warn_ctx.__exit__(None, None, None)
+
+
+def _main() -> int:
     parser = argparse.ArgumentParser(
         description="MeshCore Ed25519 vanity key generator",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
