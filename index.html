@@ -259,14 +259,15 @@
         }
         .eta-days {
             color: #3fb950;
-            font-size: clamp(11px, 2.2vw, 13px);
-            min-width: 8ch;   /* reserved so the hours slot never shifts */
+            font-size: clamp(13px, 2.6vw, 16px);
+            font-weight: 600;
+            min-width: 5ch;   /* reserved so the hours slot never shifts */
         }
         .eta-unit { color: inherit; }
-        /* 20+ digits reserved for hours: a multi-week run reaches 4-5 figures,
-           and reserving the widest case means the layout is identical from the
-           first minute to the last instead of shifting as the count grows. */
-        .eta-num { display: inline-block; min-width: 20ch; text-align: right; }
+        /* Hours are now the hours WITHIN the day (0-23), so two digits is the
+           widest case and the old 20ch reservation - sized for an unbounded
+           total-hour count - was a wide dead gap beside every figure. */
+        .eta-num { display: inline-block; min-width: 2ch; text-align: right; }
         .eta-num-2 { min-width: 2ch; }   /* minutes and seconds: always 2 */
         /* Two distinct brights: a readable green for the metric name, a hotter
            one for the live figure itself, so the values pop from the labels. */
@@ -296,12 +297,10 @@
             .live-cell { padding: 4px 0; border-bottom: 1px solid #16301f; }
             .live-cell:last-child { border-bottom: none; }
             .live-cell-eta { grid-column: 1 / -1; }
-            /* Narrow screens cannot afford the full 20ch reservation without
-               overflowing the panel. 10ch is still far more than a multi-week
-               run needs (a 3-week ETA is ~500h, four digits), and being fixed
-               rather than proportional is the part that prevents reflow. */
-            .eta-num { min-width: 10ch; }
-            .eta-days { min-width: 6ch; }
+            /* Hours are 0-23 now that days carry the magnitude, so this only has to
+               stop the panel reflowing on a narrow screen. */
+            .eta-num { min-width: 2ch; }
+            .eta-days { min-width: 5ch; }
         }
         #estimate {
             margin-top: 12px;
@@ -438,11 +437,18 @@
                         <div class="live-cell"><span class="live-k">Attempts</span><span class="live-v" id="live-attempts">0</span></div>
                         <div class="live-cell"><span class="live-k">Rate</span><span class="live-v" id="live-rate">0/s</span></div>
                         <div class="live-cell"><span class="live-k">Progress</span><span class="live-v" id="live-progress">0.00%</span></div>
-                        <!-- Shows the workers ACTUALLY running, so a discrepancy
-                             against the pre-flight estimate is visible rather
-                             than mysterious. -->
-                        <div class="live-cell"><span class="live-k">Workers</span><span class="live-v" id="live-workers">0</span></div>
-                        <div class="live-cell"><span class="live-k">Cores</span><span class="live-v" id="live-cores">-</span></div>
+                        <!-- Workers and cores are read together, as one comparison: the point of
+                             showing cores at all is to let you see the two numbers
+                             side by side. As separate full-width rows they were
+                             two lines that had to be mentally joined, which is
+                             exactly the comparison they exist to support. Workers
+                             shows the workers ACTUALLY running, so a shortfall
+                             against the core count is visible rather than
+                             mysterious. -->
+                        <div class="live-cell live-cell-pair">
+                            <span class="live-k">Workers | Cores</span>
+                            <span class="live-v" id="live-workers">0 | -</span>
+                        </div>
                         <!-- The ETA spans the full width and is split into fixed
                              digit slots. As a single string it reflowed every time
                              a field lost a digit ("9h 5m 3s" -> "9h 5m 13s"), so
@@ -600,7 +606,7 @@
         async function calibrateBenchmark() {
             try {
                 await awaitSodium();
-                const N = 48;
+                const N = 256;
                 const seed = new Uint8Array(32);
                 if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
                     crypto.getRandomValues(seed);
@@ -609,7 +615,12 @@
                 for (let i = 0; i < N; i++) {
                     seed[0] = i & 0xff;
                     sodium.crypto_sign_seed_keypair(seed);
-                    if (i % 8 === 7) await new Promise(r => setTimeout(r, 0));
+                    // Yield every 32 keys rather than every 8: nested timers are
+                    // clamped to >=4ms, so yielding every 8 would spend most of
+                    // this loop asleep. 256 samples is ~15ms of real work and
+                    // lands a far steadier per-worker figure than the 48 this
+                    // used, which was short enough to be dominated by noise.
+                    if (i % 32 === 31) await new Promise(r => setTimeout(r, 0));
                 }
                 const dt = (performance.now() - t0) / 1000;
                 if (dt > 0) {
@@ -670,10 +681,18 @@
         // Kept separate from formatEta() because the plain-text form is still
         // needed for aria-labels and tests, while the display form must pad
         // minutes and seconds to two digits so they cannot reflow.
+        //
+        // `hours` is deliberately the hours WITHIN the day, not the total. It
+        // used to be the total, which meant a 4.8-day search rendered as
+        // "116h 25m" - and because formatDayHint() withholds its hint beyond
+        // ~10 days, the longest searches showed no day figure at all. That is
+        // the scale at which a reader most wants "4d", and least wants to do
+        // the division themselves.
         function etaParts(seconds) {
             const total = Math.max(0, Math.floor(Number(seconds) || 0));
             return {
-                hours: Math.floor(total / 3600),
+                days: Math.floor(total / 86400),
+                hours: Math.floor((total % 86400) / 3600),
                 minutes: Math.floor((total % 3600) / 60),
                 seconds: total % 60,
                 dayHint: formatDayHint(total),
@@ -691,7 +710,10 @@
                 if (el) el.textContent = text;
             };
             const p = etaParts(seconds);
-            set('live-eta-days', p.dayHint);
+            // Real days, not the approximate parenthetical: "4d 19h" is both
+            // shorter and more exact than "116h (~4.5 days)". The hint is kept
+            // in etaParts() for the plain-text/aria form.
+            set('live-eta-days', p.days > 0 ? p.days + 'd' : '');
             set('live-eta-h', String(p.hours));
             set('live-eta-m', pad2(p.minutes));
             set('live-eta-s', pad2(p.seconds));
@@ -981,11 +1003,16 @@
         // is correct on hardware nobody benchmarked.
         const liveWorkerRates = new Map();   // worker index -> keys/s
 
-        // Ignore the first reports from each worker. A worker's first rate is
+        // Ignore the first report from each worker. A worker's first rate is
         // computed over a very short window and is dominated by startup noise
         // and the time to fault in the wasm; averaging it in would make the
         // estimate briefly wrong in the optimistic direction.
-        const LIVE_RATE_MIN_SAMPLES = 3;
+        //
+        // Two, not three: the report interval is 3s, so a third sample would
+        // push the switch from modelled to measured out to ~9s. Two still
+        // discards the startup sample, and lands the panel on real numbers in
+        // about one interval.
+        const LIVE_RATE_MIN_SAMPLES = 2;
         const liveRateSamples = new Map();   // worker index -> reports seen
 
         function resetLiveRates() {
@@ -1191,8 +1218,9 @@
             set('live-attempts', '0');
             set('live-rate', '0/s');
             set('live-progress', '0.00%');
-            set('live-workers', String(workers == null ? 0 : workers));
-            set('live-cores', String(cores == null ? '-' : cores));
+            // One "N | M" string, matching the single Workers | Cores cell.
+            set('live-workers', (workers == null ? 0 : workers) + ' | ' +
+                (cores == null ? '-' : cores));
             // Start at zeroed but rendered, so the slots exist at their full
             // reserved width from the first frame instead of snapping wider the
             // moment a real duration appears.
@@ -1238,10 +1266,10 @@
         // A short search may create fewer than requested if the browser cannot
         // spawn them all, and silently reporting the plan would hide it.
         function reportActualWorkers(created) {
+            const cores = navigator.hardwareConcurrency || '-';
             const el = document.getElementById('live-workers');
-            if (el) el.textContent = String(created);
-            const coresEl = document.getElementById('live-cores');
-            if (coresEl) coresEl.textContent = String(navigator.hardwareConcurrency || '-');
+            // "N | M" in one cell, matching the Workers | Cores label.
+            if (el) el.textContent = created + ' | ' + cores;
             return created;
         }
 
@@ -1391,8 +1419,22 @@ function detectOptimalWorkers() {
                         const expectedAttempts = Math.pow(16, patternLen);
 
                         const BATCH_SIZE = 256;
-                        const REPORT_EVERY_MS = 500;
+                        // Per-worker report interval.
+                        //
+                        // This was 500ms, which is 2 posts per worker per second
+                        // - 16 messages a second to the main thread at 8 workers,
+                        // and every one of them redrew the rate graph (a forced
+                        // layout plus a canvas repaint) and rewrote the estimate
+                        // line. All of that runs on the main thread, which is
+                        // competing with every worker for the same cores, so UI
+                        // churn is not free: it comes straight out of aggregate
+                        // throughput. Nothing here needs sub-second resolution -
+                        // the numbers are an aggregate rate over seconds - so the
+                        // interval is 3s and the main thread does 1/6th of the
+                        // work it used to.
+                        const REPORT_EVERY_MS = 3000;
                         let lastProgressReport = 0;
+                        let firstReportSent = false;
 
                         function reportProgress(force) {
                             const now = Date.now();
@@ -1503,7 +1545,20 @@ function detectOptimalWorkers() {
                         // thousand keys/s. 30ms keeps Stop/UI responsive while
                         // letting each worker run thousands of candidates per
                         // scheduler hand-off.
-                        const YIELD_EVERY_MS = 30;
+                        // How often the worker hands control back to its event loop so a queued
+                        // 'stop' message can be delivered.
+                        //
+                        // This yield is an await on a timer, which parks the
+                        // worker thread until the timer fires; browsers clamp
+                        // nested timeouts to >=4ms. At the old 30ms it fired ~33
+                        // times a second per worker - 260 times a second across
+                        // 8 workers - spending a meaningful share of the mining
+                        // time asleep on the timer queue rather than hashing.
+                        // 250ms is 4 times a second, which is still far faster
+                        // than a person can press Stop, and the stop path does
+                        // not depend on this being tight (terminateAllWorkers
+                        // tears the workers down outright).
+                        const YIELD_EVERY_MS = 250;
                         let lastYield = Date.now();
 
                         while (true) {
@@ -1536,6 +1591,18 @@ function detectOptimalWorkers() {
                                 incrementSeed();
                             }
                             reportProgress(false);
+                            // The FIRST report is forced. Reports are then 3s
+                            // apart, which is right for a steady rate figure but
+                            // would delay the self-calibration by two intervals
+                            // (~6s) - long enough that the user stares at the
+                            // modelled estimate, which is the figure that was
+                            // wildly optimistic. One early sample from each
+                            // worker lets the panel switch to measured data
+                            // within a single interval.
+                            if (!firstReportSent) {
+                                firstReportSent = true;
+                                reportProgress(true);
+                            }
                             const nowMs = Date.now();
                             if (nowMs - lastYield >= YIELD_EVERY_MS) {
                                 lastYield = nowMs;
@@ -1795,6 +1862,9 @@ function detectOptimalWorkers() {
         const RATE_GRAPH_POINTS = 90;    // samples drawn across the canvas
         const RATE_GRAPH_PAD = 0.12;     // fraction of range left headroom
         const RATE_GRAPH_WINDOW_MS = 120000;  // 2 min of history on screen
+        // Weight given to the newest sample when smoothing the trace. See
+        // pushRateGraphSample().
+        const RATE_GRAPH_SMOOTH = 0.5;
         // A sample is kept until there are more of them than the canvas can
         // show; past that they are halved in place, and each sample carries the
         // timestamp of the moment it was taken so the on-screen span stays a
@@ -1817,12 +1887,56 @@ function detectOptimalWorkers() {
         // entire run - which stretched the first samples so far apart that the
         // recent variation this graph exists to show flattened into a straight
         // line. Timestamps let the old samples fall off the left edge instead.
+        // Halve a buffer down to at most `cap` samples, keeping the NEWER of each
+        // adjacent pair.
+        //
+        // Extracted from pushRateGraphSample() so the pairing rule can be tested
+        // on explicit values. Testing it through the sampler no longer works:
+        // samples are smoothed on the way in, which turns any alternating input
+        // into a converging average and makes index parity unobservable - the
+        // exact property this function exists to guarantee.
+        function decimateSamples(list, cap) {
+            let out = list;
+            while (out.length > cap) {
+                const kept = [];
+                for (let i = 1; i < out.length; i += 2) {
+                    kept.push(out[i]);
+                }
+                // Halving an odd length cannot land on the final element, so
+                // re-append the true newest sample and keep the newest.
+                const newest = out[out.length - 1];
+                if (kept[kept.length - 1] !== newest) kept.push(newest);
+                out = kept;
+            }
+            return out;
+        }
+
         function pushRateGraphSample(rate) {
             const r = Number(rate);
             if (!isFinite(r) || r < 0) return;
 
             const now = Date.now();
-            rateGraph.push({ t: now, v: r });
+            // Smooth the TRACE, not the headline number.
+            //
+            // Each sample is one worker's rate over the interval since it last
+            // reported, so consecutive samples legitimately differ by a lot -
+            // different workers, different batch boundaries. Drawn raw, those
+            // differences read as violent spikes and the line became unreadable
+            // noise. An exponential average over the samples keeps the shape the
+            // graph exists to show (is the rate steady or collapsing?) while
+            // removing the per-worker jitter.
+            //
+            // alpha is deliberately high (0.5): this is display smoothing for
+            // legibility, not the slow easing used for the headline figure, and
+            // it must still react within a sample or two of a real change.
+            // The first sample is taken as-is so the line starts at the true
+            // rate instead of easing up from zero.
+            let v = r;
+            if (rateGraph.length > 0) {
+                const prev = rateGraph[rateGraph.length - 1].v;
+                if (isFinite(prev)) v = RATE_GRAPH_SMOOTH * r + (1 - RATE_GRAPH_SMOOTH) * prev;
+            }
+            rateGraph.push({ t: now, v: v });
 
             // Drop samples older than the window.
             const cutoff = now - RATE_GRAPH_WINDOW_MS;
@@ -1830,24 +1944,45 @@ function detectOptimalWorkers() {
             while (drop < rateGraph.length - 1 && rateGraph[drop].t < cutoff) drop++;
             if (drop > 0) rateGraph = rateGraph.slice(drop);
 
-            // Still too many to resolve: halve in place, keeping the NEWER of
-            // each adjacent pair (i + 1, not i). Keeping the older would make
-            // every decimated reading up to one sample stale, so the trace
-            // would lag a real rate change instead of showing it.
-            while (rateGraph.length > RATE_GRAPH_POINTS) {
-                const kept = [];
-                for (let i = 1; i < rateGraph.length; i += 2) {
-                    kept.push(rateGraph[i]);
-                }
-                // Halving an odd length cannot land on the final element, so
-                // re-append the true newest sample and keep the newest.
-                const newest = rateGraph[rateGraph.length - 1];
-                if (kept[kept.length - 1] !== newest) kept.push(newest);
-                rateGraph = kept;
-            }
+            // Still too many to resolve: halve, keeping the NEWER of each adjacent pair.
+            rateGraph = decimateSamples(rateGraph, RATE_GRAPH_POINTS);
 
             drawRateGraph();
         }
+
+        // Canvas box size, cached.
+        //
+        // Reading clientWidth/clientHeight forces a synchronous layout. Doing
+        // that on every progress event meant each report paid for a full
+        // reflow of the panel, on the same main thread that the mining workers
+        // are competing with for CPU. The box only changes when the window or
+        // the panel resizes, so it is cached and refreshed from a ResizeObserver
+        // instead of being re-measured per frame.
+        let rateGraphBox = null;
+        function measureRateGraphBox() {
+            const canvas = document.getElementById('rate-graph');
+            if (!canvas) return null;
+            const w = canvas.clientWidth;
+            const h = canvas.clientHeight;
+            if (!w || !h) return null;
+            const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+            rateGraphBox = { w: w, h: h, dpr: dpr };
+            return rateGraphBox;
+        }
+        // Guarded because this runs while the script is being evaluated: if the
+        // element is not parsed yet there is nothing to observe, and observe(null)
+        // throws. The window resize listener below still covers that case.
+        const rateGraphCanvas = document.getElementById('rate-graph');
+        if (typeof ResizeObserver === 'function' && rateGraphCanvas) {
+            new ResizeObserver(() => {
+                rateGraphBox = null;
+                drawRateGraph();
+            }).observe(rateGraphCanvas);
+        }
+        window.addEventListener('resize', () => {
+            rateGraphBox = null;
+            drawRateGraph();
+        });
 
         function drawRateGraph() {
             const canvas = document.getElementById('rate-graph');
@@ -1859,14 +1994,19 @@ function detectOptimalWorkers() {
             // into the progress handler and stall the live figures.
             if (!ctx) return;
 
+            // Reuse the cached box; only measure when we have none. This is the
+            // difference between one forced layout per resize and one per draw.
+            const box = rateGraphBox || measureRateGraphBox();
+            if (!box) return;   // not laid out yet; nothing to draw into
+            const dpr = box.dpr;
+            const w = box.w;
+            const h = box.h;
+
             // Match the backing store to the CSS box, accounting for devicePixel
             // ratio. Without the DPR scaling the line is drawn at CSS-pixel
             // size into a device-pixel canvas and comes out half-size/blurry on
-            // any HiDPI display.
-            const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
-            const w = canvas.clientWidth;
-            const h = canvas.clientHeight;
-            if (!w || !h) return;   // not laid out yet; nothing to draw into
+            // any HiDPI display. w/h/dpr now come from the cached box above
+            // rather than from a fresh layout-forcing read.
             const pw = Math.round(w * dpr);
             const ph = Math.round(h * dpr);
             if (canvas.width !== pw || canvas.height !== ph) {

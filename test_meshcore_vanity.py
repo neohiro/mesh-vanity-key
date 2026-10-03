@@ -791,7 +791,7 @@ def test_missing_prefix_is_reported(monkeypatch, capsys):
     )
     assert mv.main() == 2
     err = capsys.readouterr().err
-    assert "prefix is required" in err, err
+    assert "pattern is required" in err, err
     # Must not print a traceback or a bare argparse usage dump.
     assert "Traceback" not in err, err
     assert "usage:" not in err, err
@@ -854,12 +854,65 @@ def test_generate_vanity_key_base58():
     assert result.attempts == 3
 
 
+def test_pyproject_version_matches_the_reported_version() -> None:
+    """pyproject and --version must not drift apart.
+
+    pyproject.toml carries the version the package is built and installed as,
+    which is what the one-line online install resolves. meshcore_vanity.__version__
+    is what `--version` prints. A release that bumped one and not the other would
+    install one version and advertise another.
+    """
+    from pathlib import Path
+
+    import tomllib
+
+    root = Path(__file__).parent
+    pyproject = root / "pyproject.toml"
+    assert pyproject.exists(), "pyproject.toml is needed for the online install"
+    with pyproject.open("rb") as fh:
+        data = tomllib.load(fh)
+    assert data["project"]["version"] == meshcore_vanity.__version__, (
+        f"pyproject {data['project']['version']} != "
+        f"__version__ {meshcore_vanity.__version__}"
+    )
+    # The console script is the whole point of the online install; if it is
+    # renamed there, the documented one-liner breaks.
+    scripts = data["project"]["scripts"]
+    assert "meshcore-vanity" in scripts, scripts
+    assert scripts["meshcore-vanity"] == "meshcore_vanity:main", scripts
+
+
+def test_the_online_install_needs_only_pynacl() -> None:
+    """Installing must not drag in the test tooling."""
+    from pathlib import Path
+
+    import tomllib
+
+    with (Path(__file__).parent / "pyproject.toml").open("rb") as fh:
+        deps = tomllib.load(fh)["project"]["dependencies"]
+    names = " ".join(deps).lower()
+    for test_only in ("pytest", "ruff", "pillow"):
+        assert test_only not in names, f"{test_only} must stay in requirements.txt"
+    assert "pynacl" in names, deps
+
+
 def test_expected_attempts():
-    assert _expected_attempts("hex", 2, False) == 16**2
-    assert _expected_attempts("base64", 1, False) == 64
-    assert _expected_attempts("base58", 1, False) == 58
-    assert _expected_attempts("bech32", 1, False) == 32
-    assert _expected_attempts("hex", 2, True) == 16**4
+    # One constrained end.
+    assert _expected_attempts("hex", 2) == 16**2
+    assert _expected_attempts("base64", 1) == 64
+    assert _expected_attempts("base58", 1) == 58
+    assert _expected_attempts("bech32", 1) == 32
+    # Two constrained ends multiply, they do not add: --both with a 2-char
+    # pattern is 16**4, and a 2-char prefix with a separate 3-char suffix is
+    # 16**5.
+    assert _expected_attempts("hex", 2, 2) == 16**4
+    assert _expected_attempts("hex", 2, 3) == 16**5
+    # Uneven ends, which is the separate prefix/suffix case: the ends are
+    # independent so the cost is the product of both.
+    assert _expected_attempts("base64", 2, 2) == 64**4
+    # An empty pattern constrains nothing.
+    assert _expected_attempts("hex", 0) == 1
+    assert _expected_attempts("hex", 2, 0) == 16**2
 
 
 def test_format_day_hint_uses_half_day_steps():
@@ -1880,6 +1933,124 @@ def test_the_launcher_exists_for_both_platforms() -> None:
         assert (root / name).read_text(encoding="utf-8").startswith(
             "#!/usr/bin/env"
         ), f"{name} needs a shebang to be directly executable"
+
+def test_separate_prefix_and_suffix_are_both_required() -> None:
+    """--suffix PATTERN adds a second, independent pattern.
+
+    The browser has always allowed a prefix and a *different* suffix in one
+    search; the CLI could only do one end, or the same pattern at both ends.
+    """
+    result = generate_vanity_key(
+        "a", encoding="hex", suffix_pattern="b", max_attempts=200_000
+    )
+    data = result.encoded.rstrip("=")
+    assert data.startswith("a"), result.encoded
+    assert data.endswith("b"), result.encoded
+
+
+def test_suffix_matches_key_data_not_base64_padding() -> None:
+    """Regression: a base64 key is 44 chars and the last is always '='.
+
+    Suffix matching used to compare `encoded[-n:]`, which for base64 is the
+    padding. A short suffix therefore could never match and the search ran
+    until it was killed rather than reporting that the target was impossible.
+    """
+    result = generate_vanity_key(
+        "Yc", encoding="base64", suffix=True, max_attempts=200_000
+    )
+    # 44 chars, last is the pad; the suffix must land inside the 43 data chars.
+    assert len(result.encoded) == 44, result.encoded
+    assert result.encoded.endswith("="), result.encoded
+    assert result.encoded[:-1].endswith("Yc"), result.encoded
+    assert not result.encoded.endswith("Yc"), (
+        "the suffix must not be matched against the padding"
+    )
+
+
+def test_separate_prefix_and_suffix_on_base64_use_the_data_region() -> None:
+    """Both ends must match inside the key data, ignoring the pad."""
+    result = generate_vanity_key(
+        "a", encoding="base64", suffix_pattern="c", max_attempts=200_000
+    )
+    data = result.encoded[:-1]
+    assert data.startswith("a"), result.encoded
+    assert data.endswith("c"), result.encoded
+
+
+def test_overlapping_prefix_and_suffix_are_rejected() -> None:
+    """Overlapping patterns can never both match, so refuse them up front."""
+    with pytest.raises(ValueError, match="overlap"):
+        generate_vanity_key(
+            "a" * 40, encoding="hex", suffix_pattern="b" * 30, max_attempts=1
+        )
+    # Exactly filling the key is the boundary and must stay allowed.
+    with pytest.raises(RuntimeError):
+        generate_vanity_key(
+            "a" * 32, encoding="hex", suffix_pattern="b" * 32, max_attempts=1
+        )
+
+
+def test_suffix_longer_than_the_key_is_rejected() -> None:
+    """base64 has 43 data characters, so a 50-char suffix is impossible."""
+    with pytest.raises(ValueError, match="too long"):
+        generate_vanity_key(
+            "ab", encoding="base64", suffix_pattern="b" * 50, max_attempts=1
+        )
+
+
+def test_conflicting_match_modes_are_rejected() -> None:
+    """The two-ended modes contradict each other and must say so."""
+    with pytest.raises(ValueError, match="--both with a separate suffix"):
+        generate_vanity_key(
+            "ab", encoding="hex", suffix_pattern="cd", both=True, max_attempts=1
+        )
+    with pytest.raises(ValueError, match="match at the end"):
+        generate_vanity_key(
+            "ab", encoding="hex", suffix=True, suffix_pattern="cd", max_attempts=1
+        )
+    with pytest.raises(ValueError, match="must not be empty"):
+        generate_vanity_key("ab", encoding="hex", suffix_pattern="", max_attempts=1)
+
+
+def test_suffix_pattern_validates_its_alphabet() -> None:
+    """The second pattern gets the same charset check as the first."""
+    with pytest.raises(ValueError, match="invalid characters"):
+        generate_vanity_key(
+            "ab", encoding="hex", suffix_pattern="zz", max_attempts=1
+        )
+
+
+def test_the_suffix_flag_without_a_value_still_means_match_at_the_end() -> None:
+    """Back-compat: bare --suffix must not change meaning.
+
+    argparse cannot tell "flag absent" from "flag present with no value" when
+    both default to None, so a sentinel carries the difference. If that ever
+    collapses, this test catches it.
+    """
+    proc = _run_cli("Yc", "--suffix", "--force", "--max-attempts", "200000")
+    assert proc.returncode == 0, proc.stderr
+    assert "ending with 'Yc'" in proc.stderr, proc.stderr
+    key = proc.stdout.strip()
+    assert key[:-1].endswith("Yc"), key
+
+
+def test_the_suffix_flag_with_a_value_adds_a_second_pattern() -> None:
+    """`--suffix PATTERN` is the separate-prefix-and-suffix mode."""
+    proc = _run_cli("a", "--suffix", "c", "--force", "--max-attempts", "200000")
+    assert proc.returncode == 0, proc.stderr
+    assert "starting with 'a' AND ending with 'c'" in proc.stderr, proc.stderr
+    key = proc.stdout.strip()
+    assert key[:-1].startswith("a"), key
+    assert key[:-1].endswith("c"), key
+
+
+def test_suffix_pattern_alone_needs_no_prefix() -> None:
+    """`--suffix cd` with no positional constrains only the end."""
+    proc = _run_cli("--suffix", "Yc", "--force", "--max-attempts", "200000")
+    assert proc.returncode == 0, proc.stderr
+    assert "ending with 'Yc'" in proc.stderr, proc.stderr
+    assert proc.stdout.strip()[:-1].endswith("Yc")
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
