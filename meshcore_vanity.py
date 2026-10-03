@@ -46,6 +46,12 @@ BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 # These are skipped during mining by default, but may be explicitly requested.
 RESERVED_PREFIXES = {"00", "ff"}
 
+# Sentinel for `--suffix` given with no value. argparse gives no way to tell
+# "flag absent" from "flag present, no value" when both default to None, and the
+# two mean different things here: absent, and bare --suffix (match at the end
+# instead of the start), and --suffix PATTERN (a separate second pattern).
+_SUFFIX_MEANS_END = "--suffix"
+
 
 _warned_reserved: set[str] = set()
 
@@ -104,8 +110,8 @@ def _init_worker_counter(counter) -> None:
 def _worker_search(args: tuple) -> tuple:
     """Worker function for parallel search."""
     (prefix, encoding, case_insensitive, max_attempts, seed, prefix_len,
-     prefix_cmp, check_slice, both, hrp, start_offset, _worker_id,
-     total_workers, is_hex, hrp_expanded) = args
+     prefix_cmp, suffix_cmp, suffix_slice, two_ended, check_slice, hrp,
+     start_offset, _worker_id, total_workers, is_hex, hrp_expanded) = args
 
     # NOTE: base64/hashlib/nacl are already imported at module level; under
     # the "spawn" start method the module is re-imported in each child, so no
@@ -157,16 +163,19 @@ def _worker_search(args: tuple) -> tuple:
             else:
                 encoded = _bech32_encode(hrp, raw, hrp_expanded)
 
-            if both:
-                encoded_prefix = encoded[:prefix_len]
-                encoded_suffix = encoded[-prefix_len:]
+            if two_ended:
+                # Mirrors the single-threaded hot loop: --both and
+                # --suffix PATTERN differ only in what the end must equal.
                 if case_insensitive:
-                    pref_match = encoded_prefix.lower() == prefix_cmp
-                    suff_match = encoded_suffix.lower() == prefix_cmp
+                    match = (
+                        encoded[:prefix_len].lower() == prefix_cmp
+                        and encoded[suffix_slice].lower() == suffix_cmp
+                    )
                 else:
-                    pref_match = encoded_prefix == prefix_cmp
-                    suff_match = encoded_suffix == prefix_cmp
-                match = pref_match and suff_match
+                    match = (
+                        encoded[:prefix_len] == prefix_cmp
+                        and encoded[suffix_slice] == suffix_cmp
+                    )
             else:
                 encoded_part = encoded[check_slice]
                 if case_insensitive:
@@ -367,8 +376,13 @@ def _bech32_encode(hrp: str, data: bytes, hrp_expanded: list[int] | None = None)
     return hrp + "1" + "".join(BECH32_CHARSET[v] for v in five_bit + checksum)
 
 
-def _expected_attempts(encoding: Encoding, prefix_len: int, both: bool) -> int:
-    """Brute-force search space size for the stderr progress line."""
+def _expected_attempts(encoding: Encoding, *pattern_lengths: int) -> int:
+    """Brute-force search space size for the stderr progress line.
+
+    Takes the length of every independently-constrained end of the key, so a
+    prefix and a separate suffix cost what they actually cost: constraining both
+    ends multiplies the search space, it does not add to it.
+    """
     if encoding == "hex":
         alphabet_size = 16
     elif encoding in ("base64", "base64url"):
@@ -377,9 +391,57 @@ def _expected_attempts(encoding: Encoding, prefix_len: int, both: bool) -> int:
         alphabet_size = 58
     else:
         alphabet_size = 32
-    if both:
-        return alphabet_size ** (prefix_len * 2)
-    return alphabet_size ** prefix_len
+    return alphabet_size ** sum(pattern_lengths)
+
+
+def _max_encoded_len(encoding: Encoding, hrp: str) -> int:
+    """Longest possible encoding of a 32-byte public key, in characters.
+
+    Two patterns longer than this must overlap, and overlapping patterns can
+    never both match, so callers fail fast instead of searching forever.
+    """
+    if encoding == "hex":
+        return 64
+    if encoding == "base64":
+        return 44
+    if encoding == "base64url":
+        return 43
+    if encoding == "base58":
+        return 44
+    return len(hrp) + 1 + 52 + 6
+
+
+# Encodings whose alphabet is case-SENSITIVE. A key beginning "AB" is a
+# different key from one beginning "ab", so these must be matched exactly or
+# the tool returns keys that do not match the request. hex and bech32 are
+# conventionally case-insensitive and keep the friendly default.
+CASE_SENSITIVE_ENCODINGS = ("base64", "base64url", "base58")
+
+
+def _effective_case_insensitive(encoding: Encoding, case_insensitive: bool) -> bool:
+    """Case-insensitive matching, forced off for case-sensitive alphabets.
+
+    Asking for a base64 key starting ``ab`` and being handed one starting
+    ``aB`` is not a near miss, it is the wrong key - and for a vanity search
+    the whole point is that the result matches the pattern that was typed.
+    Callers cannot opt back in: there is no correct case-insensitive match for
+    these alphabets, only a misleading one.
+    """
+    return case_insensitive and encoding not in CASE_SENSITIVE_ENCODINGS
+
+
+def _data_len(encoding: Encoding, hrp: str) -> int:
+    """Length of the encoded key's *data*, excluding base64's ``=`` padding.
+
+    A 32-byte key is 44 base64 characters, the last of which is always the
+    ``=`` pad. Suffix matching must look at the end of the key data, not at the
+    padding: matching ``encoded[-1:]`` compares against ``"="`` on every single
+    candidate, so a short base64 suffix could never match and the search ran
+    forever. This is the window the tail is actually drawn from.
+    """
+    if encoding == "base64":
+        return 43
+    return _max_encoded_len(encoding, hrp)
 
 
 def format_elapsed(seconds: float) -> str:
@@ -506,16 +568,53 @@ def generate_vanity_key(
     progress_interval: int = 100_000,
     hrp: str = "mc",
     suffix: bool = False,
+    suffix_pattern: str | None = None,
     both: bool = False,
     workers: int = 1,
 ) -> VanityResult:
-    """Generate Ed25519 keypair until public key encoding matches prefix.
+    """Generate Ed25519 keypair until the public key encoding matches.
 
     Uses scalar-walk key derivation for performance and reproducibility.
+
+    Matching modes, in precedence order:
+
+    - ``suffix_pattern`` given: require ``prefix`` at the start **and**
+      ``suffix_pattern`` at the end, as two independent patterns. This is what
+      the browser does with its two input boxes, and it is the only mode that
+      can ask for a prefix and a *different* suffix.
+    - ``suffix=True``: require ``prefix`` at the end instead of the start.
+    - ``both=True``: require ``prefix`` at both ends (the same pattern twice).
+    - otherwise: require ``prefix`` at the start.
     """
-    _validate_prefix(
-        prefix, encoding, case_insensitive, label="suffix" if suffix else "prefix"
-    )
+    if suffix_pattern is not None:
+        if suffix:
+            raise ValueError(
+                "cannot combine --suffix (match at the end) with a separate "
+                "suffix pattern; pass one or the other"
+            )
+        if both:
+            raise ValueError(
+                "cannot combine --both with a separate suffix pattern: --both "
+                "uses one pattern for both ends, which is what a separate "
+                "suffix pattern replaces"
+            )
+        if not suffix_pattern:
+            raise ValueError("suffix pattern must not be empty")
+        _validate_prefix(
+            suffix_pattern, encoding, case_insensitive, label="suffix"
+        )
+    if both and suffix:
+        raise ValueError("cannot use --both with --suffix")
+    # An empty pattern is only meaningful when a separate suffix pattern
+    # supplies the constraint - that is the suffix-only mode. On its own an
+    # empty prefix would match every key, which _validate_prefix rejects.
+    if prefix or suffix_pattern is None:
+        _validate_prefix(
+            prefix,
+            encoding,
+            case_insensitive,
+            label="suffix" if suffix else "prefix",
+        )
     seed = _validate_seed(seed)
     if progress_interval <= 0:
         raise ValueError("progress_interval must be positive")
@@ -527,39 +626,66 @@ def generate_vanity_key(
     if workers > 256:
         raise ValueError("workers must be <= 256")
 
+    case_insensitive = _effective_case_insensitive(encoding, case_insensitive)
     prefix_cmp = prefix.lower() if case_insensitive else prefix
     prefix_len = len(prefix)
     # A 32-byte key has a fixed maximum encoded length per encoding; a longer
     # prefix can never match, so fail fast instead of searching forever.
-    if encoding == "hex":
-        max_len = 64
-    elif encoding == "base64":
-        max_len = 44
-    elif encoding == "base64url":
-        max_len = 43
-    elif encoding == "base58":
-        max_len = 44
-    else:
-        max_len = len(hrp) + 1 + 52 + 6
+    max_len = _max_encoded_len(encoding, hrp)
     if prefix_len > max_len:
         raise ValueError(
             f"{'suffix' if suffix else 'prefix'} too long for {encoding}: "
             f"{prefix_len} chars, max is {max_len} for a 32-byte key"
         )
-    # Support suffix matching: check the last prefix_len chars instead of the first.
-    # Set suffix_mode=True via the suffix parameter to hunt for keys whose encoded
-    # public key ends with the target string, e.g. suffix ABC to find keys ending in ...ABC.
-    # Support both mode: check both prefix AND suffix using the same pattern.
-    if both:
-        if suffix:
-            raise ValueError("cannot use --both with --suffix")
+    # Suffix matching checks the last N chars instead of the first. Both-ends
+    # modes check the first N against `prefix` AND the last M against
+    # `suffix_cmp`, which is `prefix_cmp` itself for --both and a separate
+    # pattern for --suffix PATTERN.
+    suffix_len = 0
+    suffix_cmp = ""
+    two_ended = both or suffix_pattern is not None
+    data_len = _data_len(encoding, hrp)
+    if two_ended:
+        if both:
+            suffix_cmp, suffix_len = prefix_cmp, prefix_len
+        else:
+            suffix_cmp = (
+                suffix_pattern.lower() if case_insensitive else suffix_pattern
+            )
+            suffix_len = len(suffix_pattern)
+        if suffix_len > data_len:
+            raise ValueError(
+                f"suffix too long for {encoding}: {suffix_len} chars, max is "
+                f"{data_len} for a 32-byte key"
+            )
+        # The prefix covers [0, prefix_len) and the suffix the last
+        # `suffix_len` data characters. If those regions touch, the same
+        # characters would have to satisfy both patterns, which is impossible
+        # for all but a few patterns - so refuse rather than search forever.
+        # The browser rejects the same case.
+        suffix_start = data_len - suffix_len
+        if prefix_len > suffix_start:
+            raise ValueError(
+                f"prefix ({prefix_len} chars) + suffix ({suffix_len} chars) "
+                f"overlap: a {encoding} key has only {data_len} characters, so "
+                f"the two patterns would have to be satisfied by the same ones "
+                f"and can never both match"
+            )
+        suffix_slice = slice(suffix_start, data_len)
         check_slice = None
         _validate_hrp(hrp)
         if encoding == "bech32":
             _validate_bech32_prefix(prefix_cmp, hrp, case_insensitive)
     elif suffix:
-        check_slice = slice(-prefix_len, None)
+        if prefix_len > data_len:
+            raise ValueError(
+                f"suffix too long for {encoding}: {prefix_len} chars, max is "
+                f"{data_len} for a 32-byte key"
+            )
+        suffix_slice = slice(data_len - prefix_len, data_len)
+        check_slice = suffix_slice
     else:
+        suffix_slice = None
         check_slice = slice(0, prefix_len)
         _validate_hrp(hrp)
         if encoding == "bech32":
@@ -567,6 +693,13 @@ def generate_vanity_key(
     is_hex = encoding == "hex"
     # HRP expansion is loop-invariant; hoist it out of the hot path.
     hrp_expanded = _bech32_hrp_expand(hrp) if encoding == "bech32" else None
+    # Cost of the search: every constrained end multiplies the space. An empty
+    # pattern constrains nothing and contributes a factor of 1, which
+    # _expected_attempts gets right on its own via sum().
+    if two_ended:
+        expected_attempts = _expected_attempts(encoding, prefix_len, suffix_len)
+    else:
+        expected_attempts = _expected_attempts(encoding, prefix_len)
 
     # Multi-worker parallel search
     if workers > 1:
@@ -579,10 +712,14 @@ def generate_vanity_key(
             progress_interval=progress_interval,
             hrp=hrp,
             suffix=suffix,
-            both=both,
             workers=workers,
             prefix_cmp=prefix_cmp,
             prefix_len=prefix_len,
+            suffix_cmp=suffix_cmp,
+            suffix_len=suffix_len,
+            suffix_slice=suffix_slice,
+            two_ended=two_ended,
+            expected_attempts=expected_attempts,
             check_slice=check_slice,
             is_hex=is_hex,
             hrp_expanded=hrp_expanded,
@@ -603,7 +740,7 @@ def generate_vanity_key(
     _seed_keypair = nacl.bindings.crypto_sign_seed_keypair
 
     # Calculate expected attempts for progress percentage
-    expected_attempts = _expected_attempts(encoding, prefix_len, both)
+    expected_attempts = _expected_attempts(encoding, prefix_len, suffix_len) if two_ended else _expected_attempts(encoding, prefix_len)
 
     # Scalar-walk: derive initial scalar from seed once, then increment
     # as a 256-bit integer for each attempt (avoids SHA-256 per attempt)
@@ -653,16 +790,19 @@ def generate_vanity_key(
                 encoded = _bech32(hrp, raw, hrp_expanded)
 
             # Inline prefix/suffix/both check for hot path
-            if both:
-                encoded_prefix = encoded[:prefix_len]
-                encoded_suffix = encoded[-prefix_len:]
+            if two_ended:
+                # One branch covers --both and --suffix PATTERN: both require a
+                # match at each end, differing only in what the end must equal.
                 if case_insensitive:
-                    pref_match = encoded_prefix.lower() == prefix_cmp
-                    suff_match = encoded_suffix.lower() == prefix_cmp
+                    match = (
+                        encoded[:prefix_len].lower() == prefix_cmp
+                        and encoded[suffix_slice].lower() == suffix_cmp
+                    )
                 else:
-                    pref_match = encoded_prefix == prefix_cmp
-                    suff_match = encoded_suffix == prefix_cmp
-                match = pref_match and suff_match
+                    match = (
+                        encoded[:prefix_len] == prefix_cmp
+                        and encoded[suffix_slice] == suffix_cmp
+                    )
             else:
                 # check_slice is always a slice here (both=False branch)
                 encoded_part = encoded[check_slice]  # type: ignore[index]
@@ -699,10 +839,14 @@ def _generate_vanity_key_parallel(
     progress_interval: int,
     hrp: str,
     suffix: bool,
-    both: bool,
     workers: int,
     prefix_cmp: str,
     prefix_len: int,
+    suffix_cmp: str,
+    suffix_len: int,
+    suffix_slice: slice,
+    two_ended: bool,
+    expected_attempts: int,
     check_slice: slice | None,
     is_hex: bool,
     hrp_expanded: list[int] | None,
@@ -721,7 +865,9 @@ def _generate_vanity_key_parallel(
         per_worker_max = (max_attempts + workers - 1) // workers
     else:
         per_worker_max = None
-    expected_attempts = _expected_attempts(encoding, prefix_len, both)
+    expected_attempts = _expected_attempts(
+        encoding, prefix_len, suffix_len
+    ) if two_ended else _expected_attempts(encoding, prefix_len)
     progress_counter = ctx.Value("Q", 0)
     with ctx.Pool(processes=workers, initializer=_init_worker_counter,
                    initargs=(progress_counter,)) as pool:
@@ -729,7 +875,8 @@ def _generate_vanity_key_parallel(
         for w in range(workers):
             worker_args.append((
                 prefix, encoding, case_insensitive, per_worker_max, seed,
-                prefix_len, prefix_cmp, check_slice, both, hrp,
+                prefix_len, prefix_cmp, suffix_cmp, suffix_slice,
+                two_ended, check_slice, hrp,
                 w, w, workers,
                 is_hex, hrp_expanded
             ))
@@ -917,11 +1064,16 @@ def main() -> int:
     )
     parser.add_argument(
         "--suffix",
-        action="store_true",
-        help="Match the pattern against the END of the encoded key instead of "
-        "the start (checks the last N chars). A switch, not a value: the "
-        "pattern still comes from the positional argument, so it is "
-        "`--suffix` and not `--suffix 7f`.",
+        nargs="?",
+        const=_SUFFIX_MEANS_END,
+        default=None,
+        metavar="PATTERN",
+        help="With no value, match the positional pattern against the END of "
+        "the key instead of the start. With a value, require that value at the "
+        "end IN ADDITION TO the positional prefix - two independent patterns "
+        "checked in the same search, as the browser's two input boxes do. "
+        "e.g. `--suffix ab --suffix cd` matches a key starting 'ab' and ending "
+        "'cd'.",
     )
     parser.add_argument(
         "--both",
@@ -989,8 +1141,27 @@ def main() -> int:
         print(f"loaded from: {os.path.abspath(__file__)}")
         return 0
 
-    if not args.prefix:
-        print("Error: a target prefix is required (see --help)", file=sys.stderr)
+    # --suffix takes an optional value, so the three states have to be told
+    # apart before anything is validated or printed.
+    suffix_at_end = args.suffix == _SUFFIX_MEANS_END
+    suffix_pattern = args.suffix if args.suffix not in (None, _SUFFIX_MEANS_END) else None
+    use_suffix = suffix_at_end
+
+    # argparse leaves an omitted positional as None; the rest of main() (and
+    # generate_vanity_key) treat "no pattern" as an empty string, and the mode
+    # where that is legal is a suffix-only search. Normalise once, here.
+    args.prefix = args.prefix or ""
+
+    # A separate suffix pattern can stand on its own: `--suffix cd` asks for a
+    # key ending in cd, which is the same thing the browser allows with only
+    # its suffix box filled in. The bare `--suffix` still needs a positional
+    # pattern, because there it is a modifier and not the pattern itself.
+    if not args.prefix and suffix_pattern is None:
+        print(
+            "Error: a target pattern is required: pass it as the positional "
+            "argument, or use --suffix PATTERN to match only the end",
+            file=sys.stderr,
+        )
         return 2
 
     # Validate seed if provided (strict: exactly 64 hex chars, no whitespace).
@@ -1006,7 +1177,17 @@ def main() -> int:
     # Build descriptive search message based on mode
     if args.both:
         mode_desc = f"starting AND ending with '{args.prefix}'"
-    elif args.suffix:
+    elif suffix_pattern is not None:
+        # An empty prefix means "only constrain the end", which is what
+        # `--suffix cd` with no positional argument asks for.
+        if args.prefix:
+            mode_desc = (
+                f"starting with '{args.prefix}' AND ending with "
+                f"'{suffix_pattern}'"
+            )
+        else:
+            mode_desc = f"ending with '{suffix_pattern}'"
+    elif use_suffix:
         mode_desc = f"ending with '{args.prefix}'"
     else:
         mode_desc = f"starting with '{args.prefix}'"
@@ -1030,7 +1211,12 @@ def main() -> int:
     # Requires confirmation on interactive terminals unless --force.
     # All user-facing text goes to stderr: stdout carries only the key.
     try:
-        expected = _expected_attempts(args.encoding, len(args.prefix), args.both)
+        pat_lens = [len(args.prefix)]
+        if args.both:
+            pat_lens.append(len(args.prefix))
+        elif suffix_pattern is not None:
+            pat_lens.append(len(suffix_pattern))
+        expected = _expected_attempts(args.encoding, *pat_lens)
         measured = _benchmark_rate()
         # Spawning the pool costs a few tenths of a second. If the search is
         # expected to finish sooner than that, staying serial is dramatically
@@ -1075,10 +1261,20 @@ def main() -> int:
     except BrokenPipeError:
         return 1
 
+    # base64, base64url and base58 are case-SENSITIVE alphabets: a key that begins
+    # "AB" does not match a request for "ab", and for a vanity search the whole
+    # point is that the key literally matches the pattern asked for. Matching
+    # them case-insensitively silently returned keys with the wrong case - ask
+    # for `ab` and get `aB`. hex and bech32 are conventionally case-insensitive
+    # (and their output is lowercase anyway), so they keep the friendly default.
+    case_insensitive = _effective_case_insensitive(
+        args.encoding, not args.case_sensitive
+    )
+
     try:
         print(
             f"Searching for {args.encoding} public key {mode_desc} "
-            f"({'case-insensitive' if not args.case_sensitive else 'case-sensitive'})...",
+            f"({'case-insensitive' if case_insensitive else 'case-sensitive'})...",
             file=sys.stderr,
         )
     except BrokenPipeError:
@@ -1088,12 +1284,13 @@ def main() -> int:
         result = generate_vanity_key(
             prefix=args.prefix,
             encoding=args.encoding,
-            case_insensitive=not args.case_sensitive,
+            case_insensitive=case_insensitive,
             max_attempts=args.max_attempts,
             seed=seed_bytes,
             progress_interval=args.progress_interval,
             hrp=args.hrp,
-            suffix=args.suffix,
+            suffix=use_suffix,
+            suffix_pattern=suffix_pattern,
             both=args.both,
             workers=workers_n,
         )

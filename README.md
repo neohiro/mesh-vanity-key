@@ -111,7 +111,19 @@ one. Set `MESHCORE_VANITY_STRICT_RESERVED=1` to make the CLI reject them again.
 ### The live panel
 
 Six figures are shown while mining: attempts, rate, progress, workers actually
-running, cores, and ETA. A keys/s trace is drawn behind the ETA row.
+running beside the core count, and ETA. A keys/s trace is drawn behind the ETA row.
+
+**Workers and cores are shown as one `WORKERS | CORES` figure** (`8 | 8`), not as
+two separate rows. The point of showing cores at all is the comparison between
+them, and across two rows the reader has to join them mentally — which is exactly
+the comparison they exist to support. Workers is the count *actually* running, so
+a shortfall against the core count is visible rather than mysterious.
+
+**The ETA carries a real day figure** (`4d 19h 05m 30s`), not unbounded total
+hours. It previously rendered hours as a running total, so a five-day estimate read
+`116h 25m`, and the ` (~4.5 days)` hint beside it was withheld entirely past ~10
+days — so the longest searches, the ones where "how many days is this?" matters
+most, were the only ones with no day unit anywhere on screen.
 
 **The rate graph answers a different question from the rate figure.** The rate
 cell says how fast the search is *now*; the trace says whether that has been
@@ -182,12 +194,36 @@ keys/second **regardless of how fast the crypto was**:
 
 - **Yielding per batch.** Browsers clamp nested `setTimeout(0)` to ≥4 ms. Yielding
   after every batch of candidates therefore throttled each worker to ~4,000
-  candidates/s. The worker now yields on a 30 ms wall-clock budget instead.
+  candidates/s. The worker now yields on a wall-clock budget instead — 250 ms,
+  which is 4 times a second per worker rather than 33.
 - **Rebuilding hex strings per candidate.** Converting the candidate and public
   key to hex and running `startsWith`/`endsWith` costs more than the keygen. The
   walk state is now a 32-byte array incremented in place, and the pattern is
   pre-decoded to nibbles compared directly against the raw public-key bytes — no
   allocation and no string building in the hot loop.
+
+#### Main-thread overhead
+
+The workers and the UI share the same cores, so UI work is subtracted directly
+from mining throughput. Everything the main thread was doing per report has been
+cut, because at 500 ms per report and one report per worker it was paying a full
+layout plus a canvas repaint several times a second:
+
+| Was | Now | Why |
+|---|---|---|
+| Report every 500 ms per worker | every 3 s, plus one forced report at the start of each worker | 16 main-thread wake-ups a second at 8 workers, for figures that are an aggregate rate over seconds. The forced first report keeps the self-calibration converging in one interval rather than three. |
+| `canvas.clientWidth`/`clientHeight` read inside every draw | measured once, cached, refreshed by a `ResizeObserver` | Reading them forces a synchronous layout, so each report paid for a full reflow of the panel. |
+| Graph trace drawn from raw per-worker samples | exponential average (`α = 0.5`) in `pushRateGraphSample` | Consecutive samples come from different workers over different windows, so raw values differ by a lot and the line read as spikes rather than a trend. The headline rate figure is unchanged — this is display smoothing only. |
+| 48 calibration samples at load | 256, yielding every 32 rather than every 8 | 48 was short enough to be dominated by noise, and yielding every 8 spent most of the loop asleep on clamped timers. |
+
+A regression guard asserts the report interval and yield budget stay coarse, that
+`drawRateGraph` never re-measures the canvas, and that the ETA keeps a real day
+figure.
+
+The CLI benefits from the same lesson in the one place it applied: its progress
+`--progress-interval` counts *attempts* (100,000 by default, roughly a second at
+typical rates) rather than wall-clock, so a slow machine reports less often
+instead of more.
 
 Regression guards:
 
@@ -371,11 +407,36 @@ The service worker caches only same-origin files. The counter is never cached.
 
 ## Quick Start
 
-### One command
+### One command, straight from the browser
 
-Run this from the repository root. It creates a local `.venv` on first use,
-installs PyNaCl into it, and passes everything after the pattern straight to
-the CLI:
+Nothing to download, clone or install first. This fetches the tool, runs it, and
+throws the environment away afterwards:
+
+```bash
+uv run --from git+https://github.com/neohiro/meshcore-vanity-key \
+  meshcore-vanity abcd --encoding hex
+```
+
+`uv` is a single self-contained binary ([install](https://docs.astral.sh/uv/)).
+Substitute `pipx run --spec git+https://github.com/neohiro/meshcore-vanity-key
+meshcore-vanity` if you prefer pipx; the arguments after the entry point are
+identical.
+
+```bash
+# A different prefix AND a different suffix, in one search
+uv run --from git+https://github.com/neohiro/meshcore-vanity-key \
+  meshcore-vanity ab --suffix cd
+
+# A MeshCore bech32 address
+uv run --from git+https://github.com/neohiro/meshcore-vanity-key \
+  meshcore-vanity mc1q --encoding bech32
+```
+
+### Locally, from a clone
+
+If you have the repository, `./run.sh` creates a local `.venv` on first use,
+installs PyNaCl into it, and passes everything after the pattern straight
+through:
 
 ```bash
 ./run.sh abcd          # Linux / macOS
@@ -388,16 +449,6 @@ run.bat abcd           # Windows
 | Uninstall | `rm -rf .venv` |
 | Already have PyNaCl? | It is still used from the venv; set `MESH_VANITY_NO_VENV=1` to use the ambient interpreter instead. |
 | See every flag | `./run.sh abcd --help` |
-
-Examples:
-
-```bash
-./run.sh abcd                        # fastest: 4 hex chars, ~65k attempts
-./run.sh 7f --suffix                 # match the END of the key, not the start
-./run.sh abcd --both                 # match BOTH ends with the same pattern
-./run.sh mc1q --encoding bech32       # a MeshCore address
-./run.sh abcd --encoding base58 --workers 8
-```
 
 > If `run.sh` is not executable, call it through the interpreter:
 > `python3 run.py abcd`.
@@ -474,7 +525,16 @@ python meshcore_vanity.py mc1neoh --encoding bech32
 
 Finds a bech32-encoded key starting with `mc1neoh`.
 
-### Suffix matching
+### Separate prefix and suffix
+
+```bash
+python meshcore_vanity.py ab --suffix cd
+```
+
+Finds a key that starts with `ab` **and** ends with `cd`, checked in the same
+search — as the browser does with its two input boxes.
+
+### Suffix instead of prefix
 
 ```bash
 python meshcore_vanity.py abc --encoding hex --suffix
@@ -482,7 +542,7 @@ python meshcore_vanity.py abc --encoding hex --suffix
 
 Finds a key whose hex encoding ends with `abc`.
 
-### Both prefix and suffix
+### Both ends, one pattern
 
 ```bash
 python meshcore_vanity.py 0101 --encoding hex --both
@@ -539,31 +599,40 @@ you search in as one that now holds a private key.
 | `pattern` (positional) | — | The text to match. Matched against the **start** of the encoded key by default; `--suffix` and `--both` change where it is matched. |
 | `--encoding` | `base64` | Key encoding: `hex`, `base64`, `base64url`, `base58`, `bech32` |
 | `--hrp` | `mc` | Human-readable part for bech32 encoding |
-| `--case-sensitive` | off | Match the pattern case-sensitively |
-| `--suffix` | off | Switch: match the pattern against the **end** of the encoded key instead of the start. Takes no value of its own — the pattern still comes from the positional argument. |
-| `--both` | off | Switch: require the pattern at **both** the start **and** the end, using that **same** pattern for each end. Takes no value of its own. |
+| `--case-sensitive` | off | Force case-sensitive matching. Implied for `base64`/`base64url`/`base58`, whose alphabets are case-sensitive. |
+| `--suffix [PATTERN]` | off | **With no value:** match the positional pattern against the **end** of the key instead of the start. **With a value:** require that value at the end *in addition to* the positional prefix — two independent patterns in one search. |
+| `--both` | off | Require the positional pattern at **both** ends, using that same pattern for each. |
 | `--max-attempts` | unlimited | Stop after N attempts |
-| `--progress-interval` | 100000 | Progress report frequency |
+| `--progress-interval` | 100000 | Progress report frequency, in attempts |
 | `--no-output-private` | off | Suppress the private key, which is printed to stderr by default |
 | `--seed` | random | 64 hex chars (32 bytes) for deterministic search |
 | `--workers` | all CPU cores (max 256) | Number of parallel processes (forced to 1 for searches expected to finish in under a second) |
 | `-f`, `--force` | off | Skip the pre-search estimate confirmation |
 | `--version` | | Print version and the loaded file path, then exit |
 
-The pattern always comes from the positional argument. `--suffix` and `--both`
-are switches, not options that take a pattern — writing `--suffix 7f` is an
-error, because `7f` would be a second pattern and the tool does not accept two:
+### Matching one end, or both
+
+The pattern always comes from the positional argument. To constrain **both** ends
+with *different* text, give the suffix to `--suffix`:
 
 | Goal | Command | Matches |
 |---|---|---|
 | Start only (default) | `run.sh abcd` | keys **starting with** `abcd` |
 | End only | `run.sh 7f --suffix` | keys **ending with** `7f` |
-| Both ends, one pattern | `run.sh abcd --both` | keys **starting and ending with** `abcd` |
+| Both ends, different text | `run.sh ab --suffix cd` | keys **starting with** `ab` **and ending with** `cd` |
+| Both ends, same text | `run.sh abcd --both` | keys **starting and ending with** `abcd` |
+| End only, no prefix | `run.sh --suffix cd` | keys **ending with** `cd` |
 
-`--both` uses the same pattern at both ends, so it cannot ask for a prefix and
-a *different* suffix. Each end carries its own search cost, which multiplies —
-`--both abcd` is roughly 65k² attempts, so use it only with short patterns.
-`--both` together with `--suffix` is rejected, since they contradict.
+This mirrors the browser, which has always taken an independent prefix and
+suffix box and checked both in the same pass.
+
+Each constrained end multiplies the search space rather than adding to it, so
+`--both abcd` (and `--suffix`-with-`ab`) costs roughly 65k² attempts. Keep the
+patterns short unless you have hours. `--both` cannot be combined with a separate
+suffix pattern or with a bare `--suffix`, since they contradict each other.
+
+If the two patterns are long enough to overlap in the key, the search can never
+succeed, so it is rejected up front rather than left spinning.
 
 ## Supported Encodings
 
@@ -591,7 +660,32 @@ With `--workers N`, the tool spawns N processes, each searching a disjoint subse
 
 ### Reserved Prefixes
 
-Hex prefixes `00` and `ff` are reserved for MeshCore framework devices and are rejected by default.
+Hex prefixes `00` and `ff` are reserved for MeshCore framework devices. They are
+**mined with a warning, not rejected** — the browser and the CLI behave the same
+way, because some people deliberately want one:
+
+```
+UserWarning: prefix '00' starts with a prefix reserved for MeshCore framework
+devices (00 and FF are not available for consumer nodes). It will still be
+mined, but the key may not work with standard MeshCore clients.
+```
+
+Set `MESHCORE_VANITY_STRICT_RESERVED=1` to turn the warning back into a hard
+rejection if you would rather fail than hand someone a key their client refuses.
+
+### Case sensitivity
+
+`hex` and `bech32` are matched case-insensitively. `base64`, `base64url` and
+`base58` are **case-sensitive alphabets and are always matched exactly** — a key
+beginning `AB` is a different key from one beginning `ab`, and returning the
+wrong case would mean the tool hands you a key that does not match the pattern
+you asked for.
+
+### Suffixes and base64 padding
+
+A 32-byte key is 44 base64 characters, the last of which is the `=` pad. Suffix
+matching compares against the end of the **key data**, not the padding, so
+`--suffix 7f` matches keys whose last two *data* characters are `7f`.
 
 ## Limitations
 

@@ -343,7 +343,7 @@ armTrackingTimeouts();
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, resetForm, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_POINTS, WORKER_SCALE_MAX, recordLiveRate, resetLiveRates, liveAggregateKeysPerSecond, liveRateIsComplete, LIVE_RATE_MIN_SAMPLES, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, resetForm, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_POINTS, WORKER_SCALE_MAX, recordLiveRate, resetLiveRates, liveAggregateKeysPerSecond, liveRateIsComplete, LIVE_RATE_MIN_SAMPLES, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, decimateSamples, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -1262,14 +1262,15 @@ check('live ETA: slots reserve their width so the digits cannot shift', () => {
     ok(/\.eta-fields\s*\{[^}]*font-variant-numeric:\s*tabular-nums/.test(html),
         'the ETA must use tabular figures, or digit widths still vary');
 
-    // Hours get the wide reserved slot; minutes and seconds exactly two.
-    ok(/\.eta-num\s*\{[^}]*min-width:\s*2\d\s*ch/.test(html),
-        'hours must reserve 20+ digits for multi-week runs');
-    // Narrow screens cannot afford 20ch without overflowing, but must stay
-    // fixed-width there too -- proportional space would reintroduce reflow.
+    // Hours are the hours WITHIN the day (0-23) because the days slot now carries
+    // the magnitude, so two digits is the widest case for hours as well as for
+    // minutes and seconds.
+    ok(/\.eta-num\s*\{[^}]*min-width:\s*2ch/.test(html),
+        'hours must reserve two digits now that days carry the magnitude');
+    // Narrow screens still need a fixed hour slot, just no smaller than that.
     const narrow = html.slice(html.indexOf('@media (max-width: 420px)'));
     ok(/@media \(max-width: 420px\)[\s\S]*?\.eta-num\s*\{[^}]*min-width:\s*\d+\s*ch/.test(narrow),
-        'narrow screens must keep a fixed hour slot, just a smaller one');
+        'narrow screens must keep a fixed hour slot');
     ok(/\.eta-num-2\s*\{[^}]*min-width:\s*2ch/.test(html),
         'minutes and seconds must reserve exactly two digits');
 
@@ -1289,12 +1290,24 @@ check('etaParts: splits a duration into padded display fields', () => {
     eq(api.etaParts(0).minutes, 0);
     eq(api.etaParts(0).seconds, 0);
 
-    // 116h 27m 22s -- the multi-week case this layout exists for.
+    // 116h 27m 22s -- the multi-week case this layout exists for. It must read as
+    // "4d 20h", not "116h": days carry the magnitude so the figure is legible
+    // at a glance, and the hours slot can then be two digits wide.
     let p = api.etaParts(116 * 3600 + 27 * 60 + 22);
-    eq(p.hours, 116);
+    eq(p.days, 4);
+    eq(p.hours, 20);
     eq(p.minutes, 27);
     eq(p.seconds, 22);
     ok(/\(~5 days\)/.test(p.dayHint), 'the day estimate is still attached');
+
+    // The day figure must never be withheld, which is what it previously was:
+    // formatDayHint() returns nothing past ~10 days, so the longest searches
+    // were the only ones with no day unit anywhere.
+    eq(api.etaParts(40 * 86400).days, 40, '40 days must still report 40');
+    eq(api.etaParts(400 * 86400).days, 400, '400 days must still report 400');
+    eq(api.etaParts(86400).days, 1, 'exactly one day');
+    eq(api.etaParts(86400).hours, 0, 'exactly one day has zero hours');
+    eq(api.etaParts(2 * 86400 + 3600).hours, 1, 'hours roll into the day');
 
     // Single digits must be padded, or "05m" is one glyph narrower than "15m".
     eq(api.pad2(0), '00');
@@ -1315,11 +1328,21 @@ check('etaParts: splits a duration into padded display fields', () => {
 
 check('renderEta: writes padded digits into the slots', () => {
     api.renderEta(116 * 3600 + 7 * 60 + 5);
-    eq(api.getLiveEtaText('live-eta-h'), '116');
+    eq(api.getLiveEtaText('live-eta-days'), '4d', 'days carry the magnitude');
+    eq(api.getLiveEtaText('live-eta-h'), '20');
     eq(api.getLiveEtaText('live-eta-m'), '07', 'minutes padded to two');
     eq(api.getLiveEtaText('live-eta-s'), '05', 'seconds padded to two');
 
+    // Under a day there is no day figure, and the slot must be blank rather
+    // than showing a stale "4d" from the previous longer ETA.
+    api.renderEta(65);
+    eq(api.getLiveEtaText('live-eta-days'), '');
+    eq(api.getLiveEtaText('live-eta-h'), '0');
+    eq(api.getLiveEtaText('live-eta-m'), '01');
+    eq(api.getLiveEtaText('live-eta-s'), '05');
+
     // A message state blanks the slots but must not leave stale digits behind.
+    api.renderEta(116 * 3600);
     api.setEtaMessage('sampling...');
     eq(api.getLiveEtaText('live-eta-days'), 'sampling...');
     eq(api.getLiveEtaText('live-eta-h'), '');
@@ -1328,6 +1351,7 @@ check('renderEta: writes padded digits into the slots', () => {
 
     // ...and switching back to a real duration must restore them.
     api.renderEta(65);
+    eq(api.getLiveEtaText('live-eta-days'), '');
     eq(api.getLiveEtaText('live-eta-h'), '0');
     eq(api.getLiveEtaText('live-eta-m'), '01');
     eq(api.getLiveEtaText('live-eta-s'), '05');
@@ -2212,12 +2236,61 @@ check('rate graph: samples accumulate and stay bounded', () => {
 
     // Halving on overflow must keep the newest value: the dot marking "now"
     // has to be the reading that was just pushed, not a stale neighbour.
+    // Samples are smoothed on the way in, so with this repeating 7-value
+    // pattern the trace converges to the pattern's mean and the newest sample
+    // must be one of the pattern's values, not a blend of unrelated ones.
     const state = api.rateGraphState();
-    eq(state[state.length - 1].v, 200 + ((cap * 4 - 1) % 7),
-        'the newest sample is the one just pushed');
+    const vs = state.map((s) => s.v);
+    const newestV = vs[vs.length - 1];
+    // Samples are smoothed on the way in, so the tail converges towards the
+    // mean of the repeating 7-value pattern rather than equalling any one of
+    // them. What matters is that the newest sample is still a real reading from
+    // that pattern - not a blend of discarded history.
+    ok(newestV >= 200 && newestV <= 206,
+        `the newest sample must be a reading from the pattern, got ${newestV}`);
 
     api.resetRateGraph();
     eq(api.rateGraphState().length, 0, 'a new search clears the trace');
+});
+
+check('rate graph: the trace is smoothed so per-worker jitter is not drawn raw', () => {
+    // Each sample is one worker's rate since it last reported, so consecutive
+    // samples legitimately disagree. Drawn raw the line was unreadable spikes.
+    api.resetRateGraph();
+    const t0 = Date.now();
+    const realNow = Date.now;
+    try {
+        let clock = 0;
+        Date.now = () => t0 + clock * 1000;
+        // Alternate hard between two very different rates.
+        for (let i = 0; i < 10; i++) {
+            api.pushRateGraphSample(i % 2 === 0 ? 1000 : 4000);
+            clock++;
+        }
+        const vs = api.rateGraphState().map((s) => s.v);
+        // The first sample is taken as-is so the trace starts at the true rate.
+        eq(vs[0], 1000, 'the first sample is the true rate, not an ease-up');
+        // Every later sample must be strictly inside the range of its
+        // neighbours: smoothing means no sample equals either extreme input.
+        ok(vs[1] > 1000 && vs[1] < 4000,
+            `a smoothed sample must lie between its neighbours, got ${vs[1]}`);
+        const swings = vs.slice(1).map((v, i) => Math.abs(v - vs[i]));
+        ok(Math.max(...swings) < 3000,
+            `smoothing must damp the 3000/s alternation, largest step ${Math.max(...swings)}`);
+        // ...but it must still react: a sustained new rate must be reached quickly,
+        // not approached asymptotically from far away.
+        api.resetRateGraph();
+        for (let i = 0; i < 10; i++) {
+            api.pushRateGraphSample(4000);
+            clock++;
+        }
+        const sustained = api.rateGraphState().map((s) => s.v);
+        ok(sustained[9] > 3900,
+            `a sustained rate must be reached within a few samples, got ${sustained[9]}`);
+    } finally {
+        Date.now = realNow;
+        api.resetRateGraph();
+    }
 });
 
 check('rate graph: the window is a fixed span of time, not the whole run', () => {
@@ -2287,8 +2360,11 @@ check('rate graph: decimation keeps the newer of each pair, and terminates', () 
             ok(st.length >= 1, `n=${n}: the buffer must not be emptied`);
             ok(st.length <= cap, `n=${n}: must stay within the cap (${st.length} > ${cap})`);
             // The newest reading must always survive, since the dot marking
-            // "now" is drawn from it.
-            eq(st[st.length - 1].v, 1000 + n - 1,
+            // "now" is drawn from it. Samples are smoothed on the way in, so
+            // identity is checked as "still the largest of a rising ramp"
+            // rather than as equality with the raw reading.
+            const vs = st.map((s) => s.v);
+            eq(st[st.length - 1].v, Math.max(...vs),
                 `n=${n}: the newest sample must survive decimation`);
             // Timestamps must stay strictly increasing: no reordering, and no
             // duplicated point from the re-append.
@@ -2304,37 +2380,37 @@ check('rate graph: decimation keeps the newer of each pair, and terminates', () 
     }
 
     // The specific defect: halving (0,1),(2,3),... and keeping the older of
-    // each pair instead of the newer. This is only observable on data where
-    // the choice matters: on a uniform ramp both choices give a stride of 2,
-    // so an arithmetic series cannot tell them apart. Here every sample is
-    // either a low or a high value, and the survivors must be the HIGH one of
-    // each pair, because those are the readings closer to the real rate at the
-    // moment they were kept.
+    // each pair instead of the newer. Tested against decimateSamples() directly
+    // rather than through pushRateGraphSample(): samples are smoothed on the
+    // way in, so an alternating input becomes a converging average and index
+    // parity - the only thing that distinguishes the two choices - disappears.
     const CAP = api.RATE_GRAPH_POINTS;
-    api.resetRateGraph();
-    let c = 0;
-    Date.now = () => t0 + c * 1000;
-    try {
-        for (let i = 0; i < CAP; i++) {
-            // Strictly increasing within a pair, and the second of each pair is
-            // always the larger value, so index parity is observable.
-            api.pushRateGraphSample(i % 2 === 0 ? 1000 : 2000);
-            c++;
+    const pairs = [];
+    for (let i = 0; i < CAP; i++) pairs.push({ t: i, v: i % 2 === 0 ? 1000 : 2000 });
+    pairs.push({ t: CAP, v: 1000 });   // overflows by one, forcing one halving
+    const st = api.decimateSamples(pairs, CAP);
+    eq(st[st.length - 1].v, 1000, 'the newest sample survives the halving');
+    const body = st.slice(0, -1);
+    ok(body.length > 0, 'expected retained samples to inspect');
+    // Every survivor from a (low, high) pair must be the high one.
+    const wrong = body.filter((s) => s.v !== 2000);
+    ok(wrong.length === 0,
+        `decimation must keep the newer (higher) of each pair, but retained `
+        + `${wrong.length} stale reading(s) of 1000 in ${JSON.stringify(body.map((s) => s.v))}`);
+
+    // Odd lengths at every size: halving can skip the final element, and the
+    // re-append is what stops the newest sample being dropped.
+    for (let n = 1; n <= 400; n++) {
+        const list = [];
+        for (let i = 0; i < n; i++) list.push({ t: i, v: i });
+        const out = api.decimateSamples(list, 8);
+        ok(out.length >= 1 && out.length <= 8,
+            `n=${n}: decimation must settle at or below the cap, got ${out.length}`);
+        eq(out[out.length - 1].v, n - 1, `n=${n}: the newest sample must survive`);
+        // Timestamps strictly increasing, never duplicated.
+        for (let i = 1; i < out.length; i++) {
+            ok(out[i].t > out[i - 1].t, `n=${n}: timestamps must stay ordered`);
         }
-        api.pushRateGraphSample(1000);   // overflows by one, forcing one halving
-        c++;
-        const st = api.rateGraphState();
-        eq(st[st.length - 1].v, 1000, 'the newest sample survives the halving');
-        const body = st.slice(0, -1);
-        ok(body.length > 0, 'expected retained samples to inspect');
-        // Every survivor from a (low, high) pair must be the high one.
-        const wrong = body.filter((s) => s.v !== 2000);
-        ok(wrong.length === 0,
-            `decimation must keep the newer (higher) of each pair, but retained `
-            + `${wrong.length} stale reading(s) of 1000 in ${JSON.stringify(body.map((s) => s.v))}`);
-    } finally {
-        Date.now = realNow;
-        api.resetRateGraph();
     }
 });
 check('the estimate line cannot widen a narrow screen', () => {
@@ -2474,25 +2550,69 @@ check('resetLiveLogs clears every cell for a new search', () => {
 eq(api.getLiveEtaText('live-eta-h'), '0', 'eta hours reset');
 eq(api.getLiveEtaText('live-eta-m'), '00', 'eta minutes reset');
 eq(api.getLiveEtaText('live-eta-s'), '00', 'eta seconds reset');
-    eq(getElementById('live-workers').textContent, '0', 'workers reset');
-    eq(getElementById('live-cores').textContent, '-', 'cores reset');
+    eq(getElementById('live-workers').textContent, '0 | -', 'workers | cores reset');
+});
+
+check('mining overhead is bounded: report cadence, worker yield, no per-draw reflow', () => {
+    // process.argv[3] is the extracted worker script. Read it here rather than
+    // via `workerJsPath`, which is only bound near the end of this file and
+    // would be a temporal-dead-zone reference at this point.
+    const workerSrc = fs.readFileSync(process.argv[3], 'utf8');
+    // `source` is the extracted main-thread script, already read at startup.
+    const mainSrc = source;
+
+    // Each progress report costs a main-thread message, a forced layout and a
+    // canvas repaint, on the same thread the mining workers compete with for
+    // CPU. At 500ms that was 2 messages per worker per second.
+    const reportMs = Number(/const REPORT_EVERY_MS\s*=\s*(\d+)/.exec(workerSrc)?.[1]);
+    ok(Number.isFinite(reportMs), 'REPORT_EVERY_MS must be a literal number');
+    ok(reportMs >= 2000,
+        `reports must not be sub-second: ${reportMs}ms would put main-thread ` +
+        'work back on the critical path');
+
+    // The first report is forced so the self-calibration converges in one
+    // interval rather than two; without it, a 3s cadence would leave the
+    // modelled (and optimistic) estimate on screen for ~9s.
+    ok(/firstReportSent/.test(workerSrc),
+        'the worker must force its first report for fast self-calibration');
+
+    // The yield parks the worker thread on a clamped timer. Yielding every 30ms
+    // was ~33 times a second per worker - time not spent mining.
+    const yieldMs = Number(/const YIELD_EVERY_MS\s*=\s*(\d+)/.exec(workerSrc)?.[1]);
+    ok(Number.isFinite(yieldMs), 'YIELD_EVERY_MS must be a literal number');
+    ok(yieldMs >= 200, `the worker must not park on a timer more than 5x a second, got ${yieldMs}ms`);
+
+    // clientWidth/clientHeight force a synchronous layout. Reading them inside
+    // the per-report draw path means one forced reflow per report.
+    const drawBody = /function drawRateGraph\(\)\s*\{[\s\S]*?\n        \}/.exec(mainSrc)?.[0] || '';
+    ok(drawBody.length > 0, 'drawRateGraph must be findable');
+    ok(!/clientWidth|clientHeight/.test(drawBody),
+        'drawRateGraph must not re-measure the canvas (forced layout per frame)');
+    ok(/rateGraphBox/.test(drawBody),
+        'drawRateGraph must use the cached box instead');
+
+    // The ETA must keep a real day figure rather than only total hours.
+    ok(/days:\s*Math\.floor\(total \/ 86400\)/.test(mainSrc),
+        'etaParts must expose a day count');
 });
 
 check('live logs report the workers actually running', () => {
     // The pre-flight estimate is a per-worker extrapolation; showing the real
-    // running count and the core count is what makes a shortfall visible
-    // instead of mysterious.
+    // running count beside the core count is what makes a shortfall visible
+    // instead of mysterious. They are shown together as "N | M" so the
+    // comparison does not need to be made across two rows.
     api.resetLiveLogs(8, 8);
-    eq(getElementById('live-workers').textContent, '8', 'planned workers shown');
-    eq(getElementById('live-cores').textContent, '8', 'cores shown');
+    eq(getElementById('live-workers').textContent, '8 | 8', 'workers | cores shown');
 
     const html = fs.readFileSync(pageHtmlPath, 'utf8');
     ok(html.includes('id="live-workers"'), 'workers cell present');
-    ok(html.includes('id="live-cores"'), 'cores cell present');
+    ok(/Workers \| Cores/.test(html), 'the label must read "Workers | Cores"');
+    ok(!/>\s*Workers\s*<\/span>\s*<span class="live-k">Cores/.test(html),
+        'workers and cores must not be two separate labelled rows again');
 
     api.reportActualWorkers(3);
-    eq(getElementById('live-workers').textContent, '3',
-        'actual running count must replace the plan');
+    eq(getElementById('live-workers').textContent, '3 | 8',
+        'actual running count must replace the plan, beside the core count');
     api.resetLiveLogs();
 });
 

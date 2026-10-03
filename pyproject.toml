@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meshcore-vanity-key"
+# Kept in step with __version__ in meshcore_vanity.py, which is what --version
+# reports. tools/test_page_js.mjs and test_meshcore_vanity.py assert the two
+# agree, so a release cannot bump one and forget the other.
+version = "1.1.0"
+description = "Generate MeshCore vanity Ed25519 keys with a chosen prefix, suffix, or both"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+# Runtime only. PyNaCl is the sole dependency; the test tooling (pytest, ruff,
+# Pillow) stays in requirements.txt and is not pulled in by an install.
+dependencies = ["PyNaCl>=1.5.0"]
+
+[project.scripts]
+# The console entry point. This is what makes a single online command work:
+# `uv run --from git+https://github.com/neohiro/meshcore-vanity-key
+#   meshcore-vanity ab --encoding hex`
+# installs and runs the tool without the user cloning or downloading anything.
+meshcore-vanity = "meshcore_vanity:main"
+
+[project.urls]
+Homepage = "https://neohiro.github.io/meshcore-vanity-key/"
+Source = "https://github.com/neohiro/meshcore-vanity-key"
+
+[tool.setuptools]
+# A single top-level module rather than a package, so the file keeps working
+# when run directly (`python meshcore_vanity.py`), which is still the documented
+# local path and what the test suite imports.
+py-modules = ["meshcore_vanity"]
