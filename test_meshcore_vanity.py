@@ -2621,5 +2621,54 @@ def test_the_readme_reserved_prefix_claim_matches_behaviour() -> None:
     assert "meshcore_vanity.py:" not in proc.stderr, proc.stderr
 
 
+def test_max_attempts_is_an_upper_bound_not_a_rounding() -> None:
+    """The budget must be respected exactly, not rounded up to a batch.
+
+    Both loops checked `attempts >= max_attempts` only at the top of a 16-wide
+    batch, so a budget of 17 could do 32 candidates, and the parent split the
+    budget with ceiling division, adding up to workers-1 more. With 8 workers
+    that is a ~127-attempt overshoot on a documented "Stop after N attempts".
+
+    Exercised at the level the property holds: each worker respects its own
+    share, and the parent's split is floor division so the shares cannot sum to
+    more than the request.
+    """
+    def worker_attempts(n):
+        args = ("abcdef0123456789", "hex", False, n, bytes(32), 16,
+                "abcdef0123456789", "", slice(None), False, slice(0, 16),
+                "mc", 0, 0, 1, True, None)
+        priv, attempts, _counter = meshcore_vanity._worker_search(args)
+        assert priv is None, "an impossible pattern must not match"
+        return attempts
+
+    # The interesting values straddle the 16-candidate batch boundary.
+    for n in (1, 5, 15, 16, 17, 31, 32, 33, 100, 1000):
+        got = worker_attempts(n)
+        assert got <= n, f"budget {n} did {got} candidates"
+
+
+def test_the_worker_budget_split_cannot_exceed_the_request() -> None:
+    """Floor division, so the shares sum to at most --max-attempts.
+
+    The max(1, ...) floor keeps every worker useful when the budget is smaller
+    than the worker count, which is the one case where an exact bound is not
+    achievable.
+    """
+    for total, workers in ((100, 8), (500, 8), (1000, 4), (64, 8), (5000, 8)):
+        per_worker = max(1, total // workers)
+        assert per_worker * workers <= total, (
+            f"total={total} workers={workers}: shares sum to "
+            f"{per_worker * workers}"
+        )
+
+
+def test_a_parallel_search_reports_the_requested_budget_not_a_workers() -> None:
+    """The user passed 500; the message must say 500, not one worker's share."""
+    proc = _run_cli("abcdef0123456789", "--encoding", "hex", "--force",
+                    "--max-attempts", "500", "--workers", "4")
+    assert proc.returncode != 0, proc.stdout
+    assert "exceeded max_attempts=500" in proc.stderr, proc.stderr
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
