@@ -1434,7 +1434,6 @@ function detectOptimalWorkers() {
                         // work it used to.
                         const REPORT_EVERY_MS = 3000;
                         let lastProgressReport = 0;
-                        let firstReportSent = false;
 
                         function reportProgress(force) {
                             const now = Date.now();
@@ -1539,25 +1538,21 @@ function detectOptimalWorkers() {
                             return out;
                         };
 
-                        // Yield on a wall-clock budget rather than every batch.
+                        // How often the worker hands control back to its event loop.
+                        //
                         // A bare setTimeout(0) is clamped to >=4ms once timers
                         // nest, so yielding per batch capped throughput at a few
-                        // thousand keys/s. 30ms keeps Stop/UI responsive while
-                        // letting each worker run thousands of candidates per
-                        // scheduler hand-off.
-                        // How often the worker hands control back to its event loop so a queued
-                        // 'stop' message can be delivered.
+                        // thousand keys/s. The yield is an await on a timer, which
+                        // parks the worker thread until it fires - at the old 30ms
+                        // budget that was ~33 times a second per worker, ~260
+                        // times a second across 8, spending real mining time
+                        // asleep on the timer queue.
                         //
-                        // This yield is an await on a timer, which parks the
-                        // worker thread until the timer fires; browsers clamp
-                        // nested timeouts to >=4ms. At the old 30ms it fired ~33
-                        // times a second per worker - 260 times a second across
-                        // 8 workers - spending a meaningful share of the mining
-                        // time asleep on the timer queue rather than hashing.
-                        // 250ms is 4 times a second, which is still far faster
-                        // than a person can press Stop, and the stop path does
-                        // not depend on this being tight (terminateAllWorkers
-                        // tears the workers down outright).
+                        // 250ms is 4 times a second, still far faster than a
+                        // person can press Stop. Nothing depends on it being
+                        // tight: the stop path tears the workers down outright
+                        // with terminateAllWorkers() rather than asking them to
+                        // stop.
                         const YIELD_EVERY_MS = 250;
                         let lastYield = Date.now();
 
@@ -1591,18 +1586,13 @@ function detectOptimalWorkers() {
                                 incrementSeed();
                             }
                             reportProgress(false);
-                            // The FIRST report is forced. Reports are then 3s
-                            // apart, which is right for a steady rate figure but
-                            // would delay the self-calibration by two intervals
-                            // (~6s) - long enough that the user stares at the
-                            // modelled estimate, which is the figure that was
-                            // wildly optimistic. One early sample from each
-                            // worker lets the panel switch to measured data
-                            // within a single interval.
-                            if (!firstReportSent) {
-                                firstReportSent = true;
-                                reportProgress(true);
-                            }
+                            // No forced "first report" here: the throttle compares
+                            // against lastProgressReport, which starts at 0, so
+                            // the first call already reports immediately. An
+                            // explicit extra call therefore posted the same first
+                            // batch twice - a wasted message plus a forced layout
+                            // and canvas repaint, in the loop whose whole purpose
+                            // was to reduce that work.
                             const nowMs = Date.now();
                             if (nowMs - lastYield >= YIELD_EVERY_MS) {
                                 lastYield = nowMs;

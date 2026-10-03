@@ -2570,11 +2570,17 @@ check('mining overhead is bounded: report cadence, worker yield, no per-draw ref
         `reports must not be sub-second: ${reportMs}ms would put main-thread ` +
         'work back on the critical path');
 
-    // The first report is forced so the self-calibration converges in one
-    // interval rather than two; without it, a 3s cadence would leave the
-    // modelled (and optimistic) estimate on screen for ~9s.
-    ok(/firstReportSent/.test(workerSrc),
-        'the worker must force its first report for fast self-calibration');
+    // The first report must not be suppressed: the throttle compares against
+    // lastProgressReport, which starts at 0, so `now - last` is enormous and the
+    // first call always reports. That is what keeps the self-calibration
+    // converging in one interval; a forced extra call on top would post the
+    // same batch twice. The behavioural guard is the worker first-batch test.
+    ok(/let lastProgressReport = 0;/.test(workerSrc),
+        'lastProgressReport must start at 0 so the first report is not throttled');
+    ok(!/reportProgress\(true\)/.test(workerSrc),
+        'the loop must not force a second report for the same batch');
+    ok(!/firstReportSent/.test(workerSrc),
+        'the redundant firstReportSent flag must not come back');
 
     // The yield parks the worker thread on a clamped timer. Yielding every 30ms
     // was ~33 times a second per worker - time not spent mining.
@@ -3118,7 +3124,7 @@ check('awaitSodium: rejects with a helpful message when libsodium is missing', a
 // function". libsodium.js is an Emscripten build whose crypto namespace only
 // exists after `libsodium.ready` resolves; the worker must gate all work on it.
 
-async function runWorker(workerJsPath, { resolveReadyImmediately = true } = {}) {
+async function runWorker(workerJsPath, { resolveReadyImmediately = true, keygen = null, now = null } = {}) {
     const raw = fs.readFileSync(workerJsPath, 'utf8');
     // Resolve the `${new URL(...)}` template interpolation done by the page.
     const src = raw.replace(
@@ -3156,27 +3162,36 @@ async function runWorker(workerJsPath, { resolveReadyImmediately = true } = {}) 
                 ready: resolveReadyImmediately ? Promise.resolve() : readyPromise,
             };
             g.sodium = {};
+            // Default stub: the public key always starts with "abcd", so any
+            // prefix test that wants more than one batch must pass `keygen`.
+            const defaultKeygen = () => {
+                const pk = new Uint8Array(32);
+                pk[0] = 0xab; pk[1] = 0xcd;
+                return { publicKey: pk, privateKey: new Uint8Array(64), keyType: 'ed25519' };
+            };
+            const make = keygen || defaultKeygen;
             if (resolveReadyImmediately) {
-                g.sodium.crypto_sign_seed_keypair = () => {
-                    const pk = new Uint8Array(32);
-                    pk[0] = 0xab; pk[1] = 0xcd;
-                    return { publicKey: pk, privateKey: new Uint8Array(64), keyType: 'ed25519' };
-                };
+                g.sodium.crypto_sign_seed_keypair = make;
             } else {
                 // Deferred: crypto API absent until ready resolves, exactly
                 // like the real Emscripten build.
                 g.libsodium.ready.then(() => {
-                    g.sodium.crypto_sign_seed_keypair = () => {
-                        const pk = new Uint8Array(32);
-                        pk[0] = 0xab; pk[1] = 0xcd;
-                        return { publicKey: pk, privateKey: new Uint8Array(64), keyType: 'ed25519' };
-                    };
+                    g.sodium.crypto_sign_seed_keypair = make;
                 });
             }
         },
     };
     workerGlobal.self = workerGlobal;
     workerGlobal.globalThis = workerGlobal;
+    // The worker's report throttle and yield budget are both driven by
+    // Date.now(), so a test that needs a specific number of reports has to
+    // control the clock rather than sleep and hope. Subclassing Date keeps
+    // `new Date()` working while making now() the injected one.
+    if (now) {
+        workerGlobal.Date = class extends Date {
+            static now() { return now(); }
+        };
+    }
 
     vm.createContext(workerGlobal);
     vm.runInContext(src, workerGlobal, { filename: 'worker.js' });
@@ -3188,6 +3203,65 @@ async function runWorker(workerJsPath, { resolveReadyImmediately = true } = {}) 
 
 const workerJsPath = process.argv[3];
 if (workerJsPath) {
+    // 0. Progress reporting must not repeat a batch.
+    //
+    // The throttle compares against lastProgressReport, which starts at 0, so
+    // the very first report is never suppressed - a forced "first report" on top
+    // of it therefore posts the same batch twice. That is wasted main-thread work
+    // (a message, a forced layout and a canvas repaint) in a loop whose whole
+    // point was to reduce exactly that. Counted rather than eyeballed.
+    await (async () => {
+        try {
+            // A keygen that matches only after MATCH_AFTER candidates, so the
+            // worker runs several full batches before finishing. It must
+            // terminate: the harness has no Worker.terminate(), so a keygen that
+            // never matches leaves the mining loop spinning and node never exits.
+            const MATCH_AFTER = 1024;
+            // Fake clock advanced from inside the keygen: 256 candidates is one
+            // batch and one second, and reports are throttled at
+            // REPORT_EVERY_MS, so this produces exactly one report per batch,
+            // deterministically and without sleeping.
+            let clock = 1000000;
+            let n = 0;
+            const keygen = () => {
+                const pk = new Uint8Array(32);
+                const hit = n >= MATCH_AFTER;
+                pk[0] = hit ? 0xab : 0x00;
+                pk[1] = hit ? 0xcd : 0x00;
+                n++;
+                if (n % 256 === 0) clock += 1000;
+                return { publicKey: pk, privateKey: new Uint8Array(64), keyType: 'ed25519' };
+            };
+            const { workerGlobal, posted } = await runWorker(workerJsPath, { keygen, now: () => clock });
+            workerGlobal.onmessage({
+                data: { prefix: 'ab', suffix: '', matchPrefix: true, matchSuffix: false },
+            });
+            for (let i = 0; i < 40 && !posted.some((m) => m.type === 'found'); i++) {
+                await new Promise((r) => setTimeout(r, 0));
+            }
+            ok(posted.some((m) => m.type === 'found'),
+                `the worker never finished, so the test would hang: ${posted.length} messages`);
+            const progress = posted.filter((m) => m.type === 'progress');
+            ok(progress.length >= 2,
+                `expected the throttle to admit a second report, got ${progress.length}: `
+                + JSON.stringify(progress.map((m) => m.attempts)));
+            // The first report must not be throttled away: lastProgressReport
+            // starts at 0, so the first call always reports.
+            ok(progress[0].attempts <= 256,
+                `the first report must cover the first batch, got ${progress[0].attempts}`);
+            // The duplicate's signature is two reports describing the SAME work.
+            // Later reports are legitimate, so the check is strict monotonicity
+            // rather than a fixed count.
+            for (let i = 1; i < progress.length; i++) {
+                ok(progress[i].attempts > progress[i - 1].attempts,
+                    `report ${i} must describe strictly more work than report ${i - 1}: `
+                    + JSON.stringify(progress.map((m) => m.attempts)));
+            }
+            passed++;
+        } catch (e) {
+            failures.push(`worker first-batch reporting: ${e.message}`);
+        }
+    })();
     // 1. Happy path: libsodium ready by the time work arrives.
     await (async () => {
         try {

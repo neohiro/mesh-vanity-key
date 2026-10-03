@@ -376,22 +376,55 @@ def _bech32_encode(hrp: str, data: bytes, hrp_expanded: list[int] | None = None)
     return hrp + "1" + "".join(BECH32_CHARSET[v] for v in five_bit + checksum)
 
 
-def _expected_attempts(encoding: Encoding, *pattern_lengths: int) -> int:
-    """Brute-force search space size for the stderr progress line.
+def _alphabet_size(encoding: Encoding, at_key_end: bool = False) -> int:
+    """Symbols available at one position of the encoded key.
 
-    Takes the length of every independently-constrained end of the key, so a
-    prefix and a separate suffix cost what they actually cost: constraining both
-    ends multiplies the search space, it does not add to it.
+    ``at_key_end`` marks the position of the key's LAST data character, which in
+    base64 is not a full 6-bit character: the 32-byte key leaves 4 significant
+    bits there, so only 16 of the 64 symbols can occur. That is the same fact
+    _validate_base64_suffix_reachable() refuses impossible patterns with, kept in
+    one place so the estimate and the validation cannot disagree.
     """
     if encoding == "hex":
-        alphabet_size = 16
-    elif encoding in ("base64", "base64url"):
-        alphabet_size = 64
-    elif encoding == "base58":
-        alphabet_size = 58
-    else:
-        alphabet_size = 32
-    return alphabet_size ** sum(pattern_lengths)
+        return 16
+    if encoding in ("base64", "base64url"):
+        return 16 if at_key_end else 64
+    if encoding == "base58":
+        return 58
+    return 32
+
+
+def _estimate_search_space(
+    encoding: Encoding, prefix_len: int, suffix_len: int | None
+) -> int:
+    """Brute-force search space size for the stderr progress line.
+
+    ``suffix_len`` is None when only the start of the key is constrained.
+    Otherwise it is the length of the pattern applied at the END of the key, and
+    two things follow:
+
+    - constraining both ends multiplies the search space rather than adding to
+      it, so the estimate is the product of the two ends;
+    - the FINAL character of a base64 key is not a full 6-bit character, so the
+      end costs slightly less than the same-length prefix. Charging the whole
+      suffix pattern the reduced alphabet instead overstated `--suffix 7f` by
+      16x; charging the whole pattern the full alphabet overstated it by 4x.
+      Only the last character is reduced, which is what this now does.
+
+    Both callers (the search itself and main()'s pre-flight estimate) go through
+    here, so the number quoted before the search and the one used during it
+    cannot drift apart.
+    """
+    space = _alphabet_size(encoding) ** prefix_len
+    if suffix_len is None:
+        return space
+    if suffix_len <= 0:
+        return space
+    full = _alphabet_size(encoding)
+    if encoding in ("base64", "base64url"):
+        tail = _alphabet_size(encoding, at_key_end=True)
+        return space * (full ** (suffix_len - 1)) * tail
+    return space * (full ** suffix_len)
 
 
 def _max_encoded_len(encoding: Encoding, hrp: str) -> int:
@@ -610,11 +643,19 @@ def _base64_final_chars() -> frozenset[str]:
 
 
 def _validate_base64_suffix_reachable(suffix: str, label: str) -> None:
-    """Refuse a base64 suffix that provably cannot occur.
+    """Refuse a base64 pattern that provably cannot end a key.
 
     Only the LAST character is constrained: earlier characters of the pattern sit
     at non-final positions where all 64 symbols are reachable.
+
+    An empty pattern is not an error here. It legitimately reaches this function
+    in --both mode, where the suffix side is the same pattern as the prefix and
+    is supplied by the caller rather than by ``suffix_pattern``; and it
+    constrains nothing, so there is nothing to reject. (It used to be indexed
+    unconditionally, so `--both --encoding base64` died with an IndexError.)
     """
+    if not suffix:
+        return
     reachable = _base64_final_chars()
     last = suffix[-1]
     if last in reachable:
@@ -714,7 +755,11 @@ def generate_vanity_key(
                 f"{data_len} for a 32-byte key"
             )
         if encoding in ("base64", "base64url"):
-            _validate_base64_suffix_reachable(suffix_pattern or "", "suffix")
+            # In --both mode the pattern is repeated at the end, so its final
+            # character is what has to be reachable - not an empty string.
+            _validate_base64_suffix_reachable(
+                prefix if both else suffix_pattern, "suffix"
+            )
         # The prefix covers [0, prefix_len) and the suffix the last
         # `suffix_len` data characters. If those regions touch, the same
         # characters would have to satisfy both patterns, which is impossible
@@ -752,13 +797,16 @@ def generate_vanity_key(
     is_hex = encoding == "hex"
     # HRP expansion is loop-invariant; hoist it out of the hot path.
     hrp_expanded = _bech32_hrp_expand(hrp) if encoding == "bech32" else None
-    # Cost of the search: every constrained end multiplies the space. An empty
-    # pattern constrains nothing and contributes a factor of 1, which
-    # _expected_attempts gets right on its own via sum().
+    # Cost of the search. An empty pattern constrains nothing and contributes a
+    # factor of 1, which _estimate_search_space gets right on its own.
     if two_ended:
-        expected_attempts = _expected_attempts(encoding, prefix_len, suffix_len)
+        expected_attempts = _estimate_search_space(encoding, prefix_len, suffix_len)
+    elif suffix:
+        # The whole pattern sits at the END of the key, so it is costed against
+        # the end alphabet rather than the start one.
+        expected_attempts = _estimate_search_space(encoding, 0, prefix_len)
     else:
-        expected_attempts = _expected_attempts(encoding, prefix_len)
+        expected_attempts = _estimate_search_space(encoding, prefix_len, None)
 
     # Multi-worker parallel search
     if workers > 1:
@@ -799,7 +847,9 @@ def generate_vanity_key(
     _seed_keypair = nacl.bindings.crypto_sign_seed_keypair
 
     # Calculate expected attempts for progress percentage
-    expected_attempts = _expected_attempts(encoding, prefix_len, suffix_len) if two_ended else _expected_attempts(encoding, prefix_len)
+    expected_attempts = _estimate_search_space(
+        encoding, prefix_len, suffix_len if two_ended else None
+    )
 
     # Scalar-walk: derive initial scalar from seed once, then increment
     # as a 256-bit integer for each attempt (avoids SHA-256 per attempt)
@@ -924,9 +974,9 @@ def _generate_vanity_key_parallel(
         per_worker_max = (max_attempts + workers - 1) // workers
     else:
         per_worker_max = None
-    expected_attempts = _expected_attempts(
-        encoding, prefix_len, suffix_len
-    ) if two_ended else _expected_attempts(encoding, prefix_len)
+    expected_attempts = _estimate_search_space(
+        encoding, prefix_len, suffix_len if two_ended else None
+    )
     progress_counter = ctx.Value("Q", 0)
     with ctx.Pool(processes=workers, initializer=_init_worker_counter,
                    initargs=(progress_counter,)) as pool:
@@ -1287,12 +1337,22 @@ def main() -> int:
     # Requires confirmation on interactive terminals unless --force.
     # All user-facing text goes to stderr: stdout carries only the key.
     try:
-        pat_lens = [len(args.prefix)]
+        # Same model the search itself uses, so the figure quoted before the
+        # search is the figure used during it. A bare --suffix constrains only
+        # the end, so it passes prefix_len 0.
         if args.both:
-            pat_lens.append(len(args.prefix))
+            est = _estimate_search_space(
+                args.encoding, len(args.prefix), len(args.prefix)
+            )
         elif suffix_pattern is not None:
-            pat_lens.append(len(suffix_pattern))
-        expected = _expected_attempts(args.encoding, *pat_lens)
+            est = _estimate_search_space(
+                args.encoding, len(args.prefix), len(suffix_pattern)
+            )
+        elif use_suffix:
+            est = _estimate_search_space(args.encoding, 0, len(args.prefix))
+        else:
+            est = _estimate_search_space(args.encoding, len(args.prefix), None)
+        expected = est
         measured = _benchmark_rate()
         # Spawning the pool costs a few tenths of a second. If the search is
         # expected to finish sooner than that, staying serial is dramatically
