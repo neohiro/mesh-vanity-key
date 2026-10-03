@@ -1389,13 +1389,17 @@ def test_page_estimates_and_formatting():
     html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
 
     # Singular vs plural must be conditional, not a hardcoded "workers".
-    #
-    # The count it conditions on is `shownWorkers`, not `numWorkers`: once the
-    # rate is measured the line describes the workers actually running, so a
-    # search that lost some to an init failure must not still claim the planned
-    # count beside a figure derived from fewer.
     assert "shownWorkers === 1 ? 'worker' : 'workers'" in html
-    assert "const shownWorkers = usingLive ? (workers.length || numWorkers) : numWorkers;" in html
+    # The grey line is static for a search, so it always describes the PLANNED
+    # worker count. It used to switch to the running count once the rate was
+    # measured, which only made sense while the line was being rewritten
+    # mid-search; now that it is not, there is no "actually running" count for it
+    # to contradict. The live panel shows the real figure.
+    assert "const shownWorkers = numWorkers;" in html
+    assert "usingLive" not in html, (
+        "the grey line no longer flips to a live figure, so nothing should be "
+        "branching on one"
+    )
     # The facts are newline-separated so the line can break between them; the
     # `|` separators were a desktop affordance that stranded at wrapped line
     # ends and could widen the page on a phone.

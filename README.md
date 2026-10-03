@@ -392,20 +392,29 @@ anything ever measured.
 **Honest caveat:** these are Node OS threads, not browser Web Workers — no event
 loop, no UI thread, no `postMessage` per report. The browser may well be slower;
 an earlier browser-only measurement put 8 threads at 2.3x, below every number
-here. That is why the running estimate is measured rather than modelled — see
-below.
+here. That is why the browser measures its own curve instead of trusting the
+table — see below.
 
-### The estimate corrects itself once mining starts
+### The grey estimate is a static pre-flight projection
 
-The pre-flight figure folds `workerScale()` in, so it is still a model. But
-every worker reports its true `attempts / elapsed` every 500 ms, and summing
-those across workers gives the **actual** aggregate rate. Once a search has been
-running a moment, the estimate is rebuilt from that measurement rather than the
-table, so the number converges to the truth within seconds on any hardware —
-including machines nobody benchmarked.
+The grey line above the panel is computed **once**, before any work starts, and
+does not change for the duration of a search. It shows the expected attempts,
+the estimated time, the worker count and the projected keys/s, and it is labelled
+`estimated` or `calibrated` so it is clear which kind of number it is.
 
-The grey pre-flight line shows only measurements (attempts, time, worker count,
-keys/s); the scaling multiplier is no longer advertised there.
+It used to be rewritten on every progress report so it could flip from
+`estimated` to `measured` once the workers had reported twice. That put a moving
+number in grey directly above the green live-logs panel, which already showed
+the live rate, progress and a live ETA computed from each worker's own reported
+rate — two figures changing under the user at once, with the projection
+masquerading as part of the live read-out. The live panel is for live figures;
+the grey line is what you should be deciding on before you press Start.
+
+What makes a fixed pre-flight figure defensible is that it is no longer imported
+from other hardware: `ratePerWorker()` is measured on this CPU at load, and
+`workerScale()` comes from the per-machine calibration described above. So the
+grey line is a projection from two local measurements, not a table someone else
+produced.
 
 The provenance of the factor (which host it was measured on, and the fit) is
 documented here and in `WORKER_SCALE_MEASURED` in `index.html` rather than
