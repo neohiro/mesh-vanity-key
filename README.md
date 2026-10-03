@@ -172,6 +172,7 @@ Regression guards:
 | `node tools/bench_worker.mjs <worker.js>` | wrapper overhead with a stubbed (free) keygen; must stay far above the keygen cost. Runs three trials and reports the best, so JIT warm-up or a descheduled shared vCPU cannot fail an otherwise healthy run — a real regression drops every trial and still fails hard |
 | `node tools/bench_worker_scaling.mjs` | aggregate throughput vs worker count, using a synthetic ALU+table workload. Reports higher scaling than is real - its workload is ILP-friendly - so prefer the keygen probe below |
 | `node tools/bench_keygen_scaling.mjs` | aggregate keys/s vs thread count using the **real** `crypto_sign_seed_keypair` from the shipped wasm. The trustworthy of the two scaling probes — see "Worker scaling" |
+| `node tools/check_keygen_baseline.mjs <report>` | compares a keygen-scaling run against `tools/keygen_baseline.json`; fails only on a large **drop**. Runs nightly via the `keygen-scaling` workflow |
 
 > **Careful:** never write `if (++bytes[i] !== 0)`. Incrementing a `Uint8Array`
 > element returns the *unclamped* value (`256`, not `0`), so the carry test never
@@ -261,36 +262,57 @@ workers contend for memory bandwidth.
 > The number is user-visible on every estimate: raising it shortens every ETA,
 > lowering it lengthens them.
 
-These are the values `workerScale()` actually returns today, from the 2.3x
-anchor the code uses:
+These are the values `workerScale()` returns today:
 
-| Workers | Model says | Real keygen measures |
+| Workers | Speedup | Basis |
 |---|---|---|
-| 1 | 1.00x | 1.00x |
-| 2 | 1.32x | **1.97x** |
-| 3 | 1.55x | — |
-| 4 | 1.74x | **3.42x** |
-| 6 | 2.05x | — |
-| **8** | **2.30x** (anchor) | **4.08x** |
+| 1 | 1.00x | baseline |
+| 2 | 1.97x | **measured** |
+| 3 | 2.72x | interpolated |
+| 4 | 3.42x | **measured** |
+| 6 | 3.79x | interpolated |
+| **8** | **4.08x** | **measured** |
+| 16, 32 | 4.08x | clamped to the ceiling |
 
-The two columns disagree badly, and the right-hand one is the trustworthy
-measurement. Only the 8-thread end point was ever measured *in a browser*; the
-intermediate column is a power-law fit anchored to it:
+Measured with `tools/bench_keygen_scaling.mjs`, which runs the shipped
+`libsodium.wasm`'s real `crypto_sign_seed_keypair` across N OS threads:
 
-    scale(n) = n ** (log(2.3) / log(8))     # exponent ~= 0.4005
+    1 thread     23,934 keys/s   1.00x
+    2 threads    47,157 keys/s   1.97x
+    4 threads    81,885 keys/s   3.42x
+    8 threads    97,555 keys/s   4.08x   (19% better than 4)
 
-The fit underestimates at every interior point, worst at 4 threads where it
-predicts 1.74x against 3.42x measured — nearly half. A single-anchor power law
-cannot represent a curve that is near-linear to 2 threads and then flattens
-sharply, which is what SMT contention actually looks like. If the model is ever
-recalibrated, record the measured interior points rather than fitting through
-one endpoint.
+**This is a table, not a power law, and that matters.** The model used to be
+`n ** (log(2.3) / log(8))` — one anchor, everything else a fit. Measuring the
+real primitive showed scaling is near-linear to 2 threads and then flattens
+sharply, which a single-anchor law cannot represent: it predicted 1.32x at 2
+threads against 1.97x measured, and **1.74x at 4 against 3.42x measured**, so
+every 4-core laptop was told it would run at half its real speed. The measured
+points are now recorded directly and interpolated log-linearly between them,
+which reproduces the curve's shape.
 
-The curve is concave and capped at the measured ceiling, so it cannot predict
-more speedup than was actually observed. The browser estimate folds this factor
-in and prints the multiplier inline instead of hedging:
+Above 8 threads the curve **clamps** rather than extrapolating: extra threads
+cannot beat what was observed on 4 physical cores, and `detectOptimalWorkers`
+caps at 32, so a 32-thread machine would otherwise be told it is 7x faster than
+anything ever measured.
 
-    workers share cores, improvement is only ~2.3x at 8 threads
+**Honest caveat:** these are Node OS threads, not browser Web Workers — no event
+loop, no UI thread, no `postMessage` per report. The browser may well be slower;
+an earlier browser-only measurement put 8 threads at 2.3x, below every number
+here. That is why the running estimate is measured rather than modelled — see
+below.
+
+### The estimate corrects itself once mining starts
+
+The pre-flight figure folds `workerScale()` in, so it is still a model. But
+every worker reports its true `attempts / elapsed` every 500 ms, and summing
+those across workers gives the **actual** aggregate rate. Once a search has been
+running a moment, the estimate is rebuilt from that measurement rather than the
+table, so the number converges to the truth within seconds on any hardware —
+including machines nobody benchmarked.
+
+The grey pre-flight line shows only measurements (attempts, time, worker count,
+keys/s); the scaling multiplier is no longer advertised there.
 
 The provenance of the factor (which host it was measured on, and the fit) is
 documented here and in `WORKER_SCALE_MEASURED` in `index.html` rather than
