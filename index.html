@@ -984,10 +984,15 @@
 //    imported table, which is exactly what runs today.
 const SCALE_CAL_KEY = 'meshcore-vanity-scale-v1';
 const SCALE_CAL_ROUNDS = [1, 2, 4, 8, 16, 32];
-// Candidates per worker per round. Deliberately small: this measures the SHAPE
-// of the curve, not absolute speed, and 32 candidates is enough to see whether
-// aggregate throughput scales.
-const SCALE_CAL_PER_WORKER = 32;
+// Candidates per worker per round.
+//
+// Sized against the WORKER's own keygen clock, not the round's wall time, so
+// this is pure measurement: at a typical 2,000 keys/s a worker spends ~128ms
+// here, which is long enough for Date.now() to resolve it and short enough that
+// four rounds fit inside SCALE_CAL_TOTAL_MS. It used to be 32, chosen when the
+// denominator still included worker startup; with startup excluded a longer run
+// is what actually buys signal.
+const SCALE_CAL_PER_WORKER = 256;
 // Per-round ceiling, and a ceiling on the whole calibration. Both matter: the
 // first search must not stall, so the total is capped independently of how many
 // rounds fit inside it.
@@ -1052,10 +1057,35 @@ function measureScaleRound(count) {
         let pool = [];
         let done = 0;
         let attempts = 0;
+        // Longest keygen time any worker reported. This - not the main thread's
+        // wall clock - is what the round is divided by.
+        let slowest = 0;
         let finished = false;
         let t0 = 0;
 
-        const settle = (rate) => {
+        // The rate is candidates per second of actual keygen, measured by the
+        // worker itself from after `await readyPromise`.
+        //
+        // Using main-thread wall time instead would time WORKER STARTUP and the
+        // libsodium initialise, not keygen: 32 candidates is ~16ms of work
+        // against tens or hundreds of milliseconds to spin up a worker and its
+        // WASM. Startup also scales with the worker count, so the bias runs
+        // directly against the larger counts this measurement exists to judge,
+        // and the figure would not be comparable with the mining rate, which is
+        // timed from after init.
+        //
+        // The workers run concurrently, so the round takes as long as its
+        // slowest one.
+        const rate = () => (slowest > 0
+            ? attempts / slowest
+            : 0);
+        // Fallback for a round where no worker reported its elapsed time (a
+        // partial round, or an old worker build): wall clock is better than
+        // nothing.
+        const wallRate = () => (done > 0
+            ? attempts / Math.max((Date.now() - t0) / 1000, 1e-3)
+            : 0);
+        const settle = (r) => {
             if (finished) return;
             finished = true;
             for (const w of pool) {
@@ -1063,7 +1093,7 @@ function measureScaleRound(count) {
             }
             try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
             pool = [];
-            resolve(rate);
+            resolve(r);
         };
 
         // One timer for the round: if a worker never reports we must not wait
@@ -1073,7 +1103,7 @@ function measureScaleRound(count) {
         const budget = Math.max(
             50, Math.min(SCALE_CAL_ROUND_MS, scaleCalDeadline - Date.now()));
         const timer = setTimeout(() => {
-            settle(done > 0 ? attempts / Math.max((Date.now() - t0) / 1000, 1e-3) : 0);
+            settle(rate() || wallRate());
         }, budget);
 
         let url;
@@ -1107,10 +1137,15 @@ function measureScaleRound(count) {
                     }
                     if (d.type === 'calibrated') {
                         attempts += Number(d.attempts) || 0;
+                        // The worker times its own keygen loop, from after the
+                        // WASM is ready. Taking the slowest keeps the rate a
+                        // true aggregate for a concurrently-running round.
+                        const el = Number(d.elapsed);
+                        if (isFinite(el) && el > slowest) slowest = el;
                         done++;
                         if (done === count) {
                             clearTimeout(timer);
-                            settle(attempts / Math.max((Date.now() - t0) / 1000, 1e-3));
+                            settle(rate() || wallRate());
                         }
                     }
                 };

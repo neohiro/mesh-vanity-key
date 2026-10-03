@@ -3408,6 +3408,54 @@ check('scaling calibration: no new console noise during mining', () => {
     api.__setScaleCacheRaw(null);
 });
 
+check('scaling calibration: the round is timed by the workers, not the main thread', () => {
+    // Regression, and a silent one. The round was divided by main-thread wall
+    // time measured from just after the Workers were constructed - which times
+    // worker startup and the libsodium WASM initialise, not keygen. 32
+    // candidates is ~16ms of work against tens or hundreds of ms to spin up a
+    // worker, and startup cost grows with the worker count, so the bias ran
+    // directly against the larger counts the measurement exists to judge. It
+    // also made the figure incomparable with the mining rate, which is timed
+    // from after `await readyPromise`.
+    ok(/slowest/.test(source), 'the slowest worker-reported elapsed must be tracked');
+    ok(/attempts \/ slowest/.test(source),
+        'the round rate must divide by the slowest worker-reported elapsed');
+    // Wall clock survives only as an explicit fallback, not the primary measure.
+    ok(/wallRate/.test(source), 'a wall-clock fallback must exist');
+    ok(/rate\(\) \|\| wallRate\(\)/.test(source),
+        'the worker-reported rate must be preferred over wall clock');
+
+    // The calibration worker must actually report that elapsed time.
+    const wsrc = fs.readFileSync(process.argv[3], 'utf8');
+    ok(/type: 'calibrated'/.test(wsrc), 'the calibrated message must be sent');
+    ok(/elapsed:/.test(wsrc), 'and must carry an elapsed measurement');
+});
+
+check('scaling calibration: enough candidates for the worker clock to resolve', () => {
+    // With startup out of the denominator the budget is pure keygen, so a round
+    // has to be long enough for Date.now() to measure it. 32 candidates was
+    // sized for the old, wall-clock denominator.
+    const m = /const SCALE_CAL_PER_WORKER = (\d+)/.exec(source);
+    ok(m, 'SCALE_CAL_PER_WORKER must be a literal to be quotable');
+    const n = Number(m[1]);
+    ok(n >= 128, `${n} candidates per worker is too short to time reliably`);
+    // ...and still small enough that several rounds fit the total budget.
+    const total = Number(/const SCALE_CAL_TOTAL_MS = (\d+)/.exec(source)[1]);
+    const perRound = Number(/const SCALE_CAL_ROUND_MS = (\d+)/.exec(source)[1]);
+    ok(total >= perRound, 'the total budget must allow at least one round');
+    ok(n <= 4096, `${n} is too many candidates to stay inside the budget`);
+});
+
+check('scaling calibration: the mining worker shares the calibrated message', () => {
+    // The mining worker can also report a bounded run. Both producers must agree
+    // on the field names, or one of the two measurement paths silently reads
+    // undefined and falls back to wall clock.
+    const wsrc = fs.readFileSync(process.argv[3], 'utf8');
+    ok(/type: 'calibrated'/.test(wsrc), 'mining worker must emit the same type');
+    ok(/attempts: attempts/.test(wsrc), 'and report its attempt count');
+    ok(/elapsed:/.test(wsrc), 'and an elapsed time');
+});
+
 const workerJsPath = process.argv[3];
 if (workerJsPath) {
     // 0. Progress reporting must not repeat a batch.
