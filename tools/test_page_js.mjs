@@ -3267,21 +3267,71 @@ check('scaling calibration: a valid cache round-trips', () => {
 });
 
 check('worker count follows the measurement, not the thread count', () => {
-    // A 4-core/8-thread machine: the measured curve flattens after 4 because
-    // the extra threads are SMT siblings contending for the same execution
-    // units. One worker per logical thread would be the wrong answer, and
-    // measuring is the only way to tell that machine from a real 8-core one.
+    // The SMT shape: the curve flattens after 4 because the extra threads are
+    // siblings contending for the same execution units. One worker per logical
+    // thread would be the wrong answer, and measuring is the only way to tell
+    // that machine from a real 8-core one.
+    //
+    // The steps up to 4 all pay (1.9x, then 1.79x) and the 4->8 step adds only
+    // 1.20%, which is above the 10% floor - so 8 is still taken here. The curve
+    // that must be rejected is the next test.
     const orig = navigatorMock.hardwareConcurrency;
     navigatorMock.hardwareConcurrency = 8;
     try {
-        api.__setMeasuredScale([[1, 1], [2, 1.9], [4, 3.4]]);
+        // Boundary pair on the final step: 4->8 at 11.8% clears the 10% floor,
+        // 4->8 at 8.8% does not. The two must not be treated the same.
+        api.__setMeasuredScale([[1, 1], [2, 1.9], [4, 3.4], [8, 3.8]]);
+        eq(api.detectOptimalWorkers(), 8,
+            'a 4->8 step of 11.8% clears the 10% floor, so 8 is taken');
+        api.__setMeasuredScale([[1, 1], [2, 1.9], [4, 3.4], [8, 3.7]]);
         eq(api.detectOptimalWorkers(), 4,
-            'must stop at the last thread count that still paid for itself');
+            'the same curve with an 8.8% final step must stop at 4');
         // With nothing measured, unchanged: one worker per logical thread.
         api.__setMeasuredScale(null);
         api.__setScaleCacheRaw(null);
         eq(api.detectOptimalWorkers(), 8,
             'without a measurement it must fall back to the thread count');
+    } finally {
+        api.__setMeasuredScale(null);
+        api.__setScaleCacheRaw(null);
+        navigatorMock.hardwareConcurrency = orig;
+    }
+});
+
+check('worker count stops where the curve stops paying', () => {
+    // THIS is the case the 10% rule exists for, and the one a weaker test
+    // misses: a curve that keeps growing in absolute terms but adds under 10%
+    // per step. Taking 8 workers here would buy ~4% aggregate throughput while
+    // handing the main thread three extra workers' worth of reporting.
+    const orig = navigatorMock.hardwareConcurrency;
+    navigatorMock.hardwareConcurrency = 8;
+    try {
+        api.__setMeasuredScale([[1, 1], [2, 1.9], [4, 2.0], [8, 2.05]]);
+        eq(api.detectOptimalWorkers(), 2,
+            'must stop at 2, where the 2->4 step adds only 5%');
+        // A curve that dies even earlier.
+        api.__setMeasuredScale([[1, 1], [2, 1.05], [4, 1.06]]);
+        eq(api.detectOptimalWorkers(), 1,
+            'a first step under the floor must not be taken at all');
+        // ...and one that pays at every step must not be cut short.
+        api.__setMeasuredScale([[1, 1], [2, 2], [4, 4], [8, 8]]);
+        eq(api.detectOptimalWorkers(), 8, 'linear scaling must be followed to the end');
+    } finally {
+        api.__setMeasuredScale(null);
+        api.__setScaleCacheRaw(null);
+        navigatorMock.hardwareConcurrency = orig;
+    }
+});
+
+check('worker count stops at the cap even when the curve keeps paying', () => {
+    // A 256-thread machine: the curve says 32 threads is fine, the cap says 32.
+    const orig = navigatorMock.hardwareConcurrency;
+    navigatorMock.hardwareConcurrency = 256;
+    try {
+        api.__setMeasuredScale([[1, 1], [2, 2], [4, 4], [8, 8], [16, 16],
+            [32, 32]]);
+        eq(api.detectOptimalWorkers(), 32,
+            'must not exceed the cap on a many-core machine');
     } finally {
         api.__setMeasuredScale(null);
         api.__setScaleCacheRaw(null);
