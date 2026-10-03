@@ -687,6 +687,26 @@ A 32-byte key is 44 base64 characters, the last of which is the `=` pad. Suffix
 matching compares against the end of the **key data**, not the padding, so
 `--suffix 7f` matches keys whose last two *data* characters are `7f`.
 
+There is a second base64 quirk worth knowing, because it makes a suffix
+*impossible* rather than merely rare. 256 bits do not divide evenly into 6-bit
+base64 characters: the 43rd data character carries only 4 significant bits, so
+its low two bits are always zero and only 16 of the 64 symbols can appear there.
+A suffix whose last character is one of the other 48 can never match, so it is
+rejected immediately instead of searching forever:
+
+```console
+$ meshcore-vanity ab --suffix b
+Error: this suffix pattern can never match a base64 key: a 32-byte key's
+base64 form is 43 data characters, and the last one carries only 4 significant
+bits, so it can only be one of 048AEIMQUYcgkosw. 'b' is not among them
+(the full pattern was 'b')
+```
+
+Only the final character is constrained — earlier characters of the pattern sit
+at positions where all 64 symbols are reachable. `hex`, `base58` and `bech32` are
+unaffected. The reachable set is derived from the encoding rather than
+hard-coded, and a test checks that derivation against 3,000 real encodings.
+
 ## Limitations
 
 - **Search time grows exponentially with prefix length.** A 2-char hex prefix takes ~1 second; a 6-char prefix may take hours. Use `--workers` to parallelize.

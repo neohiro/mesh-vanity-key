@@ -896,6 +896,161 @@ def test_the_online_install_needs_only_pynacl() -> None:
     assert "pynacl" in names, deps
 
 
+def test_parallel_workers_honour_a_separate_suffix_pattern() -> None:
+    """The spawn path must carry the suffix pattern to the child processes.
+
+    The worker receives its arguments as a positional tuple that is unpacked in
+    the child. Adding the suffix arguments shifted that tuple, and a mismatch
+    between the order it is built in and the order it is unpacked would only
+    surface at run time as a spawn error - the single-threaded tests all pass
+    either way, because they never build the tuple.
+    """
+    result = generate_vanity_key(
+        "a", encoding="hex", suffix_pattern="b", max_attempts=400_000, workers=4
+    )
+    assert result.encoded.startswith("a"), result.encoded
+    assert result.encoded.endswith("b"), result.encoded
+
+
+def test_parallel_workers_honour_both_ends_modes() -> None:
+    """--both and bare --suffix must survive the trip through spawn too."""
+    both = generate_vanity_key(
+        "a", encoding="hex", both=True, max_attempts=400_000, workers=4
+    )
+    assert both.encoded.startswith("a") and both.encoded.endswith("a"), both.encoded
+    tail = generate_vanity_key(
+        "b", encoding="hex", suffix=True, max_attempts=400_000, workers=4
+    )
+    assert tail.encoded.endswith("b"), tail.encoded
+
+
+def test_conflicting_modes_are_rejected_before_anything_is_printed() -> None:
+    """The tool must not announce a search it is about to refuse.
+
+    `--suffix cd --both` used to print "starting AND ending with 'ab'" and only
+    then report that the flags contradict, which reads as though the search had
+    begun. main() already validates --workers up front for the same reason.
+    """
+    for argv in (
+        ["ab", "--suffix", "cd", "--both"],
+        ["ab", "--suffix", "--both"],
+    ):
+        proc = _run_cli(*argv, "--force", "--max-attempts", "3000")
+        assert proc.returncode == 2, (argv, proc.stderr)
+        assert "Searching for" not in proc.stderr, (
+            f"{argv} announced a search before rejecting itself:\n{proc.stderr}"
+        )
+        assert "Estimate:" not in proc.stderr, (
+            f"{argv} quoted an estimate before rejecting itself:\n{proc.stderr}"
+        )
+        assert proc.stdout.strip() == "", (
+            f"{argv} printed a key it never searched for:\n{proc.stdout}"
+        )
+
+
+def test_the_suffix_flag_does_not_swallow_a_following_option() -> None:
+    """`--suffix` takes an optional value, so it must not eat the next flag.
+
+    argparse will happily use a following token as the value; a bare `--suffix`
+    followed by another option has to stay a bare `--suffix`.
+    """
+    proc = _run_cli(
+        "ab", "--suffix", "--encoding", "hex",
+        "--max-attempts", "400000", "--force",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "ending with 'ab'" in proc.stderr, proc.stderr
+    data = proc.stdout.strip()
+    assert data.endswith("ab"), data
+
+    # And with a value it must consume exactly that value. hex is used because
+    # every hex digit is reachable at every position, whereas a base64 suffix
+    # ending in an unreachable final character can never match at all.
+    proc2 = _run_cli(
+        "a", "--suffix", "c", "--encoding", "hex",
+        "--max-attempts", "400000", "--force",
+    )
+    assert proc2.returncode == 0, proc2.stderr
+    assert "starting with 'a' AND ending with 'c'" in proc2.stderr, proc2.stderr
+    assert proc2.stdout.strip().startswith("a"), proc2.stdout
+    assert proc2.stdout.strip().endswith("c"), proc2.stdout
+
+
+def test_the_derived_reachable_set_matches_reality() -> None:
+    """The reachable-final-character set is derived, so check the derivation.
+
+    32 bytes is 256 bits and base64 spends 6 per character, so the 43rd data
+    character carries 4 significant bits and its low two bits are always zero:
+    its alphabet index must be a multiple of 4. That derivation is cheap but it
+    is the whole basis for rejecting a suffix as impossible, so it is checked
+    against real encodings rather than trusted.
+    """
+    import base64 as _b64
+    import os as _os
+
+    from meshcore_vanity import _base64_final_chars
+
+    reachable = _base64_final_chars()
+    assert len(reachable) == 16, sorted(reachable)
+    observed = {_b64.b64encode(_os.urandom(32)).decode()[42] for _ in range(3000)}
+    # A sample can miss a character that is merely rare, but it must never
+    # produce one the derivation says is impossible.
+    assert observed <= reachable, sorted(observed - reachable)
+    assert len(observed) == 16, (
+        f"expected all 16 reachable characters in 3000 keys, saw {sorted(observed)}"
+    )
+
+
+def test_an_unreachable_base64_suffix_is_refused_rather_than_searched() -> None:
+    """An impossible suffix must fail immediately, not run until killed.
+
+    'b' is alphabet index 27, and 27 is not a multiple of 4, so no 32-byte key
+    can end with it. Searching for one would loop forever.
+    """
+    for kwargs in (
+        {"suffix_pattern": "b"},
+        {"suffix_pattern": "7f"},
+        {"suffix": True},  # bare --suffix uses the prefix as the pattern
+    ):
+        pattern = "b" if kwargs.get("suffix") else next(iter(kwargs.values()))
+        with pytest.raises(ValueError, match="can never match a base64 key"):
+            generate_vanity_key(
+                pattern, encoding="base64", max_attempts=1, **kwargs
+            )
+
+    # Reachable final characters must NOT be refused. A single attempt will
+    # usually be exhausted (a 1-char base64 suffix carries only 4 bits), and
+    # that RuntimeError is the correct outcome - what must not happen is the
+    # ValueError above.
+    from meshcore_vanity import _base64_final_chars
+    for ch in sorted(_base64_final_chars()):
+        try:
+            generate_vanity_key(
+                "a", encoding="base64", suffix_pattern=ch, max_attempts=1
+            )
+        except RuntimeError:
+            pass
+
+
+def test_the_unreachable_suffix_is_reported_before_the_search_starts() -> None:
+    """It must not print the search line and estimate first."""
+    proc = _run_cli("ab", "--suffix", "b", "--force", "--max-attempts", "100")
+    assert proc.returncode == 2, proc.stderr
+    assert "Searching for" not in proc.stderr, proc.stderr
+    assert "Estimate:" not in proc.stderr, proc.stderr
+    assert "can never match a base64 key" in proc.stderr, proc.stderr
+
+
+def test_hex_suffixes_are_never_refused_for_reachability() -> None:
+    """Every hex digit is reachable at every position, so none may be rejected."""
+    for ch in "0123456789abcdefABCDEF":
+        result = generate_vanity_key(
+            "a", encoding="hex", suffix_pattern=ch, max_attempts=200_000
+        )
+        assert result.encoded.startswith("a"), result.encoded
+        assert result.encoded.endswith(ch.lower()), result.encoded
+
+
 def test_expected_attempts():
     # One constrained end.
     assert _expected_attempts("hex", 2) == 16**2
