@@ -2337,6 +2337,60 @@ check('rate graph: decimation keeps the newer of each pair, and terminates', () 
         api.resetRateGraph();
     }
 });
+check('the estimate line cannot widen a narrow screen', () => {
+    // Reported from an Android phone: the estimate ran off the side of the page
+    // and the page scrolled sideways.
+    //
+    // Two independent causes, both needed:
+    //
+    // 1. Chrome on Android boosts the font size of text blocks it thinks are
+    //    too small for the viewport. The viewport meta did not declare
+    //    text-size-adjust, so the text was silently enlarged - and this line is
+    //    a single unbroken run with nothing to wrap it.
+    // 2. #estimate had no wrapping rule at all. `width: 100%` plus a block child
+    //    that cannot break means the element is wider than its container.
+    //
+    // Both are load-bearing: with only (1) the line still overflows at the
+    // authored size, and with only (2) the boost pushes it back out.
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+
+    ok(/name="viewport"[^>]*text-size-adjust|viewport[^>]*initial-scale/.test(html)
+        || /text-size-adjust:\s*100%/.test(html),
+    'the page must disable Chrome\'s Android font boosting, or the estimate '
+        + 'is silently enlarged on a phone');
+
+    // The wrapping rule on the element itself.
+    const m = html.match(/#estimate\s*\{([^}]*)\}/);
+    ok(m, '#estimate must have a rule of its own');
+    ok(/overflow-wrap:\s*anywhere/.test(m[1]),
+        '#estimate must allow breaking, or one long run overflows the page');
+    ok(/max-width:\s*100%/.test(m[1]),
+        '#estimate must be capped at its container width');
+
+    // And the facts must be separated by real break opportunities. The `|`
+    // separators stranded at the start of wrapped lines and were the original
+    // overflow trigger.
+    ok(/white-space:\s*pre-line/.test(m[1]),
+        '#estimate must honour the newlines between facts');
+    ok(/\\nEstimated time: ~/.test(html),
+        'the estimate facts must be newline-separated');
+    ok(/\\n\(' \+ shownWorkers/.test(html),
+        'the worker/rate clause must start on its own line too');
+
+    // Narrow screens need the room: 40px of container padding on each side of a
+    // 360px phone leaves 280px, which is not enough.
+    ok(/@media \(max-width: 480px\)/.test(html),
+        'a narrow-screen breakpoint must exist to reclaim the container padding');
+    ok(/padding:\s*max\(16px, env\(safe-area-inset-top\)\)/.test(html),
+        'the container must tighten its padding on a phone');
+
+    // And if viewport-fit=cover is claimed, the safe-area padding has to be
+    // real. A comment claiming padding that does not exist is worse than none.
+    if (/viewport-fit=cover/.test(html)) {
+        ok(/env\(safe-area-inset-(top|right|bottom|left)\)/.test(html),
+            'viewport-fit=cover is declared, so the safe-area padding must be real');
+    }
+});
 
 check('estimate omits the scaling provenance clause', () => {
     getElementById('prefix').value = 'ab';

@@ -2,8 +2,11 @@
 """MeshCore-compatible Ed25519 vanity public-key generator.
 
 Generates keys until the encoded public key starts with a target prefix.
-Only the encoded public key is printed to stdout; the private key is
-printed to stderr only with the explicit opt-in --output-private flag.
+Only the encoded public key is printed to stdout; the private key is printed
+to stderr, on three lines, by DEFAULT - re-running a search to recover it is
+wasteful and people did exactly that. Pass --no-output-private to suppress it
+where the output is captured somewhere a secret should not land (CI logs, a
+shared terminal, a piped dashboard).
 
 Optimizations:
 - Scalar-walk: increment private scalar directly instead of hashing per attempt
@@ -928,9 +931,13 @@ def main() -> int:
         help="Progress log interval",
     )
     parser.add_argument(
-        "--output-private",
+        "--no-output-private",
         action="store_true",
-        help="Also output private key (base64) to stderr - USE WITH CAUTION",
+        help=(
+            "Suppress the private key, which is printed by default. Use this "
+            "where output is captured somewhere you would not want a secret: a "
+            "CI log, a shared terminal, a piped dashboard."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -1092,10 +1099,21 @@ def main() -> int:
         print(result.encoded)
     except BrokenPipeError:
         return 1
-    if args.output_private:
+    # Private keys are printed by DEFAULT.
+    #
+    # They used to require --output-private, and in practice people re-ran the
+    # whole search to get them - minutes to days of wasted CPU, and two machines
+    # mining the same wasted work. The printed key is the entire point of the
+    # tool, so requiring a flag for it was backwards.
+    #
+    # Pass --no-output-private to suppress it where stdout/stderr is captured
+    # somewhere you would not want a secret to land: a CI log, a shared terminal
+    # scrollback, a piped dashboard. That is the one real cost of the default,
+    # and it is why the opt-out exists.
+    if not args.no_output_private:
         priv_b64 = base64.b64encode(serialize_private_key(result.private_key)).decode()
-        print(f"PRIVATE_KEY_BASE64={priv_b64}", file=sys.stderr)
         expanded_hex = meshcore_expanded_private_key(result.private_seed).hex().upper()
+        print(f"PRIVATE_KEY_BASE64={priv_b64}", file=sys.stderr)
         print(f"MESHCORE_PRIV_HEX={expanded_hex}", file=sys.stderr)
         print(f"set prv.key {expanded_hex}", file=sys.stderr)
 

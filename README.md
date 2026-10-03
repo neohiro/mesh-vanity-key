@@ -1,11 +1,29 @@
 # meshcore-vanity-key
 
-A fast, MeshCore-compatible Ed25519 vanity public-key generator. Ships in two forms:
+A fast, MeshCore-compatible Ed25519 vanity public-key generator.
 
-- **`meshcore_vanity.py`** — a Python CLI with bech32/base58/base64 support and parallel multiprocessing.
-- **`index.html`** — a zero-install browser app (PWA) that mines with Web Workers + libsodium WASM.
+**[Try it in your browser →](https://neohiro.github.io/meshcore-vanity-key/)**
+No install, no build step, works offline once loaded.
 
-Inspired by and credited to [MeshCore](https://meshcore.io/) — a decentralized mesh networking project. This tool generates Ed25519 keypairs whose encoded public keys match a user-defined pattern, suitable for use with MeshCore devices and related tooling.
+Ships in two forms:
+
+- **[Browser app](https://neohiro.github.io/meshcore-vanity-key/)** — a
+  zero-install PWA that mines with Web Workers + libsodium WASM.
+- **Python CLI** — bech32/base58/base64 output and parallel multiprocessing.
+
+```bash
+./run.sh abcd          # Linux/macOS  — installs PyNaCl on first run
+run.bat abcd           # Windows
+```
+
+That is the whole install. Anything after the pattern goes straight through to
+the CLI, so `./run.sh mc1q --encoding bech32 --workers 8` works too. See
+[Running it](#running-it) for the flags.
+
+Inspired by and credited to [MeshCore](https://meshcore.io/) — a decentralized
+mesh networking project. This tool generates Ed25519 keypairs whose encoded
+public keys match a user-defined pattern, suitable for use with MeshCore
+devices and related tooling.
 
 ---
 
@@ -15,18 +33,25 @@ Generates Ed25519 cryptographic keypairs until the encoded public key matches a 
 
 ## Browser Version
 
-`index.html` is a self-contained PWA — no build step, no dependencies beyond the
-checked-in `libsodium.js`. It needs to be **served over HTTP(S)**, not opened as a
-`file://` URL, because browsers refuse to create blob Web Workers from `file://`.
+**Live: [neohiro.github.io/meshcore-vanity-key](https://neohiro.github.io/meshcore-vanity-key/)**
+
+The app is a single self-contained PWA (`index.html`) — no build step, and no
+dependencies beyond the checked-in `libsodium.js`. To run your own copy it must
+be **served over HTTP(S)**, not opened as a `file://` URL, because browsers
+refuse to create blob Web Workers from `file://`.
 
 ```bash
 python -m http.server 8000
 # then open http://localhost:8000/
 ```
 
-Deploy it to any static host (GitHub Pages, Netlify, Cloudflare Pages). The service
-worker precaches the app shell and serves stale-while-revalidate, so the app works
-offline and picks up new deploys on the next load.
+Deploy it to any static host (GitHub Pages, Netlify, Cloudflare Pages). The
+service worker precaches the app shell and serves stale-while-revalidate, so
+the app works offline and picks up new deploys on the next load.
+
+Mobile-friendly: the estimate line breaks between facts rather than mid-number,
+Chrome's Android font boosting is disabled, and the container respects the notch
+inset.
 
 Browser-specific behaviour, for comparison with the CLI below:
 
@@ -36,7 +61,7 @@ Browser-specific behaviour, for comparison with the CLI below:
 | Parallelism | auto-detected Web Workers (every logical core, capped at 32) | `--workers N` processes (CPU count for long searches, capped at 64) |
 | Key history | kept in `localStorage`, exportable as JSON/CSV | none |
 | Installable | yes (PWA with maskable icons) | n/a |
-| Private key | shown per result, stored in history | only with `--output-private` |
+| Private key | shown per result, stored in history | printed to stderr by default; `--no-output-private` suppresses |
 | History display | newest first, scroll stays at the top | n/a |
 
 > **Security:** the browser app obfuscates saved keys in `localStorage` with an
@@ -319,9 +344,10 @@ documented here and in `WORKER_SCALE_MEASURED` in `index.html` rather than
 printed on every page load — the inline clause was long enough to wrap the
 estimate line on a narrow screen.
 
-**To re-measure on different hardware**, update `WORKER_SCALE_MEASURED` and
-`WORKER_SCALE_EXPONENT` in `index.html` together; nothing else needs to change.
-`tools/bench_real_browser.mjs` measures real-browser keygen throughput.
+**To re-measure on different hardware**, replace `WORKER_SCALE_POINTS` in the
+browser app with fresh `tools/bench_keygen_scaling.mjs` output, update this
+table, and nothing else needs to change — the interpolation and clamping read
+straight from the table.
 
 > The multiplier is **hardware-specific** — 2.3x encodes *this* host's 2:1 SMT
 > ratio. A machine with 8 physical cores would scale very differently and must be
@@ -345,21 +371,42 @@ The service worker caches only same-origin files. The counter is never cached.
 
 ## Quick Start
 
-### Prerequisites
+### One command
 
-- Python 3.10+
-- `PyNaCl` package
+Run this from the repository root. It creates a local `.venv` on first use,
+installs PyNaCl into it, and passes everything after the pattern straight to
+the CLI:
+
+```bash
+./run.sh abcd          # Linux / macOS
+run.bat abcd           # Windows
+```
+
+| | |
+|---|---|
+| Need to install anything? | No. PyNaCl is fetched into `.venv` on first run. |
+| Uninstall | `rm -rf .venv` |
+| Already have PyNaCl? | It is still used from the venv; set `MESH_VANITY_NO_VENV=1` to use the ambient interpreter instead. |
+| See every flag | `./run.sh abcd --help` |
+
+Examples:
+
+```bash
+./run.sh abcd                        # fastest: 4 hex chars, ~65k attempts
+./run.sh abc --suffix 7f              # prefix AND suffix
+./run.sh mc1q --encoding bech32       # a MeshCore address
+./run.sh abcd --encoding base58 --workers 8
+```
+
+> If `run.sh` is not executable, call it through the interpreter:
+> `python3 run.py abcd`.
+
+### Calling the CLI directly
+
+If you already have the dependencies:
 
 ```bash
 pip install -r requirements.txt
-```
-
-### Single-Command Usage
-
-Run these **from the repository root** (the directory containing
-`meshcore_vanity.py`):
-
-```bash
 python meshcore_vanity.py <prefix> [options]
 ```
 
@@ -376,11 +423,19 @@ python meshcore_vanity.py <prefix> [options]
 > This prints the version and the absolute path of the file that was actually
 > loaded.
 
-The encoded public key is printed to **stdout**. Progress and statistics go to **stderr**, so you can pipe the result directly:
+The encoded public key is printed to **stdout**, so you can pipe the result
+directly:
 
 ```bash
-python meshcore_vanity.py ab --encoding hex > mykey.txt
+./run.sh ab --encoding hex > mykey.txt
 ```
+
+> **The private key is printed to stderr by default**, on three lines
+> (`PRIVATE_KEY_BASE64`, `MESHCORE_PRIV_HEX`, `set prv.key`). Re-running a
+> search to recover it costs minutes to days of CPU, which is why it is not
+> behind a flag any more. If you are piping output somewhere a secret should
+> not land — a CI log, a shared terminal, a dashboard — add
+> `--no-output-private`.
 
 ### Budget estimator
 
@@ -453,7 +508,7 @@ Uses 4 parallel processes to speed up the search.
 ### Output private key (use with caution)
 
 ```bash
-python meshcore_vanity.py ab --encoding hex --output-private
+python meshcore_vanity.py ab --encoding hex --no-output-private
 ```
 
 Prints the private key in multiple formats to stderr:
@@ -473,7 +528,7 @@ Prints the private key in multiple formats to stderr:
 | `--both` | off | Match both prefix and suffix |
 | `--max-attempts` | unlimited | Stop after N attempts |
 | `--progress-interval` | 100000 | Progress report frequency |
-| `--output-private` | off | Also output private key to stderr |
+| `--no-output-private` | off | Suppress the private key, which is printed to stderr by default |
 | `--seed` | random | 64 hex chars (32 bytes) for deterministic search |
 | `--workers` | all CPU cores (max 256) | Number of parallel processes (forced to 1 for searches expected to finish in under a second) |
 | `-f`, `--force` | off | Skip the pre-search estimate confirmation |
@@ -510,9 +565,33 @@ Hex prefixes `00` and `ff` are reserved for MeshCore framework devices and are r
 ## Limitations
 
 - **Search time grows exponentially with prefix length.** A 2-char hex prefix takes ~1 second; a 6-char prefix may take hours. Use `--workers` to parallelize.
-- **No GPU acceleration.** This is CPU-only. For very long prefixes, consider a GPU-based tool.
+- **No GPU acceleration, and that is not an oversight.** This is CPU-only in both
+  the CLI and the browser, and there is no GPU implementation of Ed25519
+  keygen to integrate. The reason is the shape of the work, not maturity:
+
+  - **It is serial.** One candidate is `SHA-512(seed)` → a clamped 255-bit
+    scalar → one scalar multiplication `[a]B`. That multiplication is a chain
+    of ~150 *dependent* field multiplications; each needs the previous one's
+    result, so there is no instruction-level parallelism to fill.
+  - **It is latency-bound, not throughput-bound.** Each step is a 128-bit
+    product followed by a reduction mod 2²⁵⁵−19 (a long carry chain of shifts
+    and adds), and the point additions consume a 32-entry precomputed table —
+    so memory latency sits directly on the critical path.
+  - **A GPU wins on work that is wide, independent and dense.** This is the
+    opposite on all three counts.
+
+  Batching many independent candidates *would* suit a GPU in principle, but at
+  ~25k keys/s per CPU core it would take thousands of in-flight candidates,
+  each with its own table, before utilisation approached full — more memory than
+  a CPU keeps in L1, at which point you are bandwidth-bound. That is why no
+  CUDA, WebGPU or WebGL implementation exists to port.
+
+  **What actually helps** is more cores (`--workers`), more machines, and the
+  browser app, which uses every logical core automatically.
 - **Bech32 prefix must be compatible with HRP.** Every bech32 key starts with `<hrp>1`. A prefix like `ne` with `--hrp mc` will be rejected because keys always start with `mc1`.
-- **Private key is only shown with `--output-private`.** Without this flag, only the public key is printed. This is a safety measure.
+- **The private key is printed to stderr by default.** Use
+  `--no-output-private` to suppress it where output is captured somewhere a
+  secret should not land (CI logs, a shared terminal, a piped dashboard).
 - **Not a MeshCore node.** This tool only generates keys. You still need MeshCore firmware or software to use them.
 - **Deterministic mode requires a seed.** Without `--seed`, each run produces different results.
 - **Browser app is hex-only.** It has no bech32/base58/base64 output; use the CLI for those encodings.
@@ -533,7 +612,7 @@ The encoded public key (the match). Pipe this to a file or another tool.
 
 ### stderr
 
-Progress messages, statistics, and (with `--output-private`) the private key in multiple formats.
+Progress messages, statistics, and the private key in multiple formats (stderr; suppress with `--no-output-private`).
 
 Example:
 
@@ -545,10 +624,16 @@ Found in 123,456 attempts (2.75s, 44,893 keys/s)
 
 ## Security Notes
 
-- **Never share your private key.** The `--output-private` flag prints it to stderr. Redirect stderr separately if you need to capture only the public key.
+- **Never share your private key.** The CLI prints it to **stderr by default**,
+  and so does the browser app. If you are capturing stderr — a CI log, a shared
+  terminal, a piped dashboard — pass `--no-output-private` to keep it out, or
+  redirect stderr to a file you control:
+  `./run.sh abcd 2> secret.log`.
 - **Use a strong seed for deterministic mode.** A predictable seed means predictable keys.
 - **Verify the generated key** before using it in production.
-- **Clear the browser history when done.** `Clear All Keys` in the browser app wipes `localStorage`, but exported JSON/CSV files still contain private keys.
+- **Clear the browser history when done.** `Clear All Keys` in the
+  [browser app](https://neohiro.github.io/meshcore-vanity-key/) wipes
+  `localStorage`, but exported JSON/CSV files still contain private keys.
 
 ## License
 
