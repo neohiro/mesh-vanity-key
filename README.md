@@ -261,19 +261,30 @@ workers contend for memory bandwidth.
 > The number is user-visible on every estimate: raising it shortens every ETA,
 > lowering it lengthens them.
 
-| Workers | Aggregate speedup | Basis |
-|---|---|---|
-| 1 | 1.00x | baseline |
-| 2 | 1.32x | fitted |
-| 3 | 1.55x | fitted |
-| 4 | 1.74x | fitted |
-| 6 | 2.05x | fitted |
-| **8** | **2.30x** | **measured** |
+These are the values `workerScale()` actually returns today, from the 2.3x
+anchor the code uses:
 
-Only the 8-thread end point was measured directly; the intermediate points come
-from a power-law fit anchored to that measurement:
+| Workers | Model says | Real keygen measures |
+|---|---|---|
+| 1 | 1.00x | 1.00x |
+| 2 | 1.32x | **1.97x** |
+| 3 | 1.55x | — |
+| 4 | 1.74x | **3.42x** |
+| 6 | 2.05x | — |
+| **8** | **2.30x** (anchor) | **4.08x** |
+
+The two columns disagree badly, and the right-hand one is the trustworthy
+measurement. Only the 8-thread end point was ever measured *in a browser*; the
+intermediate column is a power-law fit anchored to it:
 
     scale(n) = n ** (log(2.3) / log(8))     # exponent ~= 0.4005
+
+The fit underestimates at every interior point, worst at 4 threads where it
+predicts 1.74x against 3.42x measured — nearly half. A single-anchor power law
+cannot represent a curve that is near-linear to 2 threads and then flattens
+sharply, which is what SMT contention actually looks like. If the model is ever
+recalibrated, record the measured interior points rather than fitting through
+one endpoint.
 
 The curve is concave and capped at the measured ceiling, so it cannot predict
 more speedup than was actually observed. The browser estimate folds this factor

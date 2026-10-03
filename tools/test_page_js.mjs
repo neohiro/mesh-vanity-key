@@ -999,6 +999,28 @@ check('workerScale: the documented exponent matches the code', () => {
     const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
     ok(readme.includes(expected.toFixed(4)),
         `the README must state the same exponent (${expected.toFixed(4)})`);
+
+    // The README's "Model says" column must equal what workerScale() returns.
+    // That table is a claim about this code, and a power law recomputed from a
+    // different anchor would leave it quietly wrong - which is exactly how the
+    // stale 0.457 / 1.37x / 1.87x figures survived unnoticed in the first place.
+    //
+    // Split on newlines before matching: the file is CRLF, and an `^` anchor
+    // would sit after the \n leaving a stray \r on the end of each row.
+    const rows = readme.split(/\r?\n/);
+    for (const n of [2, 3, 4, 6, 8]) {
+        const want = api.workerScale(n).toFixed(2) + 'x';
+        // The 8-thread anchor row is bolded (|**8**|), so allow ** around the
+        // worker count as well as around the figures.
+        const rowRe = new RegExp(`^\\|\\s*\\**${n}\\**\\s*\\|`);
+        const row = rows.find((l) => rowRe.test(l.trim()));
+        ok(row !== undefined, `the README scaling table must have a row for ${n} workers`);
+        if (row === undefined) continue;
+        ok(row.includes(want),
+            `the README's scaling table must show workerScale(${n}) = ${want}, `
+            + `got row ${JSON.stringify(row.trim())}; the documented figures have `
+            + 'drifted from the code');
+    }
 });
 
 // ---- Live ETA layout ------------------------------------------------------
