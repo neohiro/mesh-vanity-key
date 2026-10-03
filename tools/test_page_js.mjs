@@ -352,7 +352,7 @@ armTrackingTimeouts();
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, resetForm, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, effectiveScalePoints, loadCachedScale, scaleCalStorageKey, __setMeasuredScale: (v) => { measuredScalePoints = v; }, __setScaleCacheRaw: (v) => { const k = scaleCalStorageKey(); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_POINTS, WORKER_SCALE_MAX, recordLiveRate, resetLiveRates, liveAggregateKeysPerSecond, liveRateIsComplete, LIVE_RATE_MIN_SAMPLES, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, decimateSamples, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, resetForm, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, effectiveScalePoints, loadCachedScale, scaleCalStorageKey, __setMeasuredScale: (v) => { measuredScalePoints = v; }, __setScaleCacheRaw: (v) => { const k = scaleCalStorageKey(); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_POINTS, WORKER_SCALE_MAX, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, decimateSamples, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -1065,196 +1065,102 @@ check('workerScale: the README table matches the code', () => {
     }
 });
 
-check('live rate: ignores the first reports, then sums every worker', () => {
-    // The self-calibration's contract: only trust a worker once it has reported
-    // enough times, and only produce a figure once EVERY live worker is
-    // trustworthy. Partial data would understate the aggregate and so overstate
-    // the ETA, which is the failure that matters.
-    const need = api.LIVE_RATE_MIN_SAMPLES;
-    ok(need >= 2, `the warm-up floor must exclude the noisy first report, got ${need}`);
+await asyncCheck('the grey estimate is static for the whole of a search', async () => {
+    // It used to be rewritten on every progress event so it could flip from
+    // "estimated" to "measured" once the workers reported. That put a moving
+    // number in grey directly above the green live-logs panel, which already
+    // shows the live rate and a live ETA from the same samples - two figures
+    // changing at once, with the projection masquerading as part of the
+    // read-out. The live panel is for live figures; the grey line is a
+    // pre-flight projection and must not move once work has started.
+    await withSodium(async () => {
+        primeForm();
+        api.updateEstimate();
+        const before = api.getEstimateText();
+        ok(before && before.length > 0, `precondition: an estimate, got ${before}`);
+        ok(/estimated|calibrated/.test(before),
+            `the static line must still say which kind of figure it is: ${before}`);
 
-    api.resetLiveRates();
-    eq(api.liveAggregateKeysPerSecond(4), null, 'no data means no figure');
-
-    // One worker reporting a lot must not be enough for a 4-worker search.
-    for (let k = 0; k < need * 5; k++) api.recordLiveRate(0, 100);
-    eq(api.liveAggregateKeysPerSecond(4), null,
-        'a single reporting worker must not stand in for four');
-
-    // Three of four workers still incomplete.
-    for (let k = 0; k < need; k++) api.recordLiveRate(1, 200);
-    for (let k = 0; k < need; k++) api.recordLiveRate(2, 300);
-    for (let k = 0; k < need - 1; k++) api.recordLiveRate(3, 400);
-    eq(api.liveAggregateKeysPerSecond(4), null, 'three of four is still partial');
-
-    // The last worker completes: now the aggregate is the SUM of all four.
-    api.recordLiveRate(3, 400);
-    const total = api.liveAggregateKeysPerSecond(4);
-    ok(total !== null, 'all workers reporting must yield a figure');
-    eq(total, 100 + 200 + 300 + 400, 'the aggregate must be the sum across workers');
-    api.resetLiveRates();
+        await api.startMining();
+        // Deliver progress from every worker, exactly as a running search does.
+        for (const w of workerPool.filter((x) => !x.terminated)) {
+            w.deliver({
+                type: 'progress',
+                attempts: 50000,
+                rate: 1234,
+                elapsed: 10,
+                expectedAttempts: 65536,
+            });
+        }
+        eq(api.getEstimateText(), before,
+            'the grey estimate must not change when progress arrives');
+        await api.stopMining();
+    });
 });
 
-check('live rate: replaces a worker\'s own sample instead of accumulating', () => {
-    api.resetLiveRates();
-    const need = api.LIVE_RATE_MIN_SAMPLES;
-    for (let k = 0; k < need; k++) api.recordLiveRate(0, 100);
-    eq(api.liveAggregateKeysPerSecond(1), 100, 'the first sample is the figure');
-    // A newer report from the same worker supersedes the old one.
-    for (let k = 0; k < 5; k++) api.recordLiveRate(0, 250);
-    eq(api.liveAggregateKeysPerSecond(1), 250,
-        'a worker must hold its newest rate, not a running total of its rates');
-    api.resetLiveRates();
+await asyncCheck('the grey estimate never claims to be "measured"', async () => {
+    // "measured" was the label the live flip produced. With the flip gone the
+    // label is "estimated" (before the page has calibrated) or "calibrated"
+    // (after). A grey line reading "measured" would be asserting something about
+    // a search that had not happened.
+    await withSodium(async () => {
+        primeForm();
+        api.updateEstimate();
+        const text = api.getEstimateText();
+        ok(!/\bmeasured\b/.test(text),
+            `a static pre-flight line must not be labelled measured: ${text}`);
+        await api.startMining();
+        for (const w of workerPool.filter((x) => !x.terminated)) {
+            w.deliver({
+                type: 'progress',
+                attempts: 50000,
+                rate: 4321,
+                elapsed: 10,
+                expectedAttempts: 65536,
+            });
+        }
+        ok(!/\bmeasured\b/.test(api.getEstimateText()),
+            `still must not be labelled measured mid-search: ${api.getEstimateText()}`);
+        await api.stopMining();
+    });
 });
 
-check('live rate: rejects nonsense and never reports a non-positive figure', () => {
-    api.resetLiveRates();
-    const need = api.LIVE_RATE_MIN_SAMPLES;
-    for (const bad of [0, -1, NaN, Infinity, 'x', null, undefined]) {
-        for (let k = 0; k < need * 2; k++) api.recordLiveRate(0, bad);
+await asyncCheck('the live panel carries the live figures the grey line used to duplicate', async () => {
+    // The whole reason removing the live flip is safe: everything it showed is
+    // still on screen, and still live.
+    await withSodium(async () => {
+        primeForm();
+        await api.startMining();
+        for (const w of workerPool.filter((x) => !x.terminated)) {
+            w.deliver({
+                type: 'progress',
+                attempts: 50000,
+                rate: 4321,
+                elapsed: 10,
+                expectedAttempts: 65536,
+            });
+        }
+        eq(api.getLiveEtaText('live-attempts'), '50,000',
+            'attempts must still be shown live');
+        ok(/4,321\/s/.test(api.getLiveEtaText('live-rate')),
+            `the rate must still be shown live: ${api.getLiveEtaText('live-rate')}`);
+        ok(/\d+\.\d\d%/.test(api.getLiveEtaText('live-progress')),
+            `progress must still be shown live: ${api.getLiveEtaText('live-progress')}`);
+        await api.stopMining();
+    });
+});
+
+check('the removed live-rate self-calibration is gone, not just unwired', () => {
+    // Dead machinery whose comments claimed it was "the whole point" is worse
+    // than none: it invites the next reader to trust a path nothing exercises.
+    for (const gone of ['liveWorkerRates', 'liveRateSamples', 'recordLiveRate',
+        'liveAggregateKeysPerSecond', 'liveRateIsComplete', 'LIVE_RATE_MIN_SAMPLES',
+        'resetLiveRates']) {
+        ok(!new RegExp(`\\b${gone}\\b`).test(source),
+            `${gone} must be removed from the page, not merely unreferenced`);
     }
-    eq(api.liveAggregateKeysPerSecond(1), null,
-        'a worker that only ever reports nonsense must yield no figure');
-    eq(api.liveRateIsComplete(1), false,
-        'and must not count as complete');
-    api.resetLiveRates();
 });
 
-check('live rate: a zero or nonsensical worker count is never complete', () => {
-    api.resetLiveRates();
-    for (const n of [0, -1, NaN, undefined, null, 'x']) {
-        eq(api.liveRateIsComplete(n), false, `liveRateIsComplete(${n}) must be false`);
-        eq(api.liveAggregateKeysPerSecond(n), null,
-            `liveAggregateKeysPerSecond(${n}) must be null`);
-    }
-    api.resetLiveRates();
-});
-
-check('the grey estimate flips from estimated to measured', () => {
-    // The point of the whole exercise: after a moment of running, the figure the
-    // user plans around is a measurement of THIS machine, not a table measured
-    // on someone else's.
-    navigatorMock.hardwareConcurrency = 4;
-    getElementById('prefix').value = 'ab';
-    getElementById('suffix').value = '';
-    api.resetLiveRates();
-
-    api.updateEstimate();
-    const modelled = api.getEstimateText();
-    ok(/keys\/s (estimated|calibrated)\)/.test(modelled),
-        `with no live data the line must not claim to be measured: ${modelled}`);
-
-    const need = api.LIVE_RATE_MIN_SAMPLES;
-    for (let k = 0; k < need; k++) {
-        api.recordLiveRate(0, 1000);
-        api.recordLiveRate(1, 1000);
-        api.recordLiveRate(2, 1000);
-        api.recordLiveRate(3, 1000);
-    }
-    api.updateEstimate();
-    const measured = api.getEstimateText();
-    ok(/keys\/s measured\)/.test(measured),
-        `with full live data the line must be labelled measured: ${measured}`);
-    // 4 workers x 1000 keys/s = 4000, which is far above what the table models.
-    ok(/up to 4,000 keys\/s/.test(measured),
-        `the measured aggregate must drive the headline, not the model: ${measured}`);
-
-    api.resetLiveRates();
-    navigatorMock.hardwareConcurrency = 8;
-});
-check('the grey estimate reports the worker count its rate describes', () => {
-    // The line must never contradict itself. Pre-flight the count is the PLANNED
-    // one; once the rate is measured it is the number actually running. Saying
-    // "8 workers" beside a figure derived from six - because two failed to
-    // initialise - would be exactly the invented precision this line exists to
-    // avoid.
-    navigatorMock.hardwareConcurrency = 8;
-    getElementById('prefix').value = 'ab';
-    api.resetLiveRates();
-    api.updateEstimate();
-    ok(/\(8 workers,/.test(api.getEstimateText()),
-        `pre-flight must report the planned worker count: ${api.getEstimateText()}`);
-
-    // Stand in six running workers using the existing test hook, so no
-    // test-only production code is needed just to control the worker count.
-    api.terminateAllWorkers();
-    for (let i = 0; i < 6; i++) api.__trackWorker({ terminate() {} });
-
-    const need = api.LIVE_RATE_MIN_SAMPLES;
-    for (let k = 0; k < need; k++) {
-        for (let w = 0; w < 6; w++) api.recordLiveRate(w, 1000);
-    }
-    api.updateEstimate();
-    const txt = api.getEstimateText();
-    ok(/\(6 workers,/.test(txt),
-        `a measured rate over 6 workers must be labelled 6, not 8: ${txt}`);
-    ok(/up to 6,000 keys\/s measured/.test(txt),
-        `and the figure must be the sum over those same 6 workers: ${txt}`);
-
-    api.terminateAllWorkers();
-    api.resetLiveRates();
-    navigatorMock.hardwareConcurrency = 8;
-});
-
-check('live rate: a dead worker is excluded from the aggregate', () => {
-    // Regression. liveWorkerRates is keyed by worker index and is never pruned
-    // during a run, so an entry survives its worker. The aggregate used to sum
-    // the whole map, which kept counting a worker that had died since it last
-    // reported: with one of four workers failing it reported 4000 keys/s for
-    // three working at 1000 each - 33% inflation, and an ETA that looked better
-    // than the search actually was.
-    const need = api.LIVE_RATE_MIN_SAMPLES;
-    api.resetLiveRates();
-    for (let k = 0; k < need; k++) {
-        for (let w = 0; w < 4; w++) api.recordLiveRate(w, 1000);
-    }
-    eq(api.liveAggregateKeysPerSecond(4), 4000, 'all four reporting');
-
-    // Worker 3 dies: the main thread's worker count drops, the map does not.
-    eq(api.liveAggregateKeysPerSecond(3), 3000,
-        'the aggregate must count only the workers still running');
-    eq(api.liveAggregateKeysPerSecond(2), 2000,
-        'and shrink again as more workers go away');
-    eq(api.liveAggregateKeysPerSecond(1), 1000,
-        'down to a single worker');
-
-    // Completeness is now judged over the LIVE slice. A worker that never
-    // reported at all must still block the figure, even if dead workers filled
-    // the map to a sufficient size.
-    api.resetLiveRates();
-    for (let k = 0; k < need; k++) api.recordLiveRate(7, 5000);
-    eq(api.liveAggregateKeysPerSecond(2), null,
-        'an unreported live worker must block the figure even when the map is full');
-    api.resetLiveRates();
-});
-
-check('live rate: a worker that never reported blocks the figure', () => {
-    // The companion case to the above: the map can be large because many
-    // workers reported over the run, but if the LOWEST-indexed workers are not
-    // among them, there is no trustworthy aggregate.
-    const need = api.LIVE_RATE_MIN_SAMPLES;
-    api.resetLiveRates();
-    for (let k = 0; k < need; k++) api.recordLiveRate(1, 1000);
-    for (let k = 0; k < need; k++) api.recordLiveRate(2, 1000);
-    eq(api.liveAggregateKeysPerSecond(3), null,
-        'worker 0 never reported, so a 3-worker figure is not trustworthy');
-    for (let k = 0; k < need; k++) api.recordLiveRate(0, 1000);
-    eq(api.liveAggregateKeysPerSecond(3), 3000,
-        'once every live worker has reported, the figure appears');
-    api.resetLiveRates();
-});
-check('resetLiveRates drops the measurements with the run', () => {
-    // A stale aggregate must not survive into the next search, or the estimate
-    // would keep claiming to be measured after the workers that produced it are
-    // gone.
-    const need = api.LIVE_RATE_MIN_SAMPLES;
-    api.resetLiveRates();
-    for (let k = 0; k < need; k++) api.recordLiveRate(0, 500);
-    ok(api.liveAggregateKeysPerSecond(1) !== null, 'precondition: data present');
-    api.resetLiveRates();
-    eq(api.liveAggregateKeysPerSecond(1), null,
-        'after a reset there must be no measured rate');
-});
 // ---- Live ETA layout ------------------------------------------------------
 // As one string the ETA reflowed whenever a field changed digit count, so the
 // figures visibly hopped. It is now split into slots that each reserve their

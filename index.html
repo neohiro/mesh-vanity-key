@@ -935,10 +935,14 @@
         // no event loop, no UI thread, no postMessage per progress report. The
         // browser may well be slower, and the old browser-only measurement was
         // 2.3x at 8 threads - below everything here. So treat the table as the
-        // best available evidence, not as ground truth, and note that
-        // liveAggregateKeysPerSecond() below corrects it within seconds of a
-        // search starting: the pre-flight estimate is a starting guess, and
-        // the running estimate is measured.
+        // best available evidence, not as ground truth.
+        //
+        // On this machine that caveat no longer bites: the browser measures its
+        // own scaling curve on the first search and caches it (see the
+        // calibration below), and ratePerWorker() above is measured on the same
+        // CPU. So the pre-flight estimate is grounded in this machine rather
+        // than imported - which is what makes it safe for the grey line to be
+        // static instead of being revised mid-search.
         //
         // To re-measure on different hardware, replace this table with fresh
         // bench_keygen_scaling.mjs output and update the README table beside
@@ -1289,77 +1293,22 @@ function effectiveScalePoints() {
             return Math.min(v, WORKER_SCALE_MAX);
         }
 
-        // Live aggregate rate, measured rather than modelled.
+        // There used to be a live-rate self-calibration here: every worker's
+        // reported rate was collected, and once each had reported twice the grey
+        // pre-flight line was REWRITTEN from the modelled rate to the measured
+        // one. That made the estimate a moving target mid-search, duplicating
+        // what the green live-logs panel already shows from the same samples -
+        // the live rate, the progress figure and an ETA computed from each
+        // worker's own reported rate.
         //
-        // Every worker reports its own attempts/elapsed every REPORT_EVERY_MS.
-        // Summing those across the workers that have reported gives the ACTUAL
-        // aggregate throughput of this machine, right now - which is strictly
-        // better evidence than any table of numbers measured elsewhere.
+        // It is removed, not merely unwired. With the grey line static there is
+        // nothing left to read it, and dead machinery whose comments claimed it
+        // was "the whole point" is worse than none: it invites the next reader
+        // to trust a code path that nothing exercises.
         //
-        // This is what stops the scaling table from being load-bearing. The
-        // pre-flight estimate uses workerScale() and is therefore a model; a few
-        // seconds into a search the estimate is rebuilt from measurement, so it
-        // is correct on hardware nobody benchmarked.
-        const liveWorkerRates = new Map();   // worker index -> keys/s
-
-        // Ignore the first report from each worker. A worker's first rate is
-        // computed over a very short window and is dominated by startup noise
-        // and the time to fault in the wasm; averaging it in would make the
-        // estimate briefly wrong in the optimistic direction.
-        //
-        // Two, not three: the report interval is 3s, so a third sample would
-        // push the switch from modelled to measured out to ~9s. Two still
-        // discards the startup sample, and lands the panel on real numbers in
-        // about one interval.
-        const LIVE_RATE_MIN_SAMPLES = 2;
-        const liveRateSamples = new Map();   // worker index -> reports seen
-
-        function resetLiveRates() {
-            liveWorkerRates.clear();
-            liveRateSamples.clear();
-        }
-
-        // Record one worker's reported rate. `index` is the worker's position.
-        function recordLiveRate(index, rate) {
-            const r = Number(rate);
-            if (!isFinite(r) || r <= 0) return;
-            const seen = (liveRateSamples.get(index) || 0) + 1;
-            liveRateSamples.set(index, seen);
-            if (seen < LIVE_RATE_MIN_SAMPLES) return;
-            liveWorkerRates.set(index, r);
-        }
-
-        // True once every live worker has enough samples to be trusted. Partial
-        // data would understate the aggregate and so overstate the ETA.
-        //
-        // `liveWorkerRates` is keyed by worker index and is never pruned during a
-        // run, so it can hold entries for workers that have since died. Only the
-        // first `expectedWorkers` indices correspond to workers that are still
-        // running, so completeness is checked over THAT slice rather than over
-        // the map as a whole.
-        function liveRateIsComplete(expectedWorkers) {
-            const want = Number(expectedWorkers);
-            if (!isFinite(want) || want <= 0) return false;
-            for (let i = 0; i < want; i++) {
-                const r = liveWorkerRates.get(i);
-                if (r === undefined || !isFinite(r) || r <= 0) return false;
-            }
-            return true;
-        }
-
-        // Measured aggregate keys/s, or null when there is nothing trustworthy.
-        //
-        // Sums ONLY the live workers. Summing the whole map would keep counting
-        // a worker that has died since it last reported, inflating the aggregate
-        // and making the ETA look better than the search actually is - verified
-        // to overstate throughput by 33% when one of four workers fails.
-        function liveAggregateKeysPerSecond(expectedWorkers) {
-            const want = Number(expectedWorkers);
-            if (!liveRateIsComplete(want)) return null;
-            let sum = 0;
-            for (let i = 0; i < want; i++) sum += liveWorkerRates.get(i);
-            return sum > 0 ? sum : null;
-        }
+        // What keeps the pre-flight figure honest instead is the per-machine
+        // calibration below, which measures ratePerWorker() and the scaling
+        // curve on this CPU rather than importing them from other hardware.
 
         function updateEstimate() {
             const prefix = document.getElementById('prefix').value;
@@ -1390,22 +1339,28 @@ function effectiveScalePoints() {
             const scale = workerScale(numWorkers);
             const modelledRate = ratePerWorker() * scale;
 
-            // Prefer the MEASURED aggregate once enough workers have reported.
-            // This is the whole point: the modelled figure above is a table
-            // measured on different hardware, while this is what this machine is
-            // actually doing. It converges within a couple of seconds of a
-            // search starting and is then correct on any hardware, benchmarked
-            // or not.
-            const liveRate = liveAggregateKeysPerSecond(workers.length || numWorkers);
-            const usingLive = liveRate !== null;
-            const totalRate = usingLive ? liveRate : modelledRate;
+            // This line is STATIC for the duration of a search, and is the
+            // pre-flight projection only. It used to be rewritten on every
+            // progress event so it could flip from "estimated" to "measured"
+            // once the workers had reported. That was the wrong place for a
+            // moving number: the green live-logs panel beside it already shows
+            // what is actually happening - attempts, the live rate, progress and
+            // a live ETA computed from each worker's own reported rate. Two
+            // figures changing under the user at once, one of them in grey
+            // above the other, made the pre-flight line look like part of the
+            // live read-out when it is a projection made before any work
+            // started.
+            //
+            // It is still a projection worth trusting, because ratePerWorker()
+            // and workerScale() are both measured on THIS machine now (the
+            // scaling curve is calibrated and cached per machine), so this is
+            // no longer a number imported from other hardware.
+            const totalRate = modelledRate;
 
             // Say which one the user is looking at. Without this a user would
             // have no way of knowing whether the figure is a measurement or a
             // guess, and would reasonably assume the stronger claim.
-            const rateLabel = usingLive
-                ? 'measured'
-                : (calibratedRatePerWorker ? 'calibrated' : 'estimated');
+            const rateLabel = calibratedRatePerWorker ? 'calibrated' : 'estimated';
             let timeStr;
             if (totalRate <= 0 || !isFinite(expected / totalRate)) {
                 timeStr = 'unknown (calibrating...)';
@@ -1423,12 +1378,11 @@ function effectiveScalePoints() {
             }
             // Report the count that the rate actually describes.
             //
-            // Pre-flight, that is the planned worker count. Once the rate is
-            // measured it is the number of workers actually running - if some
-            // failed to initialise, saying "8 workers" beside a figure derived
-            // from six would be a straight contradiction, and the whole point of
-            // this line is that its numbers are measurements.
-            const shownWorkers = usingLive ? (workers.length || numWorkers) : numWorkers;
+            // Pre-flight, that is the planned worker count: this line is never
+            // rewritten mid-search, so there is no "actually running" count to
+            // contradict it. If some workers fail to initialise the live panel
+            // shows the real figure.
+            const shownWorkers = numWorkers;
             const workerLabel = shownWorkers === 1 ? 'worker' : 'workers';
             // Only actual measurements go in the grey line: expected attempts,
             // estimated time, worker count and the measured keys/s rate.
@@ -1721,7 +1675,6 @@ function detectOptimalWorkers() {
             resetRateSmoothing();
             resetEtaSmoothing();
             resetRateGraph();
-            resetLiveRates();
             resetLiveLogs(numWorkers, navigator.hardwareConcurrency || '-');
             // Only a genuinely transient state. clearStatusText() drops this the
             // moment the first worker reports, so it can never sit on screen for
@@ -2099,20 +2052,6 @@ function detectOptimalWorkers() {
                         // stays consistent with the reported attempts.
                         smoothRate(rate);
                         const liveRateStr = Math.round(emaRate).toLocaleString() + '/s';
-
-                        // Feed the self-calibration. Once every worker has
-                        // reported enough times, updateEstimate() switches the
-                        // grey line from the modelled rate to this measured one.
-                        // `i` is this worker's index; keying by it means a
-                        // worker's newest sample replaces its own previous one
-                        // rather than accumulating.
-                        recordLiveRate(i, rate);
-                        // Re-derive the grey line so it flips from "estimated"
-                        // to "measured" as soon as there is real data. This runs
-                        // at most every REPORT_EVERY_MS per worker and only
-                        // rewrites one text node, so it is cheaper than tracking
-                        // a transition flag and a second update path.
-                        updateEstimate();
 
                         // Feed the 2x2 live-logs grid. This replaces the old
                         // "Live estimate: ETA ... at .../s" line, which repeated
@@ -2540,7 +2479,6 @@ function detectOptimalWorkers() {
             // The measured rates belong to the run that just ended; a stale
             // aggregate would keep labelling the next estimate "measured" after
             // the workers that produced it are gone.
-            resetLiveRates();
             clearStatusText();
             updateEstimate();
         }
