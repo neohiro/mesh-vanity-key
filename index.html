@@ -1116,13 +1116,18 @@
             // advertised. Provenance stays in WORKER_SCALE_MEASURED and the
             // README's "Worker scaling" section.
             estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString()
-                // A real newline after each fact rather than a space. The
-                // `|` separators are a desktop affordance; on a narrow screen
-                // they end up dangling at the start of a wrapped line, and the
+                // These newlines are NOT conditional. `white-space: pre-line`
+                // honours them on every screen, so the estimate is always three
+                // short labelled lines rather than one long one. That is
+                // deliberate: a single-line summary of four facts (attempts,
+                // time, workers, rate) was cramped to read even where it fitted,
+                // and could not be made to fit where it did not. Three lines,
+                // each naming one fact, is scannable at any width and cannot
+                // overflow at any width.
+                //
+                // The `|` separators this replaced were a desktop affordance
+                // that stranded at the start of wrapped lines - and the
                 // estimate was the one element that could widen the page.
-                // A newline is a break opportunity the browser will use only if
-                // it has to, so wide screens keep the single-line summary and a
-                // phone gets one fact per line.
                 + '\nEstimated time: ~' + timeStr
                 + '\n(' + shownWorkers + ' ' + workerLabel
                 + ', up to ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel

@@ -891,7 +891,13 @@ def main() -> int:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     # nargs="?" so `--version` works standalone; validated below when omitted.
-    parser.add_argument("prefix", nargs="?", help="Target prefix (e.g., neohiro)")
+    parser.add_argument(
+        "prefix",
+        nargs="?",
+        metavar="pattern",
+        help="The text to match (e.g., neohiro). Matched against the START of "
+        "the encoded key unless --suffix or --both says otherwise.",
+    )
     parser.add_argument(
         "--encoding",
         choices=["base64", "base64url", "base58", "hex", "bech32"],
@@ -907,17 +913,23 @@ def main() -> int:
     parser.add_argument(
         "--case-sensitive",
         action="store_true",
-        help="Match prefix case-sensitively",
+        help="Match the pattern case-sensitively",
     )
     parser.add_argument(
         "--suffix",
         action="store_true",
-        help="Match suffix instead of prefix (checks last N chars of encoded key)",
+        help="Match the pattern against the END of the encoded key instead of "
+        "the start (checks the last N chars). A switch, not a value: the "
+        "pattern still comes from the positional argument, so it is "
+        "`--suffix` and not `--suffix 7f`.",
     )
     parser.add_argument(
         "--both",
         action="store_true",
-        help="Match both prefix AND suffix with the same pattern (e.g., --both 01010101)",
+        help="Require the pattern at BOTH the start and the end, using that "
+        "SAME pattern for each end (e.g. `--both 0101` matches keys starting "
+        "and ending with 0101). A switch, not a value, and it cannot express a "
+        "prefix and a different suffix. Costs multiply, so keep it short.",
     )
     parser.add_argument(
         "--max-attempts",

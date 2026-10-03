@@ -393,7 +393,8 @@ Examples:
 
 ```bash
 ./run.sh abcd                        # fastest: 4 hex chars, ~65k attempts
-./run.sh abc --suffix 7f              # prefix AND suffix
+./run.sh 7f --suffix                 # match the END of the key, not the start
+./run.sh abcd --both                 # match BOTH ends with the same pattern
 ./run.sh mc1q --encoding bech32       # a MeshCore address
 ./run.sh abcd --encoding base58 --workers 8
 ```
@@ -505,27 +506,42 @@ python meshcore_vanity.py ab --encoding hex --workers 4
 
 Uses 4 parallel processes to speed up the search.
 
-### Output private key (use with caution)
+### The private key is printed by default
+
+Every successful search prints the private key to **stderr**, in three
+copy-pasteable forms:
+
+- Base64-encoded raw private key (`PRIVATE_KEY_BASE64=`)
+- MeshCore expanded private key, hex uppercase (`MESHCORE_PRIV_HEX=`)
+- A ready-to-use `set prv.key` command
+
+This is the default because the alternative is bad: if the key is not printed,
+the only way to recover it is to run the search again, which costs anywhere
+from seconds to days of CPU. The key is on stderr rather than stdout so that
+piping stdout somewhere does not silently write your private key into that
+destination — only the public key goes to stdout.
+
+To suppress it, pass `--no-output-private`:
 
 ```bash
 python meshcore_vanity.py ab --encoding hex --no-output-private
 ```
 
-Prints the private key in multiple formats to stderr:
-- Base64-encoded raw private key
-- MeshCore expanded private key (hex, uppercase)
-- Ready-to-use `set prv.key` command
+Worth using when stderr goes somewhere a secret should not end up — CI logs, a
+shared terminal, or a piped dashboard. Note that a shell history, a CI log, or
+a scrollback buffer will all capture the default output, so treat any terminal
+you search in as one that now holds a private key.
 
 ## Command-Line Options
 
 | Option | Default | Description |
 |---|---|---|
-| `prefix` (positional) | — | Target pattern to match |
+| `pattern` (positional) | — | The text to match. Matched against the **start** of the encoded key by default; `--suffix` and `--both` change where it is matched. |
 | `--encoding` | `base64` | Key encoding: `hex`, `base64`, `base64url`, `base58`, `bech32` |
 | `--hrp` | `mc` | Human-readable part for bech32 encoding |
-| `--case-sensitive` | off | Match prefix case-sensitively |
-| `--suffix` | off | Match suffix instead of prefix |
-| `--both` | off | Match both prefix and suffix |
+| `--case-sensitive` | off | Match the pattern case-sensitively |
+| `--suffix` | off | Switch: match the pattern against the **end** of the encoded key instead of the start. Takes no value of its own — the pattern still comes from the positional argument. |
+| `--both` | off | Switch: require the pattern at **both** the start **and** the end, using that **same** pattern for each end. Takes no value of its own. |
 | `--max-attempts` | unlimited | Stop after N attempts |
 | `--progress-interval` | 100000 | Progress report frequency |
 | `--no-output-private` | off | Suppress the private key, which is printed to stderr by default |
@@ -533,6 +549,21 @@ Prints the private key in multiple formats to stderr:
 | `--workers` | all CPU cores (max 256) | Number of parallel processes (forced to 1 for searches expected to finish in under a second) |
 | `-f`, `--force` | off | Skip the pre-search estimate confirmation |
 | `--version` | | Print version and the loaded file path, then exit |
+
+The pattern always comes from the positional argument. `--suffix` and `--both`
+are switches, not options that take a pattern — writing `--suffix 7f` is an
+error, because `7f` would be a second pattern and the tool does not accept two:
+
+| Goal | Command | Matches |
+|---|---|---|
+| Start only (default) | `run.sh abcd` | keys **starting with** `abcd` |
+| End only | `run.sh 7f --suffix` | keys **ending with** `7f` |
+| Both ends, one pattern | `run.sh abcd --both` | keys **starting and ending with** `abcd` |
+
+`--both` uses the same pattern at both ends, so it cannot ask for a prefix and
+a *different* suffix. Each end carries its own search cost, which multiplies —
+`--both abcd` is roughly 65k² attempts, so use it only with short patterns.
+`--both` together with `--suffix` is rejected, since they contradict.
 
 ## Supported Encodings
 
