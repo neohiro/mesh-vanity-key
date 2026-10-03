@@ -170,7 +170,8 @@ Regression guards:
 |---|---|
 | `node tools/verify_worker_math.mjs` | the byte-walk is arithmetically identical to the previous BigInt/hex implementation, including 2²⁵⁶ carry and wraparound |
 | `node tools/bench_worker.mjs <worker.js>` | wrapper overhead with a stubbed (free) keygen; must stay far above the keygen cost. Runs three trials and reports the best, so JIT warm-up or a descheduled shared vCPU cannot fail an otherwise healthy run — a real regression drops every trial and still fails hard |
-| `node tools/bench_worker_scaling.mjs` | aggregate throughput vs worker count, using real OS threads. Corroborates the scaling figure in "Worker scaling" below, but is **not** a substitute for a browser run — see the note there for why the two differ |
+| `node tools/bench_worker_scaling.mjs` | aggregate throughput vs worker count, using a synthetic ALU+table workload. Reports higher scaling than is real - its workload is ILP-friendly - so prefer the keygen probe below |
+| `node tools/bench_keygen_scaling.mjs` | aggregate keys/s vs thread count using the **real** `crypto_sign_seed_keypair` from the shipped wasm. The trustworthy of the two scaling probes — see "Worker scaling" |
 
 > **Careful:** never write `if (++bytes[i] !== 0)`. Incrementing a `Uint8Array`
 > element returns the *unclamped* value (`256`, not `0`), so the carry test never
@@ -221,18 +222,41 @@ Two effects explain the shortfall: SMT siblings sharing one physical core do not
 get independent execution units (so 4→8 threads buys far less than 2x), and the
 workers contend for memory bandwidth.
 
-> **Worth re-measuring before trusting the 2.3x.** `node tools/bench_worker_scaling.mjs`
-> measures the same shape with real OS threads. On the same class of host
-> (verified: i3-10105, 4 physical / 8 logical — the same topology as the
-> reference host) it reaches **~6.4x at 8 threads**, not 2.3x.
+> **Worth re-measuring before trusting the 2.3x.** Two probes disagree with it,
+> and the one that uses the real primitive is the one to believe.
 >
-> That is not a contradiction, and the constant has deliberately **not** been
-> changed on the strength of it. The probe has no main thread to keep responsive,
-> no WASM instance shared between workers, and no `postMessage` per progress
-> report. So the gap points at contention on something *shared* in the browser —
-> most plausibly the UI thread — rather than at the crypto. Re-measure with
-> `tools/bench_real_browser.mjs` in a real browser and update the constant, the
-> page's `MEASUREMENT BASIS` comment and this table together.
+> `node tools/bench_keygen_scaling.mjs` runs the shipped `libsodium.wasm`'s
+> actual `crypto_sign_seed_keypair` across N OS threads. On the reference-class
+> host (verified: i3-10105, 4 physical / 8 logical — the same topology as the
+> recorded reference host):
+>
+> | Threads | Aggregate keys/s | vs 1 thread |
+> |---|---|---|
+> | 1 | 23,934 | 1.00x |
+> | 2 | 47,157 | 1.97x |
+> | 4 | 81,885 | 3.42x |
+> | 8 | 97,555 | **4.08x** |
+>
+> So real keygen scales to roughly **4x**, not 2.3x. SMT siblings still add ~19%
+> over four threads, which is why saturating every *logical* core is correct and
+> there is no throughput left to win on the worker-count axis.
+>
+> (`tools/bench_worker_scaling.mjs`, which uses a synthetic ALU+table workload,
+> reports ~6.4x. That probe is misleading on its own — its workload is
+> ILP-friendly with a small working set, so it does not contend the way real
+> keygen does.)
+>
+> **The constant has deliberately not been changed.** A Node thread pool has no
+> event loop, no UI thread and no `postMessage` per progress report, so raising
+> it on this evidence would make every ETA optimistic on the strength of a proxy.
+> Re-measure with `tools/bench_real_browser.mjs` in a real browser, then update the
+> constant, the page's `MEASUREMENT BASIS` comment and the table below together.
+>
+> One thing to check when doing that: the power-law fit is anchored only at 8
+> threads, and the measured real-crypto curve is much flatter at the low end
+> than a single-anchor fit predicts — against these numbers it would say ~1.6x
+> at 2 threads (measured 1.97x) and ~2.5x at 4 (measured 3.42x). Recording the
+> intermediate points may matter more than the 8-thread anchor.
 >
 > The number is user-visible on every estimate: raising it shortens every ETA,
 > lowering it lengthens them.

@@ -433,9 +433,11 @@ check('updateEstimate: uses "1 worker" (singular) when one core is available', (
     const txt = getElementById('estimate').textContent;
     ok(txt.includes('1 worker,'), `expected "1 worker," in: ${txt}`);
     ok(!txt.includes('1 workers'), `must not say "1 workers": ${txt}`);
-    // "workers share cores" explains the caveat; that is not the plural bug.
-    ok(!/(?<!share cores, so )\bworkers\b(?! share cores)/.test(txt.replace(/workers share cores/g, '')),
-        `must not use plural for the count: ${txt}`);
+    // The estimate no longer carries the "workers share cores" caveat, so the
+    // plural check no longer needs a carve-out for it - every bare "workers"
+    // must be the count, and it must be singular.
+    ok(!/\bworkers\b/.test(txt),
+        `must not use the plural at all for one worker: ${txt}`);
 });
 
 check('updateEstimate: uses "N workers" (plural) for multiple cores', () => {
@@ -1127,23 +1129,37 @@ check('background: subtle gradient and rare star flickers, reduced-motion safe',
         'content must sit above the starfield');
 });
 
-check('estimate: states the measured scale instead of hedging', () => {
+check('estimate: shows only measurements, not the scaling model', () => {
     const html = fs.readFileSync(pageHtmlPath, 'utf8');
-    // The scaling factor's provenance now lives only in WORKER_SCALE_MEASURED
-    // and the README's "Worker scaling" section. It was also printed inline,
-    // where it added a long clause that wrapped the whole line on a narrow
-    // screen, so it is asserted ABSENT to keep it from creeping back.
+    // The grey line carries only actual measurements: expected attempts,
+    // estimated time, worker count, measured keys/s.
+    //
+    // Both halves of the old parenthetical are now gone. The provenance
+    // ("scale derived from 2.3x at 8 threads") went first because it named a
+    // measurement made on a different host; the multiplier itself
+    // ("improvement is only ~2.3x at 8 threads") went next because it is a
+    // property of the extrapolation model rather than a measurement of the
+    // machine actually running the search.
+    //
+    // The model still drives totalRate and therefore the ETA. It is just not
+    // advertised - WORKER_SCALE_MEASURED and the README's "Worker scaling"
+    // section remain the documented home for it.
     ok(!/scale derived from 2\.3x at 8 threads/.test(html),
-        'the estimate must not print the scaling factor\'s provenance inline');
-    ok(/improvement is only ~/.test(html),
-        'the estimate must state the improvement multiplier');
+        "the estimate must not print the scaling factor's provenance inline");
+    // Strip comments before scanning for the removed wording: the rationale
+    // comment above updateEstimate quotes the old text on purpose, and a
+    // whole-file scan would flag its own explanation.
+    const code = html.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+    ok(!/improvement is only ~/.test(code),
+        'the estimate must not advertise the scaling multiplier');
+    ok(!/workers share cores/.test(code),
+        'the cores-sharing caveat must not appear in the estimate');
     ok(!/so actual will be lower/.test(html),
         'the vague "actual will be lower" caveat must be gone');
-    // The multiplier itself must survive the removal, otherwise the estimate
-    // would go back to quietly implying linear scaling.
-    ok(/improvement is only ~['"]?\s*\+?\s*scale\.toFixed/.test(html)
-        || /improvement is only ~/.test(html),
-        'the estimate must still disclose the actual multiplier');
+    // And the measurements it DOES show must all still be wired up.
+    ok(/Expected attempts:/.test(html), 'expected attempts must still be shown');
+    ok(/Estimated time: ~/.test(html), 'estimated time must still be shown');
+    ok(/keys\/s/.test(html), 'the measured rate must still be shown');
 });
 
 check('progress: no duplicate id and no stale status under the panel', () => {
@@ -2084,10 +2100,24 @@ check('estimate omits the scaling provenance clause', () => {
     const txt = api.getEstimateText();
     ok(!/scale derived from/.test(txt),
         `the provenance clause must not be printed: ${txt}`);
-    // The multiplier is the part that carries the meaning, so it must stay.
-    ok(/improvement is only ~\d/.test(txt),
-        `the multiplier must still be stated: ${txt}`);
+    // Only actual measurements belong in the grey line: attempts, time, worker
+    // count and the measured keys/s. The worker-scaling multiplier is a property
+    // of the extrapolation model, not a measurement of this machine, so it is
+    // no longer advertised. It still drives totalRate, and therefore the ETA.
+    ok(!/improvement is only/.test(txt),
+        `the scaling multiplier must not be advertised: ${txt}`);
+    ok(!/\d+\.\d+x at \d+ threads/.test(txt),
+        `no per-thread scaling baseline may appear: ${txt}`);
+    ok(!/workers share cores/.test(txt),
+        `the cores-sharing caveat is part of the removed clause: ${txt}`);
+    // The measured figures must all still be there.
     ok(/keys\/s/.test(txt), 'the rate must still be stated');
+    ok(/Expected attempts: [\d,]+/.test(txt),
+        `expected attempts must still be stated: ${txt}`);
+    ok(/Estimated time: ~\S+/.test(txt),
+        `estimated time must still be stated: ${txt}`);
+    ok(/\d+ workers?/.test(txt),
+        `the worker count must still be stated: ${txt}`);
     getElementById('prefix').value = '';
     api.updateEstimate();
 });
@@ -2191,13 +2221,31 @@ check('live log values are right-aligned, including on mobile', () => {
     ok(/@media \(max-width: 420px\)/.test(html), 'there is a mobile breakpoint');
 });
 
-check('the pre-flight estimate says it is an upper bound', () => {
+check('the pre-flight estimate presents the rate as a ceiling', () => {
     // Calibration is single-core; workers then share those cores, so rate x
-    // workers is unreachable. The label must not read as a promise.
+    // workers is unreachable and the headline must not read as a promise.
+    //
+    // The rate keeps its "up to" hedge, which is what carries that caveat now.
+    // The explanatory clause that used to spell out the cores-sharing ("workers
+    // share cores, improvement is only ~2.3x at 8 threads") is gone from the
+    // grey line, since it described the extrapolation model rather than a
+    // measurement of the running machine.
     const html = fs.readFileSync(pageHtmlPath, 'utf8');
-    ok(/workers share cores/.test(html),
-        'estimate must disclose that workers share cores');
     ok(/up to /.test(html), 'rate must be presented as a ceiling');
+    // Guard the wording that replaced it: the rate stays explicitly hedged.
+    const txt = (() => {
+        navigatorMock.hardwareConcurrency = 8;
+        getElementById('prefix').value = 'ab';
+        getElementById('suffix').value = '';
+        api.updateEstimate();
+        const t = api.getEstimateText();
+        navigatorMock.hardwareConcurrency = 4;
+        return t;
+    })();
+    ok(/up to [\d,]+ keys\/s/.test(txt),
+        `the live estimate must keep the "up to" ceiling: ${txt}`);
+    ok(!/improvement is only/.test(txt),
+        `and must not reintroduce the multiplier: ${txt}`);
 });
 
 check('formatElapsed: human units for long searches', () => {

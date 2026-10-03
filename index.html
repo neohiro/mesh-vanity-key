@@ -844,19 +844,32 @@
         // this re-measurable, and it is worth reading before trusting the 2.3x.
         // On the same class of host (verified: i3-10105, 4 physical / 8 logical
         // - the same topology as the reference host) N plain OS threads doing
-        // comparable ALU + table work reach ~6.4x at 8 threads, not 2.3x. That
-        // gap is not a contradiction: the probe has no main thread to keep
-        // responsive, no WASM instance shared between workers, and no
-        // postMessage per progress report. It suggests the browser figure is
-        // held down by contention on something shared - most likely the UI
-        // thread - rather than by the crypto itself.
+        // comparable ALU + table work reach ~6.4x at 8 threads. That probe is
+        // misleading on its own: the workload is ILP-friendly with a small
+        // working set, so it does not contend the way real keygen does.
         //
-        // The constant is deliberately NOT changed on the strength of that. A
-        // Node thread pool cannot reproduce Web Worker scaling, so editing the
-        // number from it would be guessing. Re-measure in a real browser
-        // (tools/bench_real_browser.mjs) and update both the constant and this
-        // comment together. Raising it makes every ETA shorter; lowering it
-        // makes them longer, so this number is user-visible on every estimate.
+        // tools/bench_keygen_scaling.mjs re-measures with the REAL primitive
+        // (crypto_sign_seed_keypair from the shipped libsodium.wasm) on the same
+        // host, and gets 1.97x at 2 threads, 3.42x at 4, and 4.08x at 8 - i.e.
+        // real keygen scales to about 4x, not 6x and not 2.3x. SMT siblings still
+        // add ~19% over four threads, which is why saturating every LOGICAL core
+        // (detectOptimalWorkers) is the right choice and there is no throughput
+        // left to win on that axis.
+        //
+        // So the recorded 2.3x is probably wrong, and it is the number behind
+        // every ETA the page shows. The constant is STILL deliberately unchanged:
+        // a Node thread pool has no event loop, no UI thread and no per-report
+        // messaging, so raising it on this evidence would make the estimates
+        // optimistic on the strength of a proxy measurement. Confirm with
+        // tools/bench_real_browser.mjs in a real browser, then update the
+        // constant and this comment together.
+        //
+        // One caveat to check when doing that: the power law below is anchored
+        // only at 8 threads, and the measured real-crypto curve is much flatter
+        // at the low end than a single-anchor fit predicts. Against the new
+        // measurements it would say ~1.6x at 2 threads (measured 1.97) and
+        // ~2.5x at 4 (measured 3.42). Recording the intermediate points
+        // alongside the anchor is likely to matter more than the 8-thread value.
         //
         // Only the 8-thread end point was measured directly, so intermediate
         // points come from a power-law fit anchored to that measurement:
@@ -926,20 +939,22 @@
                 }
             }
             const workerLabel = numWorkers === 1 ? 'worker' : 'workers';
-            // The per-worker calibration is a genuine single-core measurement,
-            // but the workers then share those cores, so aggregate throughput is
-            // rate x scale, not rate x workers. State the multiplier explicitly
-            // rather than hedging. The provenance of the scaling factor
-            // (WORKER_SCALE_MEASURED above, and the README's "Worker scaling"
-            // section) is deliberately NOT repeated here: the parenthetical was
-            // long enough to wrap the whole line on a narrow screen, and the
-            // number that matters is the multiplier, which stays.
+            // Only actual measurements go in the grey line: expected attempts,
+            // estimated time, worker count and the measured keys/s rate.
+            //
+            // The worker-scaling multiplier is NOT shown. It used to appear as
+            // "workers share cores, improvement is only ~2.3x at 8 threads",
+            // which is a property of the extrapolation model rather than
+            // anything measured about this machine, and printing it there made
+            // the line long enough to wrap on a narrow screen. The model still
+            // drives `totalRate` and therefore the ETA - it is just not
+            // advertised. Provenance stays in WORKER_SCALE_MEASURED and the
+            // README's "Worker scaling" section.
             estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString()
                 + ' | Estimated time: ~' + timeStr
                 + ' (' + numWorkers + ' ' + workerLabel
                 + ', up to ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel
-                + '; workers share cores, improvement is only ~' + scale.toFixed(1)
-                + 'x at ' + numWorkers + ' threads)';
+                + ')';
         }
 
         // Single formatter for the live progress line. The status line and the live
