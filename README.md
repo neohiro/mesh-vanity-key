@@ -635,7 +635,7 @@ you search in as one that now holds a private key.
 | `--case-sensitive` | off | Force case-sensitive matching. Implied for `base64`/`base64url`/`base58`, whose alphabets are case-sensitive. |
 | `--suffix [PATTERN]` | off | **With no value:** match the positional pattern against the **end** of the key instead of the start. **With a value:** require that value at the end *in addition to* the positional prefix — two independent patterns in one search. |
 | `--both` | off | Require the positional pattern at **both** ends, using that same pattern for each. |
-| `--max-attempts` | unlimited | Stop after N attempts |
+| `--max-attempts` | unlimited | Stop after N attempts. An exact upper bound, except that a budget smaller than the worker count gives every worker one attempt |
 | `--progress-interval` | 100000 | Progress report frequency, in attempts |
 | `--no-output-private` | off | Suppress the private key, which is printed to stderr by default |
 | `--seed` | random | 64 hex chars (32 bytes) for deterministic search |

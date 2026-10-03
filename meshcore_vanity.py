@@ -166,7 +166,15 @@ def _worker_search(args: tuple) -> tuple:
         if max_attempts is not None and attempts >= max_attempts:
             return (None, attempts, counter)
 
-        for _ in range(BATCH_SIZE):
+        # Trim the batch to the worker's remaining share so the parent's total
+        # budget is a real bound. One subtraction per batch, not per candidate.
+        batch = BATCH_SIZE
+        if max_attempts is not None:
+            remaining = max_attempts - attempts
+            if remaining < batch:
+                batch = remaining
+
+        for _ in range(batch):
             # Scalar is masked to 256 bits, so to_bytes(32) cannot overflow.
             scalar_val = (initial_scalar + counter) & ((1 << 256) - 1)
             priv_seed = scalar_val.to_bytes(32, "big")
@@ -1007,7 +1015,17 @@ def generate_vanity_key(
         if max_attempts is not None and attempts >= max_attempts:
             raise RuntimeError(f"exceeded max_attempts={max_attempts}")
 
-        for _ in range(BATCH_SIZE):
+        # Trim the last batch to what is left of the budget, so `max_attempts` is
+        # a real upper bound rather than "N rounded up to a multiple of 16".
+        # One subtraction per batch, not per candidate, so the hot loop is
+        # unaffected. Without it, 8 workers could overshoot by ~127 attempts.
+        batch = BATCH_SIZE
+        if max_attempts is not None:
+            remaining = max_attempts - attempts
+            if remaining < batch:
+                batch = remaining
+
+        for _ in range(batch):
             priv_seed = scalar.to_bytes(32, "big")
             scalar = (scalar + 1) & ((1 << 256) - 1)
 
@@ -1112,12 +1130,14 @@ def _generate_vanity_key_parallel(
     report continuously instead of only on worker completion.
     """
     ctx = mp.get_context("spawn")
-    # Split the total attempt budget across workers so --max-attempts keeps
-    # its documented meaning (total, not per-worker).
-    if max_attempts is not None:
-        per_worker_max = (max_attempts + workers - 1) // workers
-    else:
-        per_worker_max = None
+    # Split the total attempt budget across workers so --max-attempts keeps its
+    # documented meaning (total, not per-worker). Floor division, so the sum can
+    # never exceed the request; ceiling division overshot by up to workers-1.
+    # The max(1, ...) keeps every worker useful when the budget is smaller than
+    # the worker count, where the bound cannot be met exactly anyway.
+    per_worker_max = (
+        max(1, max_attempts // workers) if max_attempts is not None else None
+    )
     expected_attempts = _estimate_search_space(
         encoding, prefix_len, suffix_len if two_ended else None
     )
