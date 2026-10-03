@@ -2,6 +2,7 @@
 """Tests for meshcore_vanity.py"""
 
 import base64
+import hashlib
 import io
 import json
 import multiprocessing
@@ -1721,25 +1722,39 @@ def _load_make_icons():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+def _run_cli(*args: str, timeout: int = 120):
+    """Run the CLI in a child process and return the completed process.
+
+    The environment is inherited rather than replaced. Handing subprocess a
+    bare ``{"PATH": ...}`` looks hermetic but drops SystemRoot on Windows,
+    which breaks interpreter startup in ways that are miserable to debug, and
+    it silently changes behaviour on any platform whose CLI reads the
+    environment. MESHCORE_VANITY_STRICT_RESERVED is the one variable that
+    alters CLI behaviour, so it is cleared explicitly and the rest is left
+    alone.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    env = dict(os.environ)
+    env.pop("MESHCORE_VANITY_STRICT_RESERVED", None)
+    return subprocess.run(
+        [sys.executable, str(Path(__file__).parent / "meshcore_vanity.py"), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
+
+
 def test_private_key_is_printed_by_default() -> None:
     """The key must print without a flag.
 
     Re-running a search to recover the private key costs minutes to days of
     CPU. That is why it used to be behind --output-private and no longer is.
     """
-    import base64 as _b64
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    root = Path(__file__).parent
-    proc = subprocess.run(
-        [sys.executable, str(root / "meshcore_vanity.py"), "ab", "--force"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(root)},
-    )
+    proc = _run_cli("ab", "--force")
     assert proc.returncode == 0, proc.stderr
     err = proc.stderr
     assert "PRIVATE_KEY_BASE64=" in err, (
@@ -1748,10 +1763,19 @@ def test_private_key_is_printed_by_default() -> None:
     assert "MESHCORE_PRIV_HEX=" in err, "the expanded hex form must also print"
     assert "set prv.key " in err, "and the copy-pasteable CLI command"
 
+    # The stdout/stderr split is the whole security story of this feature:
+    # stdout is what gets piped into a file or another program, so the secret
+    # must never appear there. Asserted rather than assumed.
+    for secret in ("PRIVATE_KEY_BASE64", "MESHCORE_PRIV_HEX", "set prv.key"):
+        assert secret not in proc.stdout, (
+            f"{secret} leaked to stdout, which is the piped/redirected stream:\n"
+            + proc.stdout
+        )
+
     # The two forms must agree: base64 is the 32-byte seed, and the expanded
     # hex is the 64-byte clamped-scalar||nonce form MeshCore's `set prv.key`
     # expects (NOT a seed with a suffix - see meshcore_expanded_private_key).
-    b64 = _b64.b64decode(
+    b64 = base64.b64decode(
         next(
             line.split("=", 1)[1]
             for line in err.splitlines()
@@ -1767,12 +1791,12 @@ def test_private_key_is_printed_by_default() -> None:
     assert len(expanded) == 128, (
         f"the expanded key must be 64 bytes of hex (128 chars), got {len(expanded)}"
     )
-    import hashlib as _hashlib
 
     # The first 32 bytes must be SHA-512(seed) with Ed25519 clamping applied -
-    # which means the LOW bits are cleared, so compare against a clamped copy
+    # which means the low bits are cleared, so compare against a clamped copy
     # rather than the raw digest.
-    want = bytearray(_hashlib.sha512(b64).digest()[:32])
+    digest = hashlib.sha512(b64).digest()
+    want = bytearray(digest[:32])
     want[0] &= 0xF8
     want[31] &= 0x7F
     want[31] |= 0x40
@@ -1781,10 +1805,10 @@ def test_private_key_is_printed_by_default() -> None:
         "the first half of the expanded key must be the clamped SHA-512 scalar"
     )
     # And the second half is the untouched nonce half of the same digest.
-    assert got[32:] == _hashlib.sha512(b64).digest()[32:], (
+    assert got[32:] == digest[32:], (
         "the second half must be the SHA-512 nonce, unmodified"
     )
-    # Ed25519 clamping, which is what makes it a valid scalar.
+    # The Ed25519 invariants themselves, independent of the digest.
     assert got[0] & 0x07 == 0, "scalar must have its low 3 bits cleared"
     assert got[31] & 0x80 == 0, "scalar must have its high bit cleared"
     assert got[31] & 0x40 == 0x40, "scalar must have bit 254 set"
@@ -1792,19 +1816,7 @@ def test_private_key_is_printed_by_default() -> None:
 
 def test_no_output_private_suppresses_the_key() -> None:
     """The opt-out must work, and must not touch the public key."""
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    root = Path(__file__).parent
-    proc = subprocess.run(
-        [sys.executable, str(root / "meshcore_vanity.py"), "ab", "--force",
-         "--no-output-private"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(root)},
-    )
+    proc = _run_cli("ab", "--force", "--no-output-private")
     assert proc.returncode == 0, proc.stderr
     assert "PRIVATE_KEY_BASE64" not in proc.stderr, (
         "--no-output-private must suppress the key:\n" + proc.stderr
@@ -1822,20 +1834,11 @@ def test_the_removed_output_private_flag_is_rejected() -> None:
     Silently accepting it would let a script keep passing it and believe it
     were suppressing output, when it would now be *enabling* it.
     """
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    root = Path(__file__).parent
-    proc = subprocess.run(
-        [sys.executable, str(root / "meshcore_vanity.py"), "ab", "--force",
-         "--output-private"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    proc = _run_cli("ab", "--force", "--output-private")
     assert proc.returncode != 0, "the removed flag must be rejected"
     assert "unrecognized arguments" in proc.stderr, proc.stderr
+    # A rejected flag must not have leaked the key on its way out.
+    assert "PRIVATE_KEY_BASE64" not in proc.stderr, proc.stderr
 
 
 def test_the_launcher_documents_itself_without_installing() -> None:
@@ -1845,6 +1848,12 @@ def test_the_launcher_documents_itself_without_installing() -> None:
     from pathlib import Path
 
     root = Path(__file__).parent
+    # Assert the launcher had no *side effect*, not that .venv is absent. Anyone
+    # who has actually used the tool has a .venv, and asserting non-existence
+    # would fail for them while proving nothing. Comparing before/after is the
+    # only version of this that tests the launcher's behaviour.
+    venv = root / ".venv"
+    existed_before = venv.exists()
     proc = subprocess.run(
         [sys.executable, str(root / "run.py"), "--help"],
         capture_output=True,
@@ -1854,7 +1863,7 @@ def test_the_launcher_documents_itself_without_installing() -> None:
     assert proc.returncode == 0, proc.stderr
     assert "run.sh" in proc.stdout, "the help must show the short command"
     assert "run.bat" in proc.stdout, "and the Windows one"
-    assert not (root / ".venv").exists(), (
+    assert venv.exists() == existed_before, (
         "--help must not create a virtual environment as a side effect"
     )
 
