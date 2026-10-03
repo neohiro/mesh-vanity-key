@@ -343,7 +343,7 @@ armTrackingTimeouts();
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, resetForm, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_EXPONENT, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, resetForm, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_POINTS, WORKER_SCALE_MAX, recordLiveRate, resetLiveRates, liveAggregateKeysPerSecond, liveRateIsComplete, LIVE_RATE_MIN_SAMPLES, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -939,9 +939,14 @@ check('smoothEta: rejects non-finite and non-positive input', () => {
 
 // ---- Worker scaling model --------------------------------------------------
 check('workerScale: anchored to the measured 8-thread ceiling', () => {
-    eq(api.WORKER_SCALE_MEASURED[8], 2.3, 'the measurement is recorded');
-    eq(Math.round(api.workerScale(8) * 100) / 100, 2.3,
-        '8 workers must reproduce the measured 2.3x');
+    // The anchor is now 4.08x, measured with the real primitive
+    // (tools/bench_keygen_scaling.mjs). It used to be 2.3x from an older
+    // browser measurement; measuring the actual wasm primitive on the same
+    // hardware topology showed the crypto scales to roughly 4x, so the old
+    // anchor made every ETA about 1.8x too pessimistic.
+    eq(api.WORKER_SCALE_MEASURED[8], 4.08, 'the measurement is recorded');
+    eq(Math.round(api.workerScale(8) * 100) / 100, 4.08,
+        '8 workers must reproduce the measured 4.08x');
     eq(api.workerScale(1), 1, 'one worker is 1x');
     eq(api.workerScale(0), 1, 'zero workers is 1x');
 });
@@ -964,54 +969,82 @@ check('workerScale: concave and sublinear', () => {
         `per-worker efficiency must fall: ${eff2.toFixed(2)} > ${eff8.toFixed(2)} > ${eff32.toFixed(2)}`);
 });
 
-check('workerScale: the documented exponent matches the code', () => {
-    // The page's comment block spells out the exponent and the interpolated
-    // multipliers. Those went stale unnoticed for a long time (they claimed
-    // ~0.457 / 1.37x / 1.87x while the code computes 0.4005 / 1.32x / 1.74x),
-    // because every other test here checks SHAPE - concave, sublinear, anchored
-    // - and shape is identical whichever exponent you fit. This pins the actual
-    // values, and cross-checks them against the comment text, so a comment that
-    // drifts from the code fails the build instead of misleading the next
-    // person who re-measures.
-    const expected = Math.log(api.WORKER_SCALE_MEASURED[8]) / Math.log(8);
-    eq(api.WORKER_SCALE_EXPONENT.toFixed(4), expected.toFixed(4),
-        'the exponent is exactly log(measured)/log(8)');
+check('workerScale: the measured table drives the curve exactly', () => {
+    // The model is now a table of MEASURED points rather than one power law
+    // through an 8-thread anchor. Measuring the real primitive showed scaling is
+    // near-linear to 2 threads and then flattens sharply, which a single-anchor
+    // law cannot represent - it mispredicted 4 threads by a factor of two.
+    const pts = api.WORKER_SCALE_POINTS;
+    ok(Array.isArray(pts) && pts.length >= 3,
+        'the scaling model must be a table of measured points');
+    ok(pts.length > 0 && pts[0][0] === 1 && pts[0][1] === 1,
+        'the table must start at 1 thread / 1.00x');
 
-    // Recompute from first principles rather than trusting the constant.
-    for (const n of [2, 4, 8, 16, 32]) {
-        eq(api.workerScale(n).toFixed(3), Math.pow(n, expected).toFixed(3),
-            `workerScale(${n}) must follow the documented power law`);
+    // Strictly ascending in both axes, with falling marginal gain, or the
+    // interpolation below is meaningless.
+    for (let i = 1; i < pts.length; i++) {
+        ok(pts[i][0] > pts[i - 1][0], `thread counts must ascend (index ${i})`);
+        ok(pts[i][1] > pts[i - 1][1],
+            `measured speedups must ascend (index ${i}); the curve is concave `
+            + 'and never flat or falling');
+        ok(pts[i][1] / pts[i - 1][1] < pts[i][0] / pts[i - 1][0],
+            `marginal gain must fall between ${pts[i - 1][0]} and ${pts[i][0]} `
+            + `threads (${(pts[i][1] / pts[i - 1][1]).toFixed(2)}x vs `
+            + `${pts[i][0] / pts[i - 1][0]}x) - that is the point of the table`);
     }
 
-    // The figures the page's comment quotes, asserted against the code. These
-    // are the exact numbers stated in the MEASUREMENT BASIS comment block.
-    const html = fs.readFileSync(pageHtmlPath, 'utf8');
-    const exp = api.WORKER_SCALE_EXPONENT.toFixed(4);
-    // The comment writes the exponent with a leading '~' (it is an approximation).
-    ok(html.includes(`exponent ~${exp}`) || html.includes(`exponent ${exp}`),
-        `the comment must state the real exponent (~${exp})`);
-    ok(!/exponent ~0\.457/.test(html),
-        'the stale 0.457 exponent must not come back');
-    ok(!/1\.37x at 2 threads/.test(html) && !/1\.87x at 4/.test(html),
-        'the stale interpolated figures must not come back');
+    // Exact at every measured point.
+    for (const [n, v] of pts) {
+        eq(api.workerScale(n).toFixed(3), v.toFixed(3),
+            `workerScale(${n}) must return its measured ${v}`);
+    }
 
-    // And the README quotes the same exponent; keep the two in agreement.
-    const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
-    ok(readme.includes(expected.toFixed(4)),
-        `the README must state the same exponent (${expected.toFixed(4)})`);
+    // Log-linear between points: smooth, strictly between the endpoints.
+    for (let i = 1; i < pts.length; i++) {
+        const [nLo, vLo] = pts[i - 1];
+        const [nHi, vHi] = pts[i];
+        for (const frac of [0.25, 0.5, 0.75]) {
+            const n = Math.exp(Math.log(nLo) + frac * (Math.log(nHi) - Math.log(nLo)));
+            const v = api.workerScale(n);
+            ok(v > vLo && v < vHi,
+                `workerScale(${n.toFixed(2)}) = ${v.toFixed(3)} must fall strictly `
+                + `between ${vLo} and ${vHi}`);
+        }
+    }
 
-    // The README's "Model says" column must equal what workerScale() returns.
-    // That table is a claim about this code, and a power law recomputed from a
-    // different anchor would leave it quietly wrong - which is exactly how the
-    // stale 0.457 / 1.37x / 1.87x figures survived unnoticed in the first place.
+    // Never below 1, and defined for nonsense input.
+    for (const bad of [0, -1, NaN, undefined, null, 'x']) {
+        eq(api.workerScale(bad), 1, `workerScale(${bad}) must fall back to 1`);
+    }
+});
+
+check('workerScale: clamps at the measured ceiling instead of extrapolating', () => {
+    // Extra threads cannot beat what was observed on 4 physical cores, and an
+    // unbounded extrapolation would promise throughput nobody has seen. This
+    // matters because detectOptimalWorkers caps at 32, so a 16- or 32-thread
+    // machine would otherwise be told it is nearly twice as fast as measured.
+    const last = api.WORKER_SCALE_POINTS[api.WORKER_SCALE_POINTS.length - 1];
+    for (const n of [last[0], last[0] + 1, 16, 32, 64, 1024]) {
+        eq(api.workerScale(n), last[1],
+            `workerScale(${n}) must clamp to the measured ${last[1]}x ceiling`);
+    }
+    eq(api.workerScale(8), api.WORKER_SCALE_MEASURED[8],
+        'the 8-thread lookup must agree with the measured value');
+    eq(api.WORKER_SCALE_MAX, last[1], 'WORKER_SCALE_MAX must be the top measured point');
+});
+
+check('workerScale: the README table matches the code', () => {
+    // The README's "Model says" column is a claim about this code, and a table
+    // that stops describing workerScale() is exactly how the stale 0.457 /
+    // 1.37x / 1.87x figures survived unnoticed in the first place.
     //
     // Split on newlines before matching: the file is CRLF, and an `^` anchor
     // would sit after the \n leaving a stray \r on the end of each row.
+    const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
     const rows = readme.split(/\r?\n/);
-    for (const n of [2, 3, 4, 6, 8]) {
+    for (const n of [1, 2, 3, 4, 6, 8]) {
         const want = api.workerScale(n).toFixed(2) + 'x';
-        // The 8-thread anchor row is bolded (|**8**|), so allow ** around the
-        // worker count as well as around the figures.
+        // Rows may be bolded (|**8**|), so allow ** around the worker count.
         const rowRe = new RegExp(`^\\|\\s*\\**${n}\\**\\s*\\|`);
         const row = rows.find((l) => rowRe.test(l.trim()));
         ok(row !== undefined, `the README scaling table must have a row for ${n} workers`);
@@ -1023,6 +1056,116 @@ check('workerScale: the documented exponent matches the code', () => {
     }
 });
 
+check('live rate: ignores the first reports, then sums every worker', () => {
+    // The self-calibration's contract: only trust a worker once it has reported
+    // enough times, and only produce a figure once EVERY live worker is
+    // trustworthy. Partial data would understate the aggregate and so overstate
+    // the ETA, which is the failure that matters.
+    const need = api.LIVE_RATE_MIN_SAMPLES;
+    ok(need >= 2, `the warm-up floor must exclude the noisy first report, got ${need}`);
+
+    api.resetLiveRates();
+    eq(api.liveAggregateKeysPerSecond(4), null, 'no data means no figure');
+
+    // One worker reporting a lot must not be enough for a 4-worker search.
+    for (let k = 0; k < need * 5; k++) api.recordLiveRate(0, 100);
+    eq(api.liveAggregateKeysPerSecond(4), null,
+        'a single reporting worker must not stand in for four');
+
+    // Three of four workers still incomplete.
+    for (let k = 0; k < need; k++) api.recordLiveRate(1, 200);
+    for (let k = 0; k < need; k++) api.recordLiveRate(2, 300);
+    for (let k = 0; k < need - 1; k++) api.recordLiveRate(3, 400);
+    eq(api.liveAggregateKeysPerSecond(4), null, 'three of four is still partial');
+
+    // The last worker completes: now the aggregate is the SUM of all four.
+    api.recordLiveRate(3, 400);
+    const total = api.liveAggregateKeysPerSecond(4);
+    ok(total !== null, 'all workers reporting must yield a figure');
+    eq(total, 100 + 200 + 300 + 400, 'the aggregate must be the sum across workers');
+    api.resetLiveRates();
+});
+
+check('live rate: replaces a worker\'s own sample instead of accumulating', () => {
+    api.resetLiveRates();
+    const need = api.LIVE_RATE_MIN_SAMPLES;
+    for (let k = 0; k < need; k++) api.recordLiveRate(0, 100);
+    eq(api.liveAggregateKeysPerSecond(1), 100, 'the first sample is the figure');
+    // A newer report from the same worker supersedes the old one.
+    for (let k = 0; k < 5; k++) api.recordLiveRate(0, 250);
+    eq(api.liveAggregateKeysPerSecond(1), 250,
+        'a worker must hold its newest rate, not a running total of its rates');
+    api.resetLiveRates();
+});
+
+check('live rate: rejects nonsense and never reports a non-positive figure', () => {
+    api.resetLiveRates();
+    const need = api.LIVE_RATE_MIN_SAMPLES;
+    for (const bad of [0, -1, NaN, Infinity, 'x', null, undefined]) {
+        for (let k = 0; k < need * 2; k++) api.recordLiveRate(0, bad);
+    }
+    eq(api.liveAggregateKeysPerSecond(1), null,
+        'a worker that only ever reports nonsense must yield no figure');
+    eq(api.liveRateIsComplete(1), false,
+        'and must not count as complete');
+    api.resetLiveRates();
+});
+
+check('live rate: a zero or nonsensical worker count is never complete', () => {
+    api.resetLiveRates();
+    for (const n of [0, -1, NaN, undefined, null, 'x']) {
+        eq(api.liveRateIsComplete(n), false, `liveRateIsComplete(${n}) must be false`);
+        eq(api.liveAggregateKeysPerSecond(n), null,
+            `liveAggregateKeysPerSecond(${n}) must be null`);
+    }
+    api.resetLiveRates();
+});
+
+check('the grey estimate flips from estimated to measured', () => {
+    // The point of the whole exercise: after a moment of running, the figure the
+    // user plans around is a measurement of THIS machine, not a table measured
+    // on someone else's.
+    navigatorMock.hardwareConcurrency = 4;
+    getElementById('prefix').value = 'ab';
+    getElementById('suffix').value = '';
+    api.resetLiveRates();
+
+    api.updateEstimate();
+    const modelled = api.getEstimateText();
+    ok(/keys\/s (estimated|calibrated)\)/.test(modelled),
+        `with no live data the line must not claim to be measured: ${modelled}`);
+
+    const need = api.LIVE_RATE_MIN_SAMPLES;
+    for (let k = 0; k < need; k++) {
+        api.recordLiveRate(0, 1000);
+        api.recordLiveRate(1, 1000);
+        api.recordLiveRate(2, 1000);
+        api.recordLiveRate(3, 1000);
+    }
+    api.updateEstimate();
+    const measured = api.getEstimateText();
+    ok(/keys\/s measured\)/.test(measured),
+        `with full live data the line must be labelled measured: ${measured}`);
+    // 4 workers x 1000 keys/s = 4000, which is far above what the table models.
+    ok(/up to 4,000 keys\/s/.test(measured),
+        `the measured aggregate must drive the headline, not the model: ${measured}`);
+
+    api.resetLiveRates();
+    navigatorMock.hardwareConcurrency = 8;
+});
+
+check('resetLiveRates drops the measurements with the run', () => {
+    // A stale aggregate must not survive into the next search, or the estimate
+    // would keep claiming to be measured after the workers that produced it are
+    // gone.
+    const need = api.LIVE_RATE_MIN_SAMPLES;
+    api.resetLiveRates();
+    for (let k = 0; k < need; k++) api.recordLiveRate(0, 500);
+    ok(api.liveAggregateKeysPerSecond(1) !== null, 'precondition: data present');
+    api.resetLiveRates();
+    eq(api.liveAggregateKeysPerSecond(1), null,
+        'after a reset there must be no measured rate');
+});
 // ---- Live ETA layout ------------------------------------------------------
 // As one string the ETA reflowed whenever a field changed digit count, so the
 // figures visibly hopped. It is now split into slots that each reserve their

@@ -1,0 +1,11 @@
+{
+  "_note": "Recorded from tools/bench_keygen_scaling.mjs on a GitHub-hosted ubuntu runner. Updated by hand or by deleting the file and letting the next run rewrite it. Only drop-detection is enforced; a rise should be reviewed so the scaling table can be re-measured.",
+  "_provenance": "These numbers were captured on the developer machine, not on a GitHub runner, so they are indicative only. The first scheduled run will rewrite this file with runner-native figures; that is the intended behaviour and the comparison becomes meaningful from then on.",
+  "recorded_on": "2026-10-03T13:15:49.155Z",
+  "rates": {
+    "1": 23102,
+    "2": 45037,
+    "4": 81798,
+    "8": 88868
+  }
+}

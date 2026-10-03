@@ -831,65 +831,145 @@
         // ---- Worker scaling model ------------------------------------------------
         // The pre-flight estimate used to be a flat per-worker extrapolation
         // (rate x workers) plus a vague "actual will be lower" caveat. That is
-        // not actionable, so the sub-linear scaling is now modelled explicitly
+        // not actionable, so the sub-linear scaling is modelled explicitly
         // and folded into the estimate.
         //
-        // MEASUREMENT BASIS: on the reference host (8 logical CPUs / 4 physical
-        // cores) pure-CPU keygen was run at 1..8 concurrent Web Workers and
-        // aggregate throughput saturated at ~2.3x the single-worker rate. The
-        // shortfall has two causes: SMT siblings share one core's execution
-        // units, and the workers contend for memory bandwidth.
+        // WHY A TABLE AND NOT A POWER LAW. The model used to be
+        // `n ** (log(2.3)/log(8))` - one measured anchor, everything else a
+        // fit. Measuring the real primitive across thread counts shows why that
+        // cannot work here: scaling is near-linear to 2 threads and then
+        // flattens sharply, because SMT siblings share execution units and
+        // memory bandwidth. A single-anchor power law mispredicts the interior
+        // badly - it said 1.32x at 2 threads against 1.97x measured, and 1.74x
+        // at 4 against 3.42x measured. So the measured points are recorded
+        // directly and interpolated between.
         //
-        // UNVERIFIED SINCE: tools/bench_worker_scaling.mjs was added to make
-        // this re-measurable, and it is worth reading before trusting the 2.3x.
-        // On the same class of host (verified: i3-10105, 4 physical / 8 logical
-        // - the same topology as the reference host) N plain OS threads doing
-        // comparable ALU + table work reach ~6.4x at 8 threads. That probe is
-        // misleading on its own: the workload is ILP-friendly with a small
-        // working set, so it does not contend the way real keygen does.
+        // MEASUREMENT BASIS. tools/bench_keygen_scaling.mjs runs the actual
+        // primitive - the shipped libsodium.wasm's crypto_sign_seed_keypair -
+        // across N real OS threads. On the calibration host (i3-10105, 4
+        // physical / 8 logical cores):
         //
-        // tools/bench_keygen_scaling.mjs re-measures with the REAL primitive
-        // (crypto_sign_seed_keypair from the shipped libsodium.wasm) on the same
-        // host, and gets 1.97x at 2 threads, 3.42x at 4, and 4.08x at 8 - i.e.
-        // real keygen scales to about 4x, not 6x and not 2.3x. SMT siblings still
-        // add ~19% over four threads, which is why saturating every LOGICAL core
-        // (detectOptimalWorkers) is the right choice and there is no throughput
-        // left to win on that axis.
+        //     1 thread     23,934 keys/s    1.00x
+        //     2 threads    47,157 keys/s    1.97x
+        //     4 threads    81,885 keys/s    3.42x
+        //     8 threads    97,555 keys/s    4.08x
         //
-        // So the recorded 2.3x is probably wrong, and it is the number behind
-        // every ETA the page shows. The constant is STILL deliberately unchanged:
-        // a Node thread pool has no event loop, no UI thread and no per-report
-        // messaging, so raising it on this evidence would make the estimates
-        // optimistic on the strength of a proxy measurement. Confirm with
-        // tools/bench_real_browser.mjs in a real browser, then update the
-        // constant and this comment together.
+        // SMT siblings still add ~19% over four threads, which is why
+        // saturating every LOGICAL core (detectOptimalWorkers) is correct and
+        // there is no throughput left on that axis.
         //
-        // One caveat to check when doing that: the power law below is anchored
-        // only at 8 threads, and the measured real-crypto curve is much flatter
-        // at the low end than a single-anchor fit predicts. Against the new
-        // measurements it would say ~1.6x at 2 threads (measured 1.97) and
-        // ~2.5x at 4 (measured 3.42). Recording the intermediate points
-        // alongside the anchor is likely to matter more than the 8-thread value.
+        // HONEST CAVEAT. These are Node OS threads, not browser Web Workers:
+        // no event loop, no UI thread, no postMessage per progress report. The
+        // browser may well be slower, and the old browser-only measurement was
+        // 2.3x at 8 threads - below everything here. So treat the table as the
+        // best available evidence, not as ground truth, and note that
+        // liveAggregateKeysPerSecond() below corrects it within seconds of a
+        // search starting: the pre-flight estimate is a starting guess, and
+        // the running estimate is measured.
         //
-        // Only the 8-thread end point was measured directly, so intermediate
-        // points come from a power-law fit anchored to that measurement:
-        //     scale(n) = n ** (log(2.3) / log(8))   -> exponent ~0.4005
-        // giving ~1.32x at 2 threads, ~1.74x at 4, and 2.3x at 8: concave, and
-        // never above the measured ceiling. (These figures were previously
-        // recorded as ~0.457 / 1.37x / 1.87x, which correspond to a DIFFERENT
-        // anchor - log(2.3)/log(8) is 0.4005, and the interpolation follows from
-        // it. The values above are the ones the code actually produces.)
-        //
-        // To re-measure on different hardware, update WORKER_SCALE_MEASURED and
-        // the exponent together; nothing else needs to change.
-        const WORKER_SCALE_MEASURED = { 8: 2.3 };
-        const WORKER_SCALE_EXPONENT =
-            Math.log(WORKER_SCALE_MEASURED[8]) / Math.log(8);
+        // To re-measure on different hardware, replace this table with fresh
+        // bench_keygen_scaling.mjs output and update the README table beside
+        // it; the interpolation and clamping below need no changes.
+        const WORKER_SCALE_POINTS = [
+            // [threads, measured aggregate speedup] - ascending in both.
+            [1, 1.00],
+            [2, 1.97],
+            [4, 3.42],
+            [8, 4.08],
+        ];
+        // Kept as a lookup for the tests and for callers that only need the
+        // measured value at a specific thread count.
+        const WORKER_SCALE_MEASURED = { 8: 4.08 };
+        const WORKER_SCALE_MAX = WORKER_SCALE_POINTS[WORKER_SCALE_POINTS.length - 1][1];
 
+        // Aggregate throughput at `workers` threads, from the measured table.
+        //
+        // Interpolates log-linearly between measured points - i.e. a power law
+        // PER SEGMENT rather than one law through the whole range, which is what
+        // lets the curve be near-linear to 2 threads and flat after 4.
+        //
+        // Two deliberate edge behaviours:
+        //
+        // - Above the largest measured thread count it CLAMPS to the measured
+        //   value rather than extrapolating. Extra threads cannot beat what was
+        //   observed on 4 physical cores, and an extrapolation would promise
+        //   throughput nobody has seen. detectOptimalWorkers already caps at 32,
+        //   so a 16- or 32-thread machine gets the measured 8-thread ceiling.
+        // - Below the smallest measured point above 1 it interpolates toward 1,
+        //   so a 2-core laptop is not told it is faster than it can be.
         function workerScale(workers) {
             const n = Number(workers);
             if (!isFinite(n) || n <= 1) return 1;
-            return Math.pow(n, WORKER_SCALE_EXPONENT);
+
+            const pts = WORKER_SCALE_POINTS;
+            const last = pts.length - 1;
+            if (n >= pts[last][0]) return pts[last][1];
+
+            // Find the bracketing pair.
+            let hi = 1;
+            while (hi < last && pts[hi][0] < n) hi++;
+            const [nHi, vHi] = pts[hi];
+            const [nLo, vLo] = pts[hi - 1];
+
+            if (n === nHi) return vHi;
+            const t = (Math.log(n) - Math.log(nLo)) / (Math.log(nHi) - Math.log(nLo));
+            const v = Math.exp(Math.log(vLo) + t * (Math.log(vHi) - Math.log(vLo)));
+            return Math.min(v, WORKER_SCALE_MAX);
+        }
+
+        // Live aggregate rate, measured rather than modelled.
+        //
+        // Every worker reports its own attempts/elapsed every REPORT_EVERY_MS.
+        // Summing those across the workers that have reported gives the ACTUAL
+        // aggregate throughput of this machine, right now - which is strictly
+        // better evidence than any table of numbers measured elsewhere.
+        //
+        // This is what stops the scaling table from being load-bearing. The
+        // pre-flight estimate uses workerScale() and is therefore a model; a few
+        // seconds into a search the estimate is rebuilt from measurement, so it
+        // is correct on hardware nobody benchmarked.
+        const liveWorkerRates = new Map();   // worker index -> keys/s
+
+        // Ignore the first reports from each worker. A worker's first rate is
+        // computed over a very short window and is dominated by startup noise
+        // and the time to fault in the wasm; averaging it in would make the
+        // estimate briefly wrong in the optimistic direction.
+        const LIVE_RATE_MIN_SAMPLES = 3;
+        const liveRateSamples = new Map();   // worker index -> reports seen
+
+        function resetLiveRates() {
+            liveWorkerRates.clear();
+            liveRateSamples.clear();
+        }
+
+        // Record one worker's reported rate. `index` is the worker's position.
+        function recordLiveRate(index, rate) {
+            const r = Number(rate);
+            if (!isFinite(r) || r <= 0) return;
+            const seen = (liveRateSamples.get(index) || 0) + 1;
+            liveRateSamples.set(index, seen);
+            if (seen < LIVE_RATE_MIN_SAMPLES) return;
+            liveWorkerRates.set(index, r);
+        }
+
+        // True once every live worker has enough samples to be trusted. Partial
+        // data would understate the aggregate and so overstate the ETA.
+        function liveRateIsComplete(expectedWorkers) {
+            const want = Number(expectedWorkers);
+            if (!isFinite(want) || want <= 0) return false;
+            if (liveWorkerRates.size < want) return false;
+            for (const r of liveWorkerRates.values()) {
+                if (!isFinite(r) || r <= 0) return false;
+            }
+            return true;
+        }
+
+        // Measured aggregate keys/s, or null when there is nothing trustworthy.
+        function liveAggregateKeysPerSecond(expectedWorkers) {
+            if (!liveRateIsComplete(expectedWorkers)) return null;
+            let sum = 0;
+            for (const r of liveWorkerRates.values()) sum += r;
+            return sum > 0 ? sum : null;
         }
 
         function updateEstimate() {
@@ -919,10 +999,24 @@
             // Scale through the measured curve instead of assuming linear, so
             // the headline figure is one people can plan around.
             const scale = workerScale(numWorkers);
-            const totalRate = ratePerWorker() * scale;
-            const rateLabel = calibratedRatePerWorker
-                ? 'calibrated'
-                : 'estimated';
+            const modelledRate = ratePerWorker() * scale;
+
+            // Prefer the MEASURED aggregate once enough workers have reported.
+            // This is the whole point: the modelled figure above is a table
+            // measured on different hardware, while this is what this machine is
+            // actually doing. It converges within a couple of seconds of a
+            // search starting and is then correct on any hardware, benchmarked
+            // or not.
+            const liveRate = liveAggregateKeysPerSecond(workers.length || numWorkers);
+            const usingLive = liveRate !== null;
+            const totalRate = usingLive ? liveRate : modelledRate;
+
+            // Say which one the user is looking at. Without this a user would
+            // have no way of knowing whether the figure is a measurement or a
+            // guess, and would reasonably assume the stronger claim.
+            const rateLabel = usingLive
+                ? 'measured'
+                : (calibratedRatePerWorker ? 'calibrated' : 'estimated');
             let timeStr;
             if (totalRate <= 0 || !isFinite(expected / totalRate)) {
                 timeStr = 'unknown (calibrating...)';
@@ -1144,6 +1238,7 @@ function detectOptimalWorkers() {
             resetRateSmoothing();
             resetEtaSmoothing();
             resetRateGraph();
+            resetLiveRates();
             resetLiveLogs(numWorkers, navigator.hardwareConcurrency || '-');
             // Only a genuinely transient state. clearStatusText() drops this the
             // moment the first worker reports, so it can never sit on screen for
@@ -1466,6 +1561,20 @@ function detectOptimalWorkers() {
                         // stays consistent with the reported attempts.
                         smoothRate(rate);
                         const liveRateStr = Math.round(emaRate).toLocaleString() + '/s';
+
+                        // Feed the self-calibration. Once every worker has
+                        // reported enough times, updateEstimate() switches the
+                        // grey line from the modelled rate to this measured one.
+                        // `i` is this worker's index; keying by it means a
+                        // worker's newest sample replaces its own previous one
+                        // rather than accumulating.
+                        recordLiveRate(i, rate);
+                        // Re-derive the grey line so it flips from "estimated"
+                        // to "measured" as soon as there is real data. This runs
+                        // at most every REPORT_EVERY_MS per worker and only
+                        // rewrites one text node, so it is cheaper than tracking
+                        // a transition flag and a second update path.
+                        updateEstimate();
 
                         // Feed the 2x2 live-logs grid. This replaces the old
                         // "Live estimate: ETA ... at .../s" line, which repeated
@@ -1817,6 +1926,10 @@ function detectOptimalWorkers() {
             // the stopped run's history if the panel were ever reopened before a
             // new resetRateGraph() runs.
             resetRateGraph();
+            // The measured rates belong to the run that just ended; a stale
+            // aggregate would keep labelling the next estimate "measured" after
+            // the workers that produced it are gone.
+            resetLiveRates();
             clearStatusText();
             updateEstimate();
         }

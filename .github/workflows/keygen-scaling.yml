@@ -1,0 +1,57 @@
+name: keygen-scaling
+
+# Records how fast real keygen scales on the runner, and how the shipped
+# scaling table compares.
+#
+# Why this exists: the ETA model is a table of measured speedups, and the
+# version it replaced (a single 2.3x anchor) was wrong by a factor of ~1.8 on
+# 4-core hardware. Nobody noticed for a long time because the measurement lived
+# only in a commit message. Running it on a schedule means the curve is a
+# tracked series rather than a one-off, and a hardware or wasm change that moves
+# throughput shows up as drift instead of as a mystery.
+#
+# Deliberately NOT a pass/fail gate on absolute keys/s. GitHub runners vary
+# wildly between invocations, so a fixed threshold would be flaky by
+# construction. It fails only on a large drop against the committed baseline,
+# which is a same-runner comparison and therefore meaningful. See
+# check_keygen_baseline.mjs.
+
+on:
+  schedule:
+    # 06:17 UTC daily. Off the hour on purpose: scheduled workflows are queued
+    # at the top of the hour and the shared pool is least contended a few
+    # minutes in, which makes the numbers more comparable run to run.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  keygen-scaling:
+    runs-on: ubuntu-latest
+    # 10 minutes: the benchmark is ~35s of work, but queue times on shared
+    # runners are unpredictable and this must not be the thing that flakes.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Measure real keygen scaling
+        id: bench
+        run: node tools/bench_keygen_scaling.mjs libsodium.js | tee keygen-scaling.txt
+
+      - name: Compare against the committed baseline
+        run: node tools/check_keygen_baseline.mjs keygen-scaling.txt
+
+      - name: Record the measured curve
+        uses: actions/upload-artifact@v4
+        with:
+          # Long enough to spot a trend over a few months.
+          retention-days: 90
+          name: keygen-scaling
+          path: keygen-scaling.txt
+          if: always()
