@@ -254,6 +254,7 @@ function armTrackingTimeouts() {
 // the two would make the mining worker-count assertions meaningless.
 const workerPool = [];
 const exportPool = [];
+const calibPool = [];
 const WorkerMock = class {
     constructor(url) {
         this.url = url;
@@ -264,11 +265,19 @@ const WorkerMock = class {
         // worker is not part of a mining pool and must never be torn down by
         // terminateAllWorkers(), so mixing them would make the mining
         // worker-count assertions meaningless.
+        //
+        // The scaling-calibration worker is a third kind: it calls the same
+        // keygen primitive as the mining worker but is a measurement
+        // instrument, not part of a search. It gets its own pool so mining
+        // worker-count and lifecycle assertions stay meaningful.
         const src = urlStats.blobText.get(String(url)) || '';
         this.isExport = /csvCell|type: 'done'/.test(src) && !/crypto_sign_seed_keypair/.test(src);
-        this.index = (this.isExport ? exportPool : workerPool).length;
-        (this.isExport ? exportPool : workerPool).push(this);
-        if (!this.isExport) {
+        this.isCalibration = /\/\* calibration-worker \*\//.test(src);
+        const pool = this.isExport ? exportPool
+            : (this.isCalibration ? calibPool : workerPool);
+        this.index = pool.length;
+        pool.push(this);
+        if (!this.isExport && !this.isCalibration) {
             workerStats.created++;
             workerStats.live++;
         }
@@ -277,7 +286,7 @@ const WorkerMock = class {
     terminate() {
         if (!this.terminated) {
             this.terminated = true;
-            if (!this.isExport) {
+            if (!this.isExport && !this.isCalibration) {
                 workerStats.terminated++;
                 workerStats.live--;
             }
@@ -343,7 +352,7 @@ armTrackingTimeouts();
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, resetForm, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_POINTS, WORKER_SCALE_MAX, recordLiveRate, resetLiveRates, liveAggregateKeysPerSecond, liveRateIsComplete, LIVE_RATE_MIN_SAMPLES, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, decimateSamples, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, resetForm, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, effectiveScalePoints, loadCachedScale, scaleCalStorageKey, __setMeasuredScale: (v) => { measuredScalePoints = v; }, __setScaleCacheRaw: (v) => { const k = scaleCalStorageKey(); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_POINTS, WORKER_SCALE_MAX, recordLiveRate, resetLiveRates, liveAggregateKeysPerSecond, liveRateIsComplete, LIVE_RATE_MIN_SAMPLES, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, decimateSamples, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -3200,6 +3209,154 @@ async function runWorker(workerJsPath, { resolveReadyImmediately = true, keygen 
     await new Promise((r) => setTimeout(r, 0));
     return { workerGlobal, posted, resolveReady };
 }
+
+// ---- scaling calibration -------------------------------------------------
+// The curve to trust is the one this machine measured, not one imported from
+// other hardware. These cover the selection, the worker count derived from it,
+// and - most importantly - that every failure path falls back to the imported
+// table rather than breaking mining.
+
+check('scaling calibration: without a measurement the imported table is used', () => {
+    api.__setMeasuredScale(null);
+    api.__setScaleCacheRaw(null);
+    eq(api.effectiveScalePoints(), api.WORKER_SCALE_POINTS,
+        'with no cached measurement the imported table must be used unchanged');
+    eq(api.workerScale(8), api.WORKER_SCALE_MEASURED[8],
+        'and workerScale must read from it');
+});
+
+check('scaling calibration: a cached measurement takes over the table', () => {
+    const injected = [[1, 1], [2, 1.9], [4, 2.1]];
+    api.__setMeasuredScale(injected);
+    try {
+        eq(api.effectiveScalePoints(), injected,
+            'a cached measurement must replace the imported table');
+        eq(api.workerScale(2), 1.9, 'workerScale must read the measured curve');
+        ok(Math.abs(api.workerScale(4) - 2.1) < 1e-9,
+            'workerScale must read the measured value at 4');
+    } finally {
+        api.__setMeasuredScale(null);
+    }
+    eq(api.effectiveScalePoints(), api.WORKER_SCALE_POINTS,
+        'clearing the measurement must restore the table');
+});
+
+check('scaling calibration: a corrupt cache is ignored, not trusted', () => {
+    // Storage can be edited, truncated, or written by an older version. A bad
+    // cache must never be able to steer the worker count or the estimate.
+    api.__setMeasuredScale(null);
+    for (const bad of ['', 'not json', '[]', '[1]', '[[1,1]]',
+        '[[1,"x"],[2,2]]', '[[0,1],[2,2]]',
+        '[[1,0],[2,2]]', '{"not":"an array"}', '[[2,2]]']) {
+        api.__setScaleCacheRaw(bad);
+        eq(api.loadCachedScale(), null, `cache ${bad} must be rejected`);
+        eq(api.effectiveScalePoints(), api.WORKER_SCALE_POINTS,
+            `cache ${bad} must not replace the table`);
+    }
+    api.__setScaleCacheRaw(null);
+});
+
+check('scaling calibration: a valid cache round-trips', () => {
+    const pts = [[1, 1], [2, 1.95], [4, 3.4]];
+    api.__setMeasuredScale(null);
+    api.__setScaleCacheRaw(JSON.stringify(pts));
+    const loaded = api.loadCachedScale();
+    ok(loaded !== null, 'a valid cache must load');
+    eq(JSON.stringify(loaded), JSON.stringify(pts), 'and round-trip intact');
+    api.__setScaleCacheRaw(null);
+});
+
+check('worker count follows the measurement, not the thread count', () => {
+    // A 4-core/8-thread machine: the measured curve flattens after 4 because
+    // the extra threads are SMT siblings contending for the same execution
+    // units. One worker per logical thread would be the wrong answer, and
+    // measuring is the only way to tell that machine from a real 8-core one.
+    const orig = navigatorMock.hardwareConcurrency;
+    navigatorMock.hardwareConcurrency = 8;
+    try {
+        api.__setMeasuredScale([[1, 1], [2, 1.9], [4, 3.4]]);
+        eq(api.detectOptimalWorkers(), 4,
+            'must stop at the last thread count that still paid for itself');
+        // With nothing measured, unchanged: one worker per logical thread.
+        api.__setMeasuredScale(null);
+        api.__setScaleCacheRaw(null);
+        eq(api.detectOptimalWorkers(), 8,
+            'without a measurement it must fall back to the thread count');
+    } finally {
+        api.__setMeasuredScale(null);
+        api.__setScaleCacheRaw(null);
+        navigatorMock.hardwareConcurrency = orig;
+    }
+});
+
+check('worker count still grows when every thread earns its place', () => {
+    // The opposite case: real cores, where each doubling keeps paying. The
+    // measurement must not throttle a machine that genuinely benefits.
+    const orig = navigatorMock.hardwareConcurrency;
+    navigatorMock.hardwareConcurrency = 8;
+    try {
+        api.__setMeasuredScale([[1, 1], [2, 1.9], [4, 3.7], [8, 7.2]]);
+        const n = api.detectOptimalWorkers();
+        ok(n >= 4, `must not stop early on real cores, got ${n}`);
+    } finally {
+        api.__setMeasuredScale(null);
+        api.__setScaleCacheRaw(null);
+        navigatorMock.hardwareConcurrency = orig;
+    }
+});
+
+check('worker count is still capped at 32 with a measurement', () => {
+    const orig = navigatorMock.hardwareConcurrency;
+    navigatorMock.hardwareConcurrency = 256;
+    try {
+        api.__setMeasuredScale([[1, 1], [2, 1.9], [4, 3.7], [8, 7.2]]);
+        const n = api.detectOptimalWorkers();
+        ok(n >= 1 && n <= 32, `must stay within the cap, got ${n}`);
+    } finally {
+        api.__setMeasuredScale(null);
+        api.__setScaleCacheRaw(null);
+        navigatorMock.hardwareConcurrency = orig;
+    }
+});
+
+check('scaling calibration: the mining worker can report a bounded run', () => {
+    const wsrc = fs.readFileSync(process.argv[3], 'utf8');
+    ok(/calibrated/.test(wsrc),
+        'the mining worker must be able to report a bounded run for calibration');
+    ok(/maxAttempts/.test(wsrc),
+        'and must accept a maxAttempts cap from the main thread');
+});
+
+check('scaling calibration: normal mining never takes the capped branch', () => {
+    // The cap check runs once per candidate, so it must be gated by a value
+    // that is 0 unless calibration asked for it. A default-true check would add
+    // a per-candidate branch forever for a feature used once per machine.
+    const wsrc = fs.readFileSync(process.argv[3], 'utf8');
+    ok(/const capAttempts = Number\(e\.data\.maxAttempts\) > 0/.test(wsrc),
+        'the cap must default to 0 when the field is absent');
+    ok(/if \(capAttempts && attempts >= capAttempts\)/.test(wsrc),
+        'and the per-candidate check must be gated on it');
+});
+
+check('scaling calibration: bounded cost and a fail-safe path', () => {
+    // The first search must not be able to stall on this.
+    ok(/SCALE_CAL_TOTAL_MS/.test(source) && /SCALE_CAL_ROUND_MS/.test(source),
+        'the calibration must have both a per-round and a total ceiling');
+    ok(/scaleCalDeadline/.test(source),
+        'and the rounds must share one overall deadline');
+    ok(/scaleCalFailed/.test(source),
+        'a failed calibration must be remembered so it is not retried forever');
+    ok(/localStorage\.setItem\(scaleCalStorageKey/.test(source),
+        'the cache write must go through a guarded helper');
+});
+
+check('scaling calibration: no new console noise during mining', () => {
+    // The calibration path must not leave status text behind when it is
+    // skipped, which is the common case after the first run.
+    api.__setScaleCacheRaw(JSON.stringify([[1, 1], [2, 1.9], [4, 3.4]]));
+    eq(api.loadCachedScale() !== null, true, 'the cache must be visible');
+    api.__setScaleCacheRaw(null);
+});
 
 const workerJsPath = process.argv[3];
 if (workerJsPath) {
