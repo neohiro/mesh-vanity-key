@@ -20,7 +20,20 @@
     <meta name="color-scheme" content="dark">
     <script src="libsodium.js"></script>
     <style>
-        :root { color-scheme: dark; }
+        :root {
+            color-scheme: dark;
+            /* The frame's own bottom padding, as ONE value.
+
+               The visitor badge is the last element inside the frame, so the
+               space below it *is* this padding. Pointing the badge's margin-top
+               at the same variable is what makes the gap above and below it
+               symmetric. They were not: 28px above against the padding below
+               (40px, dropping to 16px under the 480px breakpoint), so the
+               footer read as leaning to one side - and the mismatch moved with
+               the breakpoint instead of being fixed. Deriving both from one
+               token means the two cannot drift apart again, on any screen. */
+            --frame-pad-bottom: max(40px, env(safe-area-inset-bottom));
+        }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -74,16 +87,91 @@
         .container, .info { position: relative; z-index: 1; }
         .container {
             background: #161b22;
-            border: 1px solid #30363d;
+            /* A shade brighter than the #30363d it replaces - still inside the
+               muted range the rest of the chrome uses, so the frame reads as a
+               crisper edge rather than a brighter one. */
+            border: 1px solid #3a424c;
             border-radius: 12px;
+            /* Extremely minimal outward glow: a 1px spread ring for edge
+               definition, plus a single wide blur with a heavy negative spread
+               so it stays a faint lift off the background instead of a halo.
+               Painted once and never animated, so it costs nothing per frame. */
+            box-shadow:
+                0 0 0 1px rgba(88, 166, 255, 0.05),
+                0 0 26px -10px rgba(88, 166, 255, 0.16);
             /* 40px normally, but never less than the notch inset once
                viewport-fit=cover is set. Without this the layout would extend
                under a notch in landscape and the first row of controls would
-               sit partly beneath it. */
+               sit partly beneath it. The bottom edge is the shared token so the
+               visitor badge below can match it exactly. */
             padding: max(40px, env(safe-area-inset-top)) max(40px, env(safe-area-inset-right))
-                     max(40px, env(safe-area-inset-bottom)) max(40px, env(safe-area-inset-left));
+                     var(--frame-pad-bottom) max(40px, env(safe-area-inset-left));
             max-width: 600px;
             width: 100%;
+        }
+        /* Rotating hue across the frame line.
+
+           Structure matters here. The visible ring is produced by a MASK on this
+           element, and this element never moves - only the gradient *behind* the
+           mask turns. That is the whole trick: rotating the ring element itself
+           would rotate the rounded rectangle with it and visibly peel the
+           corners off the frame, whereas masking a static frame and spinning
+           something behind it keeps every corner exactly where it was.
+
+           The gradient is deliberately mostly transparent, with three faint hue
+           stops rather than a full rainbow: a lit edge that cycles through
+           lighter hues, not a light show. */
+        .frame-ring {
+            position: absolute;
+            inset: 0;
+            border-radius: inherit;
+            padding: 1px;
+            pointer-events: none;
+            /* Keep only the 1px band the border occupies. The padding box is
+               the whole area and the content box is inset by the padding, so
+               `exclude` retains what lies between them - exactly the border. */
+            -webkit-mask: linear-gradient(#000 0 0) content-box exclude,
+                          linear-gradient(#000 0 0);
+            mask: linear-gradient(#000 0 0) content-box exclude,
+                  linear-gradient(#000 0 0);
+            -webkit-mask-composite: xor;
+            mask-composite: exclude;
+        }
+        .frame-ring::before {
+            content: "";
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            /* Square and larger than the frame, so there is always gradient
+               beneath every edge and this element's own shape never shows. */
+            width: 180%;
+            height: 180%;
+            margin: -90% 0 0 -90%;
+            background: conic-gradient(from 0deg,
+                rgba(88, 166, 255, 0)     0deg,
+                rgba(88, 166, 255, 0.34) 45deg,
+                rgba(126, 231, 135, 0.30) 95deg,
+                rgba(188, 140, 255, 0.28) 150deg,
+                rgba(88, 166, 255, 0)     235deg,
+                rgba(88, 166, 255, 0)     360deg);
+            /* An animated @property angle would be the shorter way to write
+               this, but it repaints the gradient on every frame on the main
+               thread. `transform` is the one rotation a compositor performs
+               without asking the main thread to repaint anything, which is what
+               keeps this free while the workers are busy. */
+            will-change: transform;
+            backface-visibility: hidden;
+            animation: frame-sheen 18s linear infinite;
+        }
+        @keyframes frame-sheen {
+            to { transform: rotate(1turn); }
+        }
+        /* A search is the point of the page, and it takes every core it can
+           reach. Decoration yields to it: the sheen pauses the moment a search
+           runs, so it never competes with the mining it surrounds. */
+        body.is-mining .frame-ring::before { animation-play-state: paused; }
+        @media (prefers-reduced-motion: reduce) {
+            .frame-ring::before { animation: none; }
         }
         /* Chrome on Android also boosts font size in wide blocks unless told
            not to. Both halves are needed: this stops the boost, and the
@@ -138,9 +226,13 @@
            the two never drift. */
         .status-text[hidden] { display: none; }
         /* Centred below the info frame with breathing room above it, so it reads
-           as a quiet footer rather than competing with the tool itself. */
+           as a quiet footer rather than competing with the tool itself.
+
+           margin-top is the frame's own bottom padding, so the whitespace above
+           the badge and the whitespace below it are the same height by
+           construction - see --frame-pad-bottom. */
         .visitor-counter {
-            margin-top: 28px;
+            margin-top: var(--frame-pad-bottom);
             text-align: center;
             line-height: 0;
         }
@@ -331,9 +423,13 @@
                wrapping between facts. */
             .container {
                 padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
-                         max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+                         var(--frame-pad-bottom) max(16px, env(safe-area-inset-left));
                 border-radius: 10px;
             }
+            /* Re-point the shared token at the tightened edge, so the badge's
+               top margin tightens with the frame instead of staying at 40px and
+               leaving a gap four times larger than the one below it. */
+            :root { --frame-pad-bottom: max(16px, env(safe-area-inset-bottom)); }
             h1 { font-size: 21px; }
         }
         #results { margin-top: 24px; display: flex; flex-direction: column; gap: 16px; max-height: 60vh; overflow-y: auto; }
@@ -384,6 +480,15 @@
         .info { margin-top: 20px; padding: 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; font-size: 12px; color: #8b949e; }
         .info a { color: #58a6ff; text-decoration: none; }
         .info a:hover { text-decoration: underline; }
+        /* Two links sharing the row the "back" link used to occupy alone. */
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 4px 16px;
+            margin-top: 8px;
+        }
     </style>
 </head>
 <body>
@@ -401,6 +506,12 @@
     </div>
 
     <div class="container">
+        <!-- Decorative rotating sheen on the frame line. Empty and inert: it is
+             aria-hidden, takes no pointer events, and carries no text. Kept as
+             markup rather than a ::before on .container because a pseudo-element
+             on the frame could not host a second, independently rotating layer
+             behind a mask without also rotating the frame's rounded corners. -->
+        <span class="frame-ring" aria-hidden="true"></span>
         <h1>MeshCore Vanity Key Generator</h1>
         <p class="subtitle">Generate Ed25519 keys with custom hex prefix/suffix patterns using your browser's computational power.</p>
 
@@ -495,7 +606,15 @@
             <p style="margin-top: 8px;"><strong>Tip:</strong> Shorter patterns are found faster. A 2-char prefix takes seconds; a 6-char pattern may take hours.</p>
 
             <p style="margin-top: 8px;">Inspired by <a href="https://meshcore.io/">MeshCore</a>.</p>
-            <p style="margin-top: 8px;"><a href="https://neohiro.github.io/">← Back to neohiro.github.io</a></p>
+            <!-- One row, two directions: back to the parent site on the left, the
+                 source on the right. flex-wrap matters here rather than being
+                 decoration - on a narrow phone the two labels are wider together
+                 than the content box, and without wrapping the right-hand link
+                 would push the row into a horizontal scroll. -->
+            <div class="info-row">
+                <a href="https://neohiro.github.io/">← Back to neohiro.github.io</a>
+                <a href="https://github.com/neohiro/meshcore-vanity-key">Go to GitHub repository →</a>
+            </div>
         </div>
 
         <!-- Visitor counter, centred under the info frame. This is the
@@ -526,6 +645,16 @@
     <script>
         let workers = [];
         let mining = false;
+        // Mirror `mining` onto <body> so CSS can stand the decoration down while
+        // a search runs: the workers want every core, and the frame sheen is not
+        // worth competing with them. A setter rather than a classList call at
+        // each exit, because the flag is cleared on four separate worker
+        // callbacks plus stopMining() - one of them forgetting is exactly how a
+        // decorative animation ends up spinning through a finished search.
+        function setMining(value) {
+            mining = value;
+            document.body.classList.toggle('is-mining', mining);
+        }
         // Guards double-start while startMining() awaits libsodium.ready:
         // `mining` is still false during that await, so it cannot block re-entry.
         let starting = false;
@@ -1996,7 +2125,7 @@ function detectOptimalWorkers() {
                 initTimeout = setTimeout(() => {
                     if (mining && workers.includes(w)) {
                         terminateAllWorkers();
-                        mining = false;
+                        setMining(false);
                         clearStatusText();
                         setFormDisabled(false);
                         document.getElementById('start-btn').disabled = false;
@@ -2024,7 +2153,7 @@ function detectOptimalWorkers() {
                 w.onerror = function(e) {
                     if (!isCurrent()) return;      // stale worker, ignore
                     clearOwnInitTimeout();
-                    mining = false;
+                    setMining(false);
                     clearStatusText();
                     setFormDisabled(false);
                     document.getElementById('start-btn').disabled = false;
@@ -2115,7 +2244,7 @@ function detectOptimalWorkers() {
                         }
                     } else if (e.data.type === 'found') {
                         clearOwnInitTimeout();
-                        mining = false;
+                        setMining(false);
                         // Retire the startup status on this path too. A short
                         // search can match inside the FIRST batch (BATCH_SIZE
                         // 256) and so deliver 'found' before any 'progress'
@@ -2137,7 +2266,7 @@ function detectOptimalWorkers() {
                         terminateAllWorkers();
                     } else if (e.data.type === 'error') {
                         clearOwnInitTimeout();
-                        mining = false;
+                        setMining(false);
                         // Same reasoning as 'found': an error can arrive with no
                         // 'progress' before it, so the startup status has to be
                         // retired here too.
@@ -2152,7 +2281,7 @@ function detectOptimalWorkers() {
                 };
             }
 
-            mining = true;
+            setMining(true);
             setFormDisabled(true);
             document.getElementById('start-btn').disabled = true;
             document.getElementById('stop-btn').disabled = false;
@@ -2471,7 +2600,7 @@ function detectOptimalWorkers() {
         function stopMining() {
             terminateAllWorkers();
             starting = false;
-            mining = false;
+            setMining(false);
             setFormDisabled(false);
             document.getElementById('start-btn').disabled = false;
             document.getElementById('stop-btn').disabled = true;

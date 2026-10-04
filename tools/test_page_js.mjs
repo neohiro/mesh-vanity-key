@@ -1340,6 +1340,81 @@ check('visitor counter: static image badge, centred under the info frame', () =>
         'the counter must be centred');
     ok(/\.visitor-counter\s*\{[^}]*margin-top:/.test(html),
         'the counter needs spacing so it reads as a footer');
+
+    // Symmetry of the whitespace around the badge. It is asserted on RENDERED
+    // geometry in tools/smoke_browser.py at two viewport widths; these checks
+    // pin WHY it is symmetric, so the cause cannot be quietly reverted - the
+    // two edges must keep coming from one shared token rather than from two
+    // literals that happen to match today.
+    ok(/--frame-pad-bottom:\s*max\(40px,\s*env\(safe-area-inset-bottom\)\)/.test(html),
+        'the frame must define its bottom padding as a shared token');
+    ok(/\.visitor-counter\s*\{[^}]*margin-top:\s*var\(--frame-pad-bottom\)/.test(html),
+        "the badge's top margin must reuse the frame's bottom padding token");
+    ok(/\.container\s*\{[^}]*padding:[^;]*var\(--frame-pad-bottom\)/.test(html),
+        "the frame's own bottom padding must use that token");
+    ok(/@media \(max-width:\s*480px\)[\s\S]*?--frame-pad-bottom:\s*max\(16px/.test(html),
+        'the narrow-screen breakpoint must re-point the token, not leave it at 40px');
+});
+
+check('frame: brighter edge, faint rotating hue, minimal outward glow', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+
+    // The ring is markup, not a pseudo-element on .container: it has to host a
+    // second rotating layer behind a mask, and rotating the frame's own
+    // pseudo-element would rotate its rounded corners with it.
+    ok(/<span class="frame-ring" aria-hidden="true"><\/span>/.test(html),
+        'the frame ring must exist as an inert, aria-hidden element');
+    ok(/\.frame-ring\s*\{[^}]*pointer-events:\s*none/.test(html),
+        'the frame ring must never intercept clicks');
+    ok(/\.frame-ring\s*\{[^}]*mask-composite:\s*exclude/.test(html),
+        'the ring must be masked to the border band so corners stay put');
+    ok(/\.container\s*\{[^}]*border:\s*1px solid #3a424c/.test(html),
+        'the frame edge must be the brighter #3a424c');
+    ok(/box-shadow:[\s\S]{0,120}?0 0 26px -10px rgba\(88,\s*166,\s*255/.test(html),
+        'the outward glow must stay minimal (wide blur, heavy negative spread)');
+
+    // Rotation must be a compositor-only transform. An animated @property angle
+    // repaints the gradient every frame on the main thread, which is exactly the
+    // cost this page cannot afford while every core is mining.
+    ok(/@keyframes frame-sheen\s*\{\s*to\s*\{\s*transform:\s*rotate\(1turn\)/.test(html),
+        'the sheen must rotate via transform, not an animated angle');
+    ok(!/@property[^;]*--[a-z-]*angle/.test(html),
+        'no animated @property angle: that repaints per frame');
+
+    // ...and it must yield to the search rather than compete with it.
+    ok(/body\.is-mining \.frame-ring::before\s*\{[^}]*animation-play-state:\s*paused/.test(html),
+        'the sheen must pause while a search runs');
+    ok(/@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.frame-ring::before\s*\{\s*animation:\s*none/.test(html),
+        'the sheen must be off under prefers-reduced-motion');
+    // setMining() is the only thing allowed to move the flag, so no exit path
+    // can leave the sheen paused after the search is over.
+    ok(/function setMining\(value\)/.test(html),
+        'mining state must go through a setter that syncs the body class');
+    ok(!/^\s*mining = (true|false);/m.test(html),
+        'no raw assignment to `mining` may bypass setMining()');
+});
+
+check('the back link shares its row with the repository link', () => {
+    const html = fs.readFileSync(pageHtmlPath, 'utf8');
+
+    ok(/href="https:\/\/neohiro\.github\.io\/">← Back to neohiro\.github\.io<\/a>/.test(html),
+        'the back link must survive unchanged');
+    ok(/href="https:\/\/github\.com\/neohiro\/meshcore-vanity-key">Go to GitHub repository →<\/a>/.test(html),
+        'the repository link must sit in the same row, pointing at this repo');
+    const row = html.indexOf('class="info-row"');
+    const back = html.indexOf('← Back to neohiro.github.io');
+    const repo = html.indexOf('Go to GitHub repository');
+    ok(row !== -1 && back > row && repo > row,
+        'both links must live inside the shared row');
+    ok(/\.info-row\s*\{[^}]*justify-content:\s*space-between/.test(html),
+        'the row must push the repository link to the right');
+    // Without wrapping, two labels wider than a phone's content box put the
+    // page into a horizontal scroll - which body sets overflow-x:hidden on,
+    // so the link would simply be unreachable rather than scrollable.
+    ok(/\.info-row\s*\{[^}]*flex-wrap:\s*wrap/.test(html),
+        'the row must wrap rather than overflow on a narrow screen');
+    ok(!/<p[^>]*>\s*<a href="https:\/\/neohiro\.github\.io\/">← Back/.test(html),
+        'the back link must no longer be alone in its own paragraph');
 });
 
 check('background: subtle gradient and rare star flickers, reduced-motion safe', () => {
