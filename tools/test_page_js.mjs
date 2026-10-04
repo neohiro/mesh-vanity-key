@@ -491,13 +491,35 @@ function seedHistory(entries) {
     storage.set(api.HISTORY_KEY, JSON.stringify(entries));
 }
 
+// Pending async checks, so the report can wait for them.
+//
+// `asyncCheck` is async, so calling it without `await` at the call site returns
+// a floating promise. Two things then go wrong, both silently: the check's
+// `passed++` / `failures.push` can land AFTER the report is printed, so a
+// FAILING test can be reported as green, and the pass count can be short. It
+// also runs concurrently with its neighbours, so a shared guard - `starting`,
+// `mining` - can let all but the first proceed and leave the rest vacuous.
+//
+// Every registered promise is awaited before reporting, and the started/settled
+// counts are compared, so neither failure mode can pass unnoticed.
+const pendingChecks = [];
+let asyncChecksStarted = 0;
+let asyncChecksSettled = 0;
+
 async function asyncCheck(name, fn) {
-    try {
-        await fn();
-        passed++;
-    } catch (e) {
-        failures.push(`${name}: ${e.message}`);
-    }
+    asyncChecksStarted++;
+    const p = (async () => {
+        try {
+            await fn();
+            passed++;
+        } catch (e) {
+            failures.push(`${name}: ${e.message}`);
+        } finally {
+            asyncChecksSettled++;
+        }
+    })();
+    pendingChecks.push(p);
+    return p;
 }
 
 await asyncCheck('loadHistory: drops malformed entries and non-objects', async () => {
@@ -1147,6 +1169,30 @@ await asyncCheck('the live panel carries the live figures the grey line used to 
         ok(/\d+\.\d\d%/.test(api.getLiveEtaText('live-progress')),
             `progress must still be shown live: ${api.getLiveEtaText('live-progress')}`);
         await api.stopMining();
+    });
+});
+
+await asyncCheck('the pre-flight line is refreshed when a search starts', async () => {
+    // It is static from the moment work begins, so re-deriving it at Start is its
+    // last chance to reflect anything learned since the user last typed - most
+    // of all the per-machine scaling calibration, which may have just completed
+    // and which changes both the rate and the worker count the line quotes.
+    await withSodium(async () => {
+        primeForm();
+        api.updateEstimate();
+        const before = api.getEstimateText();
+
+        // Move the calibration underneath the line without touching the form.
+        api.__setMeasuredScale([[1, 1], [2, 1.9], [4, 3.6], [8, 7.0]]);
+        eq(api.getEstimateText(), before,
+            'precondition: the line does not track the calibration by itself');
+        await api.startMining();
+        ok(api.getEstimateText() !== before,
+            'starting a search must re-derive the line against the calibration '
+            + `then in force (was ${before})`);
+        await api.stopMining();
+        api.__setMeasuredScale(null);
+        api.__setScaleCacheRaw(null);
     });
 });
 
@@ -3526,6 +3572,33 @@ check('terminateAllWorkers is idempotent', () => {
 });
 
 // ---- report ----------------------------------------------------------------
+
+// Settle every async check before reporting. See the note on pendingChecks:
+// without this a check that was not awaited at its call site could record its
+// failure after this point and the run would exit green.
+//
+// The wait is BOUNDED. A check whose promise never settles - a leaked timer, an
+// unresolved await - would otherwise hang the whole suite forever rather than
+// failing, which is strictly worse than a red run: one hung check stops every
+// later check from being reported at all. After the cap, anything still
+// outstanding is named as a failure.
+const PENDING_DRAIN_MS = 60000;
+let drainTimer = null;
+await Promise.race([
+    Promise.all(pendingChecks),
+    new Promise((r) => { drainTimer = setTimeout(r, PENDING_DRAIN_MS); }),
+]);
+// Must clear it: an armed timer keeps the event loop alive, so leaving it would
+// add PENDING_DRAIN_MS to the wall time of every run, including passing ones.
+if (drainTimer !== null) clearTimeout(drainTimer);
+
+const stuckChecks = asyncChecksStarted - asyncChecksSettled;
+if (stuckChecks > 0) {
+    failures.push(
+        `harness: ${stuckChecks} async check(s) did not settle within `
+        + `${PENDING_DRAIN_MS}ms - an await in a test never resolved, so the `
+        + 'remaining checks were never reached');
+}
 
 if (failures.length) {
     console.error(`\nFAILED ${failures.length} of ${failures.length + passed} checks:\n`);

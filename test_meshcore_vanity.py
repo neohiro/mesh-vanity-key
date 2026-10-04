@@ -2196,17 +2196,45 @@ def test_separate_prefix_and_suffix_on_base64_use_the_data_region() -> None:
     assert data.endswith("c"), result.encoded
 
 
+def _search_outcome(prefix, **kwargs):
+    """Run a search expected NOT to be refused, and report what happened.
+
+    Several reachability tests need to assert one thing only: that a pattern is
+    not refused as IMPOSSIBLE. Whether the search then finds a key is a separate,
+    probabilistic question - and asserting on it makes the test flaky, because a
+    match on an early attempt satisfies neither ``pytest.raises(RuntimeError)``
+    nor an expectation of a result.
+
+    Three of these were measurably flaky for exactly that reason: a 1-character
+    prefix plus a 1-character suffix is a 256-key space, so with a budget of one
+    attempt they flake at 0.25-0.5% - rare enough to pass locally every time and
+    certain to bite eventually. One did.
+
+    So either outcome is accepted and returned, and the caller asserts only what
+    it means to assert:
+
+      "result: ..."  - a key was found
+      "exhausted"    - the attempt budget ran out first
+      ValueError     - refused for reachability, which is the bug being guarded
+    """
+    try:
+        result = generate_vanity_key(prefix, **kwargs)
+    except RuntimeError:
+        return "exhausted"
+    return "result: " + result.encoded
+
+
 def test_overlapping_prefix_and_suffix_are_rejected() -> None:
     """Overlapping patterns can never both match, so refuse them up front."""
     with pytest.raises(ValueError, match="overlap"):
         generate_vanity_key(
             "a" * 40, encoding="hex", suffix_pattern="b" * 30, max_attempts=1
         )
-    # Exactly filling the key is the boundary and must stay allowed.
-    with pytest.raises(RuntimeError):
-        generate_vanity_key(
-            "a" * 32, encoding="hex", suffix_pattern="b" * 32, max_attempts=1
-        )
+    # Exactly filling the key is the boundary and must stay allowed. Either
+    # outcome is acceptable here; being refused is not.
+    assert _search_outcome(
+        "a" * 32, encoding="hex", suffix_pattern="b" * 32, max_attempts=64
+    )
 
 
 def test_suffix_longer_than_the_key_is_rejected() -> None:
@@ -2296,14 +2324,13 @@ def test_bech32_suffix_allows_the_reachable_character_at_its_offset(length):
     """The constrained slot is 7 from the end, whatever the suffix length."""
     offset = length - (_BECH32_CHECKSUM_LEN + 1)
     for good in sorted(_BECH32_LAST_DATA_VALUES):
-        # Must not raise a reachability error; exhausting the attempt budget is
-        # the expected outcome.
-        with pytest.raises(RuntimeError):
-            generate_vanity_key(
-                BECH32_PREFIX, encoding="bech32",
-                suffix_pattern=bech32_suffix(length, offset, good),
-                max_attempts=1,
-            )
+        # Must not be refused for reachability. Whether the search then finds a
+        # key is irrelevant and probabilistic, so either outcome is accepted.
+        assert _search_outcome(
+            BECH32_PREFIX, encoding="bech32",
+            suffix_pattern=bech32_suffix(length, offset, good),
+            max_attempts=64,
+        )
 
 
 @pytest.mark.parametrize("length", [7, 8, 9, 10, 12])
@@ -2336,11 +2363,10 @@ def test_bech32_reachable_character_in_the_wrong_place_is_still_refused(length):
 def test_bech32_short_suffixes_are_never_refused(pattern):
     """6 or fewer characters land in the checksum, which is uniform."""
     assert len(pattern) <= _BECH32_CHECKSUM_LEN
-    with pytest.raises(RuntimeError):
-        generate_vanity_key(
-            BECH32_PREFIX, encoding="bech32", suffix_pattern=pattern,
-            max_attempts=1,
-        )
+    assert _search_outcome(
+        BECH32_PREFIX, encoding="bech32", suffix_pattern=pattern,
+        max_attempts=64,
+    )
 
 
 def test_bech32_offset_helper():
@@ -2393,8 +2419,7 @@ def test_base58_prefixes_are_never_refused(pattern):
     """
     assert set(pattern) <= VALID_BASE58, f"{pattern!r} is not valid base58"
     _validate_suffix_reachable("base58", pattern, "suffix")
-    with pytest.raises(RuntimeError):
-        generate_vanity_key(pattern, encoding="base58", max_attempts=1)
+    assert _search_outcome(pattern, encoding="base58", max_attempts=64)
 
 
 def test_base58_uppercase_L_is_accepted_despite_lowercase_l_being_excluded():
@@ -2405,17 +2430,15 @@ def test_base58_uppercase_L_is_accepted_despite_lowercase_l_being_excluded():
     valid 'L' prefix refused for containing an invalid 'l'.
     """
     assert "l" not in VALID_BASE58 and "L" in VALID_BASE58
-    with pytest.raises(RuntimeError):
-        generate_vanity_key("LZ", encoding="base58", max_attempts=1)
+    assert _search_outcome("LZ", encoding="base58", max_attempts=64)
 
 
 @pytest.mark.parametrize("pattern", ["f", "0f", "abc", "0123456789abcdef"])
 def test_hex_suffixes_are_never_refused(pattern):
     _validate_suffix_reachable("hex", pattern, "suffix")
-    with pytest.raises(RuntimeError):
-        generate_vanity_key(
-            "a", encoding="hex", suffix_pattern=pattern, max_attempts=1
-        )
+    assert _search_outcome(
+        "a", encoding="hex", suffix_pattern=pattern, max_attempts=64
+    )
 
 
 def test_the_dispatcher_accepts_every_encoding_and_an_empty_pattern():
@@ -2455,10 +2478,7 @@ def test_both_mode_uses_the_prefix_for_the_bech32_check():
 
 def test_a_short_bech32_prefix_in_both_mode_is_not_refused():
     """The complement: a pattern that cannot reach the slot must be allowed."""
-    with pytest.raises(RuntimeError):
-        generate_vanity_key(
-            "mc1qc", encoding="bech32", both=True, max_attempts=1,
-        )
+    assert _search_outcome("mc1qc", encoding="bech32", both=True, max_attempts=64)
 
 
 def test_reserved_warning_is_not_emitted_for_a_hex_suffix() -> None:
@@ -2516,10 +2536,9 @@ def test_bare_suffix_starting_00_is_not_warned_either() -> None:
     meshcore_vanity._warned_reserved.clear()
     with _w.catch_warnings(record=True) as caught:
         _w.simplefilter("always")
-        with pytest.raises(RuntimeError):
-            generate_vanity_key(
-                "00ff", encoding="hex", suffix=True, max_attempts=1
-            )
+        assert _search_outcome(
+            "00ff", encoding="hex", suffix=True, max_attempts=64
+        )
     assert not [x for x in caught if "reserved" in str(x.message)]
 
 

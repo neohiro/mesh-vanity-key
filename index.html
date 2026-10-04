@@ -1671,6 +1671,14 @@ function detectOptimalWorkers() {
             const matchSuffix = suffix.length > 0;
             const numWorkers = detectOptimalWorkers();
 
+            // Re-derive the pre-flight line at the moment the user commits, not
+            // only when they last typed. It is static from here on, so this is
+            // its last chance to reflect anything learned since the last edit -
+            // notably the per-machine scaling calibration, which may have just
+            // completed, and which changes both the rate and the worker count
+            // this line quotes.
+            updateEstimate();
+
             window.liveEstimateShown = false;
             resetRateSmoothing();
             resetEtaSmoothing();
@@ -2476,9 +2484,11 @@ function detectOptimalWorkers() {
             // the stopped run's history if the panel were ever reopened before a
             // new resetRateGraph() runs.
             resetRateGraph();
-            // The measured rates belong to the run that just ended; a stale
-            // aggregate would keep labelling the next estimate "measured" after
-            // the workers that produced it are gone.
+            // Refresh the pre-flight line on the way out too. It is static for
+            // the duration of a search, so the only thing that can have changed
+            // is the calibration behind it - and re-deriving it here means the
+            // label cannot be left reading "estimated" after the page has
+            // measured this machine.
             clearStatusText();
             updateEstimate();
         }
