@@ -173,6 +173,7 @@ def _worker_search(args: tuple) -> tuple:
             remaining = max_attempts - attempts
             if remaining < batch:
                 batch = remaining
+        batch_start_attempts = attempts
 
         for _ in range(batch):
             # Scalar is masked to 256 bits, so to_bytes(32) cannot overflow.
@@ -232,9 +233,18 @@ def _worker_search(args: tuple) -> tuple:
 
         # Feed the shared live-progress counter once per batch (not per key)
         # to keep lock contention negligible on the hot path.
+        #
+        # Add what this batch ACTUALLY processed, not BATCH_SIZE. The last batch
+        # of a bounded search is trimmed to the worker's remaining share, so
+        # adding a full batch there counted candidates that were never tried -
+        # with a share of 2 and 8 workers, 16 real attempts were reported as
+        # 128. The parent takes max(counter, sum of returned counts) as the
+        # final total, so that inflation made the reported attempt count, and
+        # the rate derived from it, exceed the --max-attempts the user set. One
+        # subtraction per batch keeps the hot loop untouched.
         if _PROGRESS_COUNTER is not None:
             with _PROGRESS_COUNTER.get_lock():
-                _PROGRESS_COUNTER.value += BATCH_SIZE
+                _PROGRESS_COUNTER.value += attempts - batch_start_attempts
 
 
 # Pre-define _bech32_hrp_expand at module level for worker access
@@ -545,6 +555,38 @@ def _estimate_search_space(
     if suffix_len is None:
         return space
     return space * _end_search_space(encoding, suffix_len)
+
+
+def _expected_attempts(
+    encoding: Encoding,
+    prefix_len: int,
+    suffix_len: int,
+    suffix: bool,
+    two_ended: bool,
+) -> int:
+    """Expected attempts for one match mode, for every progress display.
+
+    The one mode that is easy to get wrong is a bare ``--suffix``: the pattern
+    sits at the END of the key, and the end's last data character carries fewer
+    bits than the start's alphabet implies (4 in base64, 1 in bech32), so it must
+    be costed with _end_search_space().
+
+    Costing it against the START alphabet instead overstated the expectation 4x
+    for base64 and up to 16x for a long bech32 suffix. Measured on
+    `--suffix Ab4 --encoding base64`: the pre-flight line quoted 65,536 expected
+    attempts and an ETA of ~2s, while the in-search progress line divided by
+    262,144 - so it read 7.63% at 20,000 attempts and the ETA had drifted to
+    10.4s and rising. The two disagreed by exactly the factor above.
+
+    Both search paths and the CLI's pre-flight line go through here, which is
+    what _estimate_search_space's own docstring promises; the duplication this
+    replaces is what broke that promise.
+    """
+    if two_ended:
+        return _estimate_search_space(encoding, prefix_len, suffix_len)
+    if suffix:
+        return _estimate_search_space(encoding, 0, prefix_len)
+    return _estimate_search_space(encoding, prefix_len, None)
 
 
 def _max_encoded_len(encoding: Encoding, hrp: str) -> int:
@@ -944,16 +986,13 @@ def generate_vanity_key(
     is_hex = encoding == "hex"
     # HRP expansion is loop-invariant; hoist it out of the hot path.
     hrp_expanded = _bech32_hrp_expand(hrp) if encoding == "bech32" else None
-    # Cost of the search. An empty pattern constrains nothing and contributes a
-    # factor of 1, which _estimate_search_space gets right on its own.
-    if two_ended:
-        expected_attempts = _estimate_search_space(encoding, prefix_len, suffix_len)
-    elif suffix:
-        # The whole pattern sits at the END of the key, so it is costed against
-        # the end alphabet rather than the start one.
-        expected_attempts = _estimate_search_space(encoding, 0, prefix_len)
-    else:
-        expected_attempts = _estimate_search_space(encoding, prefix_len, None)
+    # Cost of the search, decided ONCE for every progress display: the live line
+    # in the serial loop, the one the monitor thread prints in the parallel path,
+    # and the CLI's pre-flight estimate. An empty pattern constrains nothing and
+    # contributes a factor of 1, which _estimate_search_space gets right itself.
+    expected_attempts = _expected_attempts(
+        encoding, prefix_len, suffix_len, suffix, two_ended
+    )
 
     # Multi-worker parallel search
     if workers > 1:
@@ -994,9 +1033,9 @@ def generate_vanity_key(
     _seed_keypair = nacl.bindings.crypto_sign_seed_keypair
 
     # Calculate expected attempts for progress percentage
-    expected_attempts = _estimate_search_space(
-        encoding, prefix_len, suffix_len if two_ended else None
-    )
+    # Already computed above by _expected_attempts(); the CLI's pre-flight line
+    # uses the same helper, so the figure quoted before the search and the one
+    # measured against during it are the same number by construction.
 
     # Scalar walk: take the 256-bit counter from the seed once, then increment it
     # in place for each attempt. Note this counter is a SEED, not the private
@@ -1128,6 +1167,11 @@ def _generate_vanity_key_parallel(
     Live progress combines the standard stderr echo format with a shared
     counter fed by the workers once per batch, so long unbounded searches
     report continuously instead of only on worker completion.
+
+    ``expected_attempts`` is computed by the caller through
+    _expected_attempts() and used as given. It was previously recomputed here
+    from a different expression, which silently disagreed with the caller's
+    figure for a bare --suffix (4x in base64) - see that function's docstring.
     """
     ctx = mp.get_context("spawn")
     # Split the total attempt budget across workers so --max-attempts keeps its
@@ -1137,9 +1181,6 @@ def _generate_vanity_key_parallel(
     # the worker count, where the bound cannot be met exactly anyway.
     per_worker_max = (
         max(1, max_attempts // workers) if max_attempts is not None else None
-    )
-    expected_attempts = _estimate_search_space(
-        encoding, prefix_len, suffix_len if two_ended else None
     )
     progress_counter = ctx.Value("Q", 0)
     with ctx.Pool(processes=workers, initializer=_init_worker_counter,
@@ -1506,26 +1547,37 @@ def _main() -> int:
         print(f"Error: --workers must be <= 256, got {workers_n}",
               file=sys.stderr)
         return 2
+    # Same reasoning for the two remaining numeric options. generate_vanity_key
+    # rejects both, but only once it is reached - which is AFTER the benchmark
+    # burns CPU and, on a terminal, AFTER the user has already typed "y" to the
+    # confirmation prompt. Answering the prompt and then being told the request
+    # was invalid is the same wrong-then-fail sequence this block exists to
+    # prevent, so reject them in the same place.
+    if args.max_attempts is not None and args.max_attempts <= 0:
+        print(f"Error: --max-attempts must be positive, got {args.max_attempts}",
+              file=sys.stderr)
+        return 2
+    if args.progress_interval <= 0:
+        print(f"Error: --progress-interval must be positive, "
+              f"got {args.progress_interval}", file=sys.stderr)
+        return 2
 
     # Budget estimator: search-space size + locally measured rate + ETA.
     # Requires confirmation on interactive terminals unless --force.
     # All user-facing text goes to stderr: stdout carries only the key.
     try:
         # Same model the search itself uses, so the figure quoted before the
-        # search is the figure used during it. A bare --suffix constrains only
-        # the end, so it passes prefix_len 0.
-        if args.both:
-            est = _estimate_search_space(
-                args.encoding, len(args.prefix), len(args.prefix)
-            )
-        elif suffix_pattern is not None:
-            est = _estimate_search_space(
-                args.encoding, len(args.prefix), len(suffix_pattern)
-            )
-        elif use_suffix:
-            est = _estimate_search_space(args.encoding, 0, len(args.prefix))
-        else:
-            est = _estimate_search_space(args.encoding, len(args.prefix), None)
+        # search is the figure used during it. _expected_attempts() is the same
+        # helper generate_vanity_key() uses for its live progress line, so the
+        # two agree by construction rather than by two expressions happening to
+        # match - which is how a bare --suffix came to disagree 4x.
+        est = _expected_attempts(
+            args.encoding,
+            len(args.prefix),
+            len(suffix_pattern) if suffix_pattern is not None else len(args.prefix),
+            use_suffix,
+            args.both or suffix_pattern is not None,
+        )
         expected = est
         measured = _benchmark_rate()
         # Spawning the pool costs a few tenths of a second. If the search is

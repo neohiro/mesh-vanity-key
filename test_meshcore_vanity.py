@@ -2693,5 +2693,169 @@ def test_a_parallel_search_reports_the_requested_budget_not_a_workers() -> None:
     assert "exceeded max_attempts=500" in proc.stderr, proc.stderr
 
 
+@pytest.mark.parametrize("argv,prefix_len,suffix_len,suffix,two_ended,expected", [
+    # Bare --suffix: the pattern sits at the END, so the expectation must use the
+    # end alphabet. This is the mode that drifted 4x, and the pre-flight-only
+    # test above never covered it - it only ever passed --suffix WITH a value,
+    # which is the two-ended mode, not this one.
+    (["A4", "--suffix", "--encoding", "base64"], 2, 0, True, False, 64 * 16),
+    (["qzzz", "--suffix", "--encoding", "bech32"], 4, 0, True, False, 32 ** 4),
+    (["a1", "--suffix", "--encoding", "hex"], 2, 0, True, False, 16 ** 2),
+    # ...and the other three modes, so the shared helper cannot regress either.
+    (["abcd", "--encoding", "base64"], 4, 0, False, False, 64 ** 4),
+    (["abcd", "--both", "--encoding", "hex"], 4, 4, False, True, 16 ** 8),
+    (["ab", "--suffix", "Yc"], 2, 2, False, True, 64 ** 2 * (64 * 16)),
+    (["ab", "--suffix", "b", "--encoding", "hex"], 2, 1, False, True, 16 ** 2 * 16),
+])
+def test_expected_attempts_uses_the_end_alphabet_for_a_suffix_only_search(
+    argv, prefix_len, suffix_len, suffix, two_ended, expected
+):
+    """One helper decides the expectation, and a suffix-only search uses the END.
+
+    `expected` is computed by hand from the alphabets, not from the module, so
+    this fails if the helper and the pre-flight line agree on the WRONG number.
+
+    The live progress line used to recompute this from a different expression
+    than the pre-flight line. For a bare --suffix they disagreed 4x in base64
+    (65,536 promised, 262,144 divided by), which is the drift this pins.
+    """
+    import re
+
+    from meshcore_vanity import _expected_attempts
+
+    got = _expected_attempts(
+        "base64" if "base64" in argv else
+        "bech32" if "bech32" in argv else
+        "hex" if "hex" in argv else "base64",
+        prefix_len, suffix_len, suffix, two_ended,
+    )
+    assert got == expected, (argv, got, expected)
+
+    # The CLI's pre-flight figure must be that same number.
+    proc = _run_cli(*argv, "--force", "--max-attempts", "1")
+    m = re.search(r"Estimate: ([\d,]+) expected", proc.stderr)
+    assert m, proc.stderr
+    quoted = int(m.group(1).replace(",", ""))
+    assert quoted == expected, (argv, quoted, expected)
+
+
+def test_the_live_progress_line_divides_by_the_quoted_expectation():
+    """End-to-end: the percentage in the live line uses the quoted figure.
+
+    Recovers the divisor from a progress line (attempts / pct) and requires it to
+    equal the pre-flight number. Uses a bare --suffix whose expectation is small
+    enough for the two-decimal percentage to keep enough resolution to compare,
+    with a budget below the expectation so the search always exhausts and always
+    prints - no dependence on whether a match happens to come early.
+    """
+    import re
+
+    proc = _run_cli("A4", "--suffix", "--encoding", "base64", "--workers", "1",
+                    "--force", "--progress-interval", "1", "--max-attempts", "400")
+    m = re.search(r"Estimate: ([\d,]+) expected", proc.stderr)
+    assert m, proc.stderr
+    quoted = int(m.group(1).replace(",", ""))
+    assert quoted == 1024, quoted          # 64 * 16, i.e. the END alphabet
+
+    lines = re.findall(r"attempts=([\d,]+) \S+ \S+ progress=([\d.]+)%", proc.stderr)
+    assert lines, proc.stderr
+    attempts_txt, pct_txt = lines[-1]
+    live = int(attempts_txt.replace(",", "")) / (float(pct_txt) / 100)
+    assert abs(live - quoted) <= quoted * 0.01, (
+        f"pre-flight said {quoted:,} but the live line divided by {live:,.0f}"
+    )
+
+
+def _worker_args(prefix, encoding, max_attempts, start_offset=0, total=1):
+    """Build one _worker_search argument tuple, for the counter test below."""
+    return (
+        prefix, encoding, True, max_attempts, b"\x07" * 32,
+        len(prefix), prefix.lower(), "", slice(-1, None), False,
+        slice(0, len(prefix)), "mc", start_offset, start_offset, total,
+        encoding == "hex", None,
+    )
+
+
+@pytest.mark.parametrize("max_attempts", [1, 2, 15, 16, 17, 31, 33, 64, 100])
+def test_the_shared_progress_counter_counts_real_work_not_full_batches(max_attempts):
+    """The shared counter must equal the attempts actually performed.
+
+    This feeds every live progress line in parallel mode, and the parent also
+    takes max(counter, sum of returned counts) as the FINAL attempt total. It
+    used to add a whole batch per batch regardless of how many candidates that
+    batch really tried, so the trimmed last batch of a bounded search counted
+    candidates that were never attempted: a share of 2 across 8 workers reported
+    16 real attempts as 128. That made the displayed rate wrong and let the
+    reported total exceed the --max-attempts the user had set.
+
+    The worker is called directly with a real mp.Value, so this asserts the
+    accounting itself rather than a formatted line - no pool, no subprocesses.
+    """
+    counter = multiprocessing.Value("Q", 0)
+    saved = meshcore_vanity._PROGRESS_COUNTER
+    meshcore_vanity._PROGRESS_COUNTER = counter
+    try:
+        # "abcdef" is effectively unreachable in this budget, so the worker
+        # always runs to exhaustion and returns no match.
+        _priv, attempts, _counter = meshcore_vanity._worker_search(
+            _worker_args("abcdef", "hex", max_attempts)
+        )
+    finally:
+        meshcore_vanity._PROGRESS_COUNTER = saved
+
+    assert attempts == max_attempts, "worker did not honour its own budget"
+    assert counter.value == max_attempts, (
+        f"counter reported {counter.value} for {max_attempts} real attempts"
+    )
+    assert counter.value <= max_attempts
+
+
+def test_the_progress_counter_is_exact_across_concurrent_workers() -> None:
+    """Many workers, each with a share that is not a multiple of the batch."""
+    workers = 4
+    per_worker = 19            # 16 + 3: the last batch is trimmed, as intended
+    real_total = per_worker * workers
+    counter = multiprocessing.Value("Q", 0)
+    ctx = multiprocessing.get_context("spawn")
+    pool = ctx.Pool(processes=workers,
+                    initializer=meshcore_vanity._init_worker_counter,
+                    initargs=(counter,))
+    try:
+        returned = sum(
+            att for _priv, att, _c in pool.imap_unordered(
+                meshcore_vanity._worker_search,
+                [_worker_args("abcdef", "hex", per_worker, w, workers)
+                 for w in range(workers)],
+            )
+        )
+    finally:
+        pool.terminate()
+        pool.join()
+
+    assert returned == real_total
+    assert counter.value == real_total, (
+        f"counter reported {counter.value} for {real_total} real attempts"
+    )
+
+
+@pytest.mark.parametrize("flag,value", [
+    ("--max-attempts", "0"),
+    ("--max-attempts", "-5"),
+    ("--progress-interval", "0"),
+    ("--progress-interval", "-1"),
+])
+def test_bad_numeric_options_are_refused_before_the_confirmation_prompt(flag, value):
+    """Rejected up front, not after the benchmark and the user's "y".
+
+    generate_vanity_key rejects both, but reaching it means the rate benchmark
+    has already run and an interactive user has already answered the prompt.
+    Assert the exit code and, critically, that no estimate line was printed.
+    """
+    proc = _run_cli("abcdef0123456789", "--encoding", "hex", flag, value)
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert "Estimate:" not in proc.stderr, proc.stderr
+    assert "must be positive" in proc.stderr, proc.stderr
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
