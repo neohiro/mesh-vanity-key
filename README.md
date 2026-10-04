@@ -31,6 +31,98 @@ devices and related tooling.
 
 Generates Ed25519 cryptographic keypairs until the encoded public key matches a target pattern (prefix, suffix, or both). The search is optimized with a scalar-walk algorithm that avoids repeated hashing, making it significantly faster than naive approaches.
 
+## Vanity & Functional Keypair Mining
+
+<p align="center">
+  <img alt="mining" src="https://img.shields.io/badge/mining-Ed25519%20prefix%20%2B%20suffix-7c4dff">
+  <img alt="meshtastic" src="https://img.shields.io/badge/Meshtastic-PSK%20%2B%20node%20ID-00b0d9">
+  <img alt="offline" src="https://img.shields.io/badge/mining-100%25%20in--browser-2ea043">
+</p>
+
+A node's identity is bytes out of a random number generator, and nothing about
+them is designed. `a3f1…c902` is as arbitrary as a Wi-Fi MAC address, and it has
+to be read off a QR code, dictated over a radio, or pasted into a phone by someone
+who cannot see the screen. Mining is the one case where brute force is the right
+answer: you pay for the search once, and every later contact with the node is
+cheaper. **[meshcore-vanity-key](https://neohiro.github.io/meshcore-vanity-key/)**
+is what this repository is, running entirely in the browser — Web Workers plus
+libsodium WASM, no network round-trip, no telemetry, and it still works offline
+once the page is loaded.
+
+### Vanity and functional are two different goals
+
+| | Vanity | Functional |
+|---|---|---|
+| **Why** | the identity reads well and is memorable | the identity is *checkable* by a human under bad conditions |
+| **Typical target** | `mc1qneohiro…`, `!a1b2c3…` | a prefix **and** a suffix, so a half-transcribed key fails loudly |
+| **Cost** | `16ⁿ` attempts for `n` hex characters — 4 is instant, 6 is minutes | that, squared: each constrained end multiplies rather than adds |
+| **Classic mistake** | asking for 9+ characters. That is a lottery ticket, not a mnemonic | mining a *reserved* prefix and then wondering why the client refuses the key |
+
+Same code path, same flags. The distinction only matters when deciding what to ask
+for — and in both cases the pattern is matched against the **encoded public key**,
+never the private one, which never leaves your machine.
+
+### Meshtastic prefix and suffix mining
+
+Meshtastic has two unrelated things people both call "the key", and they are mined
+by two unrelated means. Conflating them is the usual first mistake.
+
+**Channel PSK — symmetric, minable directly.** A channel is a name plus a
+pre-shared key written `base64:…`. `AQ==` is the single byte `0x01` and is the
+well-known default on every device — not a secret. `Ag==`–`Cg==` are the
+`simple1`–`simple9` shorthands. A private channel is 16 bytes (AES-128) or 32 bytes
+(AES-256). A PSK is raw key material rather than a signing key, so there is no
+keypair to derive — the bytes *are* the key, which makes a vanity PSK a genuinely
+**functional** target rather than a decoration. `--encoding base64` mines exactly
+this form:
+
+```bash
+./run.sh NHI --encoding base64              # channel key starting "NHI…"
+./run.sh NHI --encoding base64 --suffix 0   # …and ending "…0"
+./run.sh --encoding base64 --suffix qw      # suffix only
+```
+
+Memorable here means **transcribable**. A group reads a PSK out over an FM handheld
+before anybody has a phone paired, and a key with recognisable ends survives that
+round trip when a bare 24-character base64 blob does not. Note that base64's last
+character is constrained (see
+[Suffixes and base64 padding](#suffixes-and-base64-padding)), so a suffix must end
+in one of `048AEIMQUYcgkosw`.
+
+**Node / user ID — asymmetric, derived, not the key.** A node advertises `!` + hex,
+and since firmware 2.5 that ID is derived from the node's public-key identity
+rather than from a hardware MAC address — which is exactly what lets a node keep
+its identity across a factory reset. So mining an `!` ID mines a *consequence* of
+the key, through firmware's own derivation:
+
+```
+   seed ─▶ Ed25519 keypair ─▶ public key ─▶ firmware derivation ─▶ !a1b2c3d4
+            ▲ minable here                                   ▲ this is what you read
+```
+
+The middle step belongs to the firmware, so the honest workflow is: mine a
+**public-key** prefix or suffix, import it, read the `!` ID the node derives, and
+iterate. That is why this section says prefix and/or suffix on the *key*. Three
+consequences are worth knowing before spending an afternoon on it:
+
+- The ID is a fixed width, so there is no short form to ask for. `!a1b2c3d4` is
+  four bytes of derivation and nothing truncates it away.
+- An ID prefix is **not** a key prefix. Constraining `!a1b2c3d4` means constraining
+  a derivation of the key, not the key itself — so the search is no cheaper than
+  mining the key and usually dearer.
+- Public keys are TOFU-bound: the first key a node hears for a given node number is
+  the one it keeps. Change a key after it has been seen and peers treat you as a
+  stranger who replaced somebody.
+
+### One caveat, stated plainly
+
+Every device in this family generates its own key on first boot, and **nothing
+here changes the identity a shipped firmware hands you**. Mining is for a node you
+are deliberately provisioning: a fresh key imported over USB, a companion client,
+or a factory-reset device whose identity you are re-establishing anyway. If a node
+already has an identity, mine a *new* one and swap it in deliberately. Never
+overwrite a key that peers already hold.
+
 ## Browser Version
 
 **Live: [neohiro.github.io/meshcore-vanity-key](https://neohiro.github.io/meshcore-vanity-key/)**
@@ -644,7 +736,7 @@ you search in as one that now holds a private key.
 | `--case-sensitive` | off | Force case-sensitive matching. Implied for `base64`/`base64url`/`base58`, whose alphabets are case-sensitive. |
 | `--suffix [PATTERN]` | off | **With no value:** match the positional pattern against the **end** of the key instead of the start. **With a value:** require that value at the end *in addition to* the positional prefix — two independent patterns in one search. |
 | `--both` | off | Require the positional pattern at **both** ends, using that same pattern for each. |
-| `--max-attempts` | unlimited | Stop after N attempts. An exact upper bound, except that a budget smaller than the worker count gives every worker one attempt |
+| `--max-attempts` | unlimited | Stop after N attempts. An exact bound: the budget is split across workers by largest remainder, so the attempts actually performed sum to exactly N — including when N is smaller than the worker count |
 | `--progress-interval` | 100000 | Progress report frequency, in attempts |
 | `--no-output-private` | off | Suppress the private key, which is printed to stderr by default |
 | `--seed` | random | 64 hex chars (32 bytes) for deterministic search |

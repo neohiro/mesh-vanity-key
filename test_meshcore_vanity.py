@@ -10,6 +10,7 @@ import os
 import re
 import struct
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -2764,6 +2765,120 @@ def test_the_live_progress_line_divides_by_the_quoted_expectation():
     assert abs(live - quoted) <= quoted * 0.01, (
         f"pre-flight said {quoted:,} but the live line divided by {live:,.0f}"
     )
+
+
+def test_pool_lost_a_task_fails_open_and_only_on_total_loss() -> None:
+    """The predicate that turns a dead pool into an error, tested directly.
+
+    Liveness is useless here: multiprocessing.Pool replaces a dead worker with a
+    live one that holds no task, so "is any worker alive?" is always True. Only
+    the disappearance of the PIDs that were actually given the tasks proves the
+    result is never coming.
+    """
+    from meshcore_vanity import _pool_lost_a_task
+
+    class FakeProc:
+        def __init__(self, pid):
+            self.pid = pid
+
+    class FakePool:
+        def __init__(self, pids):
+            self._pool = [FakeProc(p) for p in pids]
+
+    # Nothing to compare against -> fail open, never invent a failure.
+    assert _pool_lost_a_task(set(), FakePool([])) is False
+    assert _pool_lost_a_task(set(), FakePool([1, 2])) is False
+    # Replacements present, originals gone -> the task was lost.
+    assert _pool_lost_a_task({10, 11}, FakePool([20, 21])) is True
+    # Any original still present -> still working, must keep waiting.
+    assert _pool_lost_a_task({10, 11}, FakePool([10, 21])) is False
+    assert _pool_lost_a_task({10, 11}, FakePool([10, 11])) is False
+    # Attribute missing entirely (unexpected Pool build) -> fail open.
+    assert _pool_lost_a_task({10}, object()) is False
+
+
+def _suicidal_worker(_arg):
+    """Module-level so a spawned child can import it by name.
+
+    Dies the way an OOM-killed worker does: no finally, no result, no traceback.
+    """
+    import os
+    import time
+
+    time.sleep(0.2)
+    os._exit(9)
+
+
+def test_a_worker_that_dies_midtask_is_reported_instead_of_hanging() -> None:
+    """A pool that loses a task must FAIL, not block forever.
+
+    This is the wedge that cost a 40-minute CI run with no output. The mechanism
+    is reproduced exactly: `imap_unordered` never yields, because the task died
+    with its worker. Before the fix this test would hang the whole suite; the
+    only thing standing between the two outcomes is the liveness check.
+    """
+    from meshcore_vanity import _pool_lost_a_task
+
+    ctx = multiprocessing.get_context("spawn")
+    pool = ctx.Pool(processes=2)
+    try:
+        worker_pids = {p.pid for p in pool._pool}
+        assert worker_pids, "expected the pool to report its worker pids"
+        results = pool.imap_unordered(_suicidal_worker, [(0,), (1,)])
+        received = 0
+        deadline = time.time() + 30.0
+        lost = False
+        while received < 2 and time.time() < deadline:
+            try:
+                results.next(timeout=0.25)
+                received += 1
+            except multiprocessing.TimeoutError:
+                if _pool_lost_a_task(worker_pids, pool):
+                    lost = True
+                    break
+        assert lost, (
+            "a pool whose workers all died must be detected as having lost its "
+            f"task, not waited on forever (received {received}/2)"
+        )
+    finally:
+        pool.terminate()
+        pool.join()
+
+
+@pytest.mark.parametrize("max_attempts,workers", [
+    (1, 1), (1, 4), (3, 8), (7, 8), (8, 8), (9, 8), (16, 8), (17, 8),
+    (100, 8), (101, 8), (255, 16), (1000, 4), (4096, 8), (65535, 7),
+])
+def test_the_worker_budget_split_sums_to_exactly_max_attempts(max_attempts, workers):
+    """--max-attempts is the TOTAL, and the shares must add up to it exactly.
+
+    This was neither an upper nor an exact bound before. Floor division discarded
+    up to workers-1 attempts, and the `max(1, ...)` that stopped zero-share
+    workers idling pushed the other way: `--max-attempts 3 --workers 8` ran 8
+    attempts, twice the cap. A caller could not reason about the cost and a test
+    could not pin it.
+    """
+    from meshcore_vanity import _split_worker_budget
+
+    shares = _split_worker_budget(max_attempts, workers)
+    assert len(shares) == workers
+    assert sum(shares) == max_attempts, (max_attempts, workers, shares)
+    assert all(s >= 0 for s in shares), shares
+    # No worker may be more than one attempt ahead of another: the split is
+    # largest-remainder, not "give some workers everything".
+    assert max(shares) - min(shares) <= 1, shares
+    assert _split_worker_budget(None, 4) == [None] * 4
+
+
+@pytest.mark.parametrize("max_attempts,workers", [(1, 4), (3, 8), (17, 8), (101, 8)])
+def test_a_parallel_search_never_exceeds_max_attempts(max_attempts, workers):
+    """End-to-end: real work done must stay within the cap, always."""
+    with pytest.raises(RuntimeError, match="exceeded max_attempts"):
+        generate_vanity_key(
+            "abcdef0123456789", encoding="hex",
+            max_attempts=max_attempts, workers=workers,
+            progress_interval=10**9,
+        )
 
 
 def _worker_args(prefix, encoding, max_attempts, start_offset=0, total=1):
