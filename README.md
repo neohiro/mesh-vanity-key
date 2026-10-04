@@ -1,13 +1,13 @@
-# meshcore-vanity-key
+# meshcore-meshtastic-vanity-key
 
 A fast, MeshCore-compatible Ed25519 vanity public-key generator.
 
-**[Try it in your browser →](https://neohiro.github.io/meshcore-vanity-key/)**
+**[Try it in your browser →](https://neohiro.github.io/meshcore-meshtastic-vanity-key/)**
 No install, no build step, works offline once loaded.
 
 Ships in two forms:
 
-- **[Browser app](https://neohiro.github.io/meshcore-vanity-key/)** — a
+- **[Browser app](https://neohiro.github.io/meshcore-meshtastic-vanity-key/)** — a
   zero-install PWA that mines with Web Workers + libsodium WASM.
 - **Python CLI** — bech32/base58/base64 output and parallel multiprocessing.
 
@@ -44,7 +44,7 @@ them is designed. `a3f1…c902` is as arbitrary as a Wi-Fi MAC address, and it h
 to be read off a QR code, dictated over a radio, or pasted into a phone by someone
 who cannot see the screen. Mining is the one case where brute force is the right
 answer: you pay for the search once, and every later contact with the node is
-cheaper. **[meshcore-vanity-key](https://neohiro.github.io/meshcore-vanity-key/)**
+cheaper. **[meshcore-meshtastic-vanity-key](https://neohiro.github.io/meshcore-meshtastic-vanity-key/)**
 is what this repository is, running entirely in the browser — Web Workers plus
 libsodium WASM, no network round-trip, no telemetry, and it still works offline
 once the page is loaded.
@@ -89,30 +89,37 @@ character is constrained (see
 [Suffixes and base64 padding](#suffixes-and-base64-padding)), so a suffix must end
 in one of `048AEIMQUYcgkosw`.
 
-**Node / user ID — asymmetric, derived, not the key.** A node advertises `!` + hex,
-and since firmware 2.5 that ID is derived from the node's public-key identity
-rather than from a hardware MAC address — which is exactly what lets a node keep
-its identity across a factory reset. So mining an `!` ID mines a *consequence* of
-the key, through firmware's own derivation:
+**Node key and `!` user ID — a different curve, and one more derivation.** A
+Meshtastic node's key is **Curve25519**, not Ed25519, and the `!` + hex ID the
+firmware advertises is a *further* derivation from that node key — since firmware
+2.5, from the public-key identity rather than from a hardware MAC address, which is
+what lets a node keep its identity across a factory reset. Two separate things
+therefore have to line up:
 
 ```
-   seed ─▶ Ed25519 keypair ─▶ public key ─▶ firmware derivation ─▶ !a1b2c3d4
-            ▲ minable here                                   ▲ this is what you read
+   seed ─▶ Curve25519 node key ─▶ firmware derivation ─▶ !a1b2c3d4
+            ▲ the keypair                              ▲ what you read out of the UI
+              that matters
 ```
 
-The middle step belongs to the firmware, so the honest workflow is: mine a
-**public-key** prefix or suffix, import it, read the `!` ID the node derives, and
-iterate. That is why this section says prefix and/or suffix on the *key*. Three
-consequences are worth knowing before spending an afternoon on it:
+The trap worth naming is the curve. `--encoding hex` chooses how a key is
+*printed*; it does not choose which key it is. On the default Ed25519 derivation
+you get a valid MeshCore device key and **not** a Meshtastic node key, and the
+node will simply refuse the import — which reads like a firmware bug and is not
+one. Meshtastic node-key mining is a different algorithm, not a different
+encoding.
 
-- The ID is a fixed width, so there is no short form to ask for. `!a1b2c3d4` is
-  four bytes of derivation and nothing truncates it away.
-- An ID prefix is **not** a key prefix. Constraining `!a1b2c3d4` means constraining
-  a derivation of the key, not the key itself — so the search is no cheaper than
-  mining the key and usually dearer.
-- Public keys are TOFU-bound: the first key a node hears for a given node number is
-  the one it keeps. Change a key after it has been seen and peers treat you as a
-  stranger who replaced somebody.
+Which leaves the `!` ID itself, and three things worth knowing before spending an
+afternoon on it:
+
+- It is fixed width, so there is no short form to ask for. `!a1b2c3d4` is four
+  bytes of derivation and nothing truncates it away.
+- An ID pattern is **not** a key pattern. Constraining `!a1b2c3d4` constrains a
+  derivation *of* the key, not the key, so the search is no cheaper than mining
+  the key and usually dearer.
+- Node keys are TOFU-bound: the first public key a node hears for a given node
+  number is the one it keeps. Change a key after it has been seen and peers treat
+  you as a stranger who replaced somebody.
 
 ### One caveat, stated plainly
 
@@ -125,7 +132,7 @@ overwrite a key that peers already hold.
 
 ## Browser Version
 
-**Live: [neohiro.github.io/meshcore-vanity-key](https://neohiro.github.io/meshcore-vanity-key/)**
+**Live: [neohiro.github.io/meshcore-meshtastic-vanity-key](https://neohiro.github.io/meshcore-meshtastic-vanity-key/)**
 
 The app is a single self-contained PWA (`index.html`) — no build step, and no
 dependencies beyond the checked-in `libsodium.js`. To run your own copy it must
@@ -546,22 +553,22 @@ Nothing to download, clone or install first. This fetches the tool, runs it, and
 throws the environment away afterwards:
 
 ```bash
-uv run --from git+https://github.com/neohiro/meshcore-vanity-key \
+uv run --from git+https://github.com/neohiro/meshcore-meshtastic-vanity-key \
   meshcore-vanity abcd --encoding hex
 ```
 
 `uv` is a single self-contained binary ([install](https://docs.astral.sh/uv/)).
-Substitute `pipx run --spec git+https://github.com/neohiro/meshcore-vanity-key
+Substitute `pipx run --spec git+https://github.com/neohiro/meshcore-meshtastic-vanity-key
 meshcore-vanity` if you prefer pipx; the arguments after the entry point are
 identical.
 
 ```bash
 # A different prefix AND a different suffix, in one search
-uv run --from git+https://github.com/neohiro/meshcore-vanity-key \
+uv run --from git+https://github.com/neohiro/meshcore-meshtastic-vanity-key \
   meshcore-vanity ab --suffix Yc
 
 # A MeshCore bech32 address
-uv run --from git+https://github.com/neohiro/meshcore-vanity-key \
+uv run --from git+https://github.com/neohiro/meshcore-meshtastic-vanity-key \
   meshcore-vanity mc1q --encoding bech32
 ```
 
@@ -989,7 +996,7 @@ Found in 123,456 attempts (2.75s, 44,893 keys/s)
 - **Use a strong seed for deterministic mode.** A predictable seed means predictable keys.
 - **Verify the generated key** before using it in production.
 - **Clear the browser history when done.** `Clear All Keys` in the
-  [browser app](https://neohiro.github.io/meshcore-vanity-key/) wipes
+  [browser app](https://neohiro.github.io/meshcore-meshtastic-vanity-key/) wipes
   `localStorage`, but exported JSON/CSV files still contain private keys.
 
 ## License

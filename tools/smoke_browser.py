@@ -575,7 +575,7 @@ def main() -> int:
                     "the repository link must be aligned to the right edge"
                 )
                 assert row_layout["href"] == (
-                    "https://github.com/neohiro/meshcore-vanity-key"
+                    "https://github.com/neohiro/meshcore-meshtastic-vanity-key"
                 ), row_layout["href"]
 
                 # A single transient status line, above the panel. Two of these

@@ -678,7 +678,7 @@ def test_required_status_check_contexts_match_real_job_names():
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token:
         req = urllib.request.Request(
-            "https://api.github.com/repos/neohiro/meshcore-vanity-key"
+            "https://api.github.com/repos/neohiro/meshcore-meshtastic-vanity-key"
             "/branches/main/protection",
             headers={
                 "Authorization": f"Bearer {token}",
@@ -700,7 +700,7 @@ def test_required_status_check_contexts_match_real_job_names():
             try:
                 proc = subprocess.run(
                     ["gh", "api",
-                     "repos/neohiro/meshcore-vanity-key/branches/main/protection"],
+                     "repos/neohiro/meshcore-meshtastic-vanity-key/branches/main/protection"],
                     capture_output=True, text=True, timeout=60,
                 )
             except (OSError, subprocess.SubprocessError):
@@ -728,7 +728,7 @@ def test_required_status_check_contexts_match_real_job_names():
         "run can ever satisfy makes EVERY pull request permanently unmergeable. "
         "Fix by setting the required contexts to the real job names (or renaming "
         "a job), via: gh api --method PUT "
-        "repos/neohiro/meshcore-vanity-key/branches/main/protection"
+        "repos/neohiro/meshcore-meshtastic-vanity-key/branches/main/protection"
     )
 
 
@@ -1836,7 +1836,14 @@ def test_no_sharedarraybuffer_speedup_claim_without_support():
 def test_service_worker_precache_paths_all_exist():
     """A missing precache entry makes cache.addAll() reject -> SW never installs."""
     sw = (_REPO_ROOT / "sw.js").read_text(encoding="utf-8")
-    block = sw.split("urlsToCache", 1)[1].split("]", 1)[0]
+    # Anchor on the DECLARATION, not the bare identifier. Splitting on the first
+    # occurrence of "urlsToCache" also matched a prose mention of it in a comment,
+    # so the block parsed was whatever came next in the comment rather than the
+    # array - which failed on an unrelated cache-name list and looked like a
+    # missing-file bug.
+    decl = re.search(r"const\s+urlsToCache\s*=\s*\[", sw)
+    assert decl, "could not find the urlsToCache declaration in sw.js"
+    block = sw[decl.end():].split("]", 1)[0]
     urls = re.findall(r"'([^']+)'", block)
     assert urls, "could not parse urlsToCache from sw.js"
 
