@@ -2815,8 +2815,15 @@ def test_the_progress_counter_is_exact_across_concurrent_workers() -> None:
     workers = 4
     per_worker = 19            # 16 + 3: the last batch is trimmed, as intended
     real_total = per_worker * workers
-    counter = multiprocessing.Value("Q", 0)
+    # The counter MUST come from the same context as the Pool. A multiprocessing
+    # synchronisation primitive carries the context it was created in, and
+    # handing a fork-context SemLock to a spawn-context Pool raises "A SemLock
+    # created in a fork context is being shared with a process in a spawn
+    # context". That passed on Windows, where spawn is already the default
+    # context, and failed on the first Linux CI run - which is the only reason it
+    # is spelled this way instead of as a plain `multiprocessing.Value`.
     ctx = multiprocessing.get_context("spawn")
+    counter = ctx.Value("Q", 0)
     pool = ctx.Pool(processes=workers,
                     initializer=meshcore_vanity._init_worker_counter,
                     initargs=(counter,))
