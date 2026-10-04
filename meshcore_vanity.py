@@ -128,8 +128,8 @@ class VanityResult:
 
 
 # Shared live-progress counter for parallel workers. Under the "spawn" start
-# method synchronized objects cannot be passed as pool task args — they must
-# be inherited — so the pool initializer sets this global in each child.
+# method synchronized objects cannot be passed as pool task args â€” they must
+# be inherited â€” so the pool initializer sets this global in each child.
 _PROGRESS_COUNTER = None
 
 
@@ -547,9 +547,12 @@ def _estimate_search_space(
       the same is true of the final data character in bech32 (7 characters from
       the end, not 1). _end_search_space() owns that per encoding.
 
-    Both callers (the search itself and main()'s pre-flight estimate) go through
-    here, so the number quoted before the search and the one used during it
-    cannot drift apart.
+    Callers should go through _expected_attempts(), not this function directly.
+    This is the arithmetic underneath a search space; _expected_attempts() knows
+    WHICH pattern sits at which end of the key, and that is the part that is easy
+    to get wrong. The live progress line once recomputed it here with a start
+    alphabet while the pre-flight line used the end alphabet, and the two
+    disagreed 4x for a bare --suffix.
     """
     space = _alphabet_size(encoding) ** prefix_len
     if suffix_len is None:
@@ -1140,6 +1143,60 @@ def generate_vanity_key(
             print(_format_progress(attempts, elapsed, expected_attempts), file=sys.stderr)
 
 
+# How often the parent checks for a finished worker while waiting for a result.
+#
+# This is a liveness poll, not a timeout on the search: expiring it does nothing
+# except hand control back so the worker check can run. It must stay well under
+# the progress-report interval so a dead pool is noticed long before the user
+# would wonder why the display stopped moving.
+_POOL_POLL_SECONDS = 0.25
+
+
+def _split_worker_budget(max_attempts: int | None, workers: int) -> list[int | None]:
+    """Divide a TOTAL attempt budget into per-worker shares that sum exactly.
+
+    Largest-remainder: the first ``max_attempts % workers`` workers take one
+    extra attempt, so the shares add up to ``max_attempts`` for every input and
+    no two workers differ by more than one.
+
+    ``max_attempts=None`` means unbounded, and every share is None.
+
+    This replaced ``max(1, max_attempts // workers)``, which was wrong in both
+    directions at once: floor division discarded up to ``workers - 1`` attempts,
+    while the ``max(1, ...)`` that stopped zero-share workers idling made
+    ``--max-attempts 3 --workers 8`` run 8 attempts - more than twice the cap. A
+    bound that is neither an upper nor an exact bound is the worst kind, because
+    the caller cannot reason about cost and no test can pin it.
+    """
+    if max_attempts is None:
+        return [None] * workers
+    base, extra = divmod(max_attempts, workers)
+    return [base + (1 if w < extra else 0) for w in range(workers)]
+
+
+def _pool_lost_a_task(worker_pids: set, pool) -> bool:
+    """True when no worker that could have been running a task is left.
+
+    A multiprocessing.Pool replaces a dead worker with a fresh one, so the
+    replacement is ALIVE and holds no task - asking "is any worker alive?" never
+    trips. What cannot be faked is the disappearance of the processes that were
+    actually given the tasks: once none of those PIDs remain in the pool, no
+    further result can ever arrive, and the iterator would block forever.
+
+    Fails open (returns False) when there is nothing to compare against: an
+    empty PID set, or a Pool that does not expose ``_pool`` at all. Without that
+    distinction a missing attribute would read as "no workers left" and report a
+    failure that never happened - so only an EMPTY pool, which is real evidence,
+    counts as a lost task.
+    """
+    if not worker_pids:
+        return False
+    procs = getattr(pool, "_pool", None)
+    if procs is None:
+        return False
+    return not (worker_pids & {p.pid for p in procs})
+
+
 def _generate_vanity_key_parallel(
     prefix: str,
     encoding: Encoding,
@@ -1175,20 +1232,16 @@ def _generate_vanity_key_parallel(
     """
     ctx = mp.get_context("spawn")
     # Split the total attempt budget across workers so --max-attempts keeps its
-    # documented meaning (total, not per-worker). Floor division, so the sum can
-    # never exceed the request; ceiling division overshot by up to workers-1.
-    # The max(1, ...) keeps every worker useful when the budget is smaller than
-    # the worker count, where the bound cannot be met exactly anyway.
-    per_worker_max = (
-        max(1, max_attempts // workers) if max_attempts is not None else None
-    )
+    # documented meaning: the TOTAL, not a per-worker figure. See
+    # _split_worker_budget for why the shares must sum exactly.
+    per_worker_max = _split_worker_budget(max_attempts, workers)
     progress_counter = ctx.Value("Q", 0)
     with ctx.Pool(processes=workers, initializer=_init_worker_counter,
                    initargs=(progress_counter,)) as pool:
         worker_args = []
         for w in range(workers):
             worker_args.append((
-                prefix, encoding, case_insensitive, per_worker_max, seed,
+                prefix, encoding, case_insensitive, per_worker_max[w], seed,
                 prefix_len, prefix_cmp, suffix_cmp, suffix_slice,
                 two_ended, check_slice, hrp,
                 w, w, workers,
@@ -1217,12 +1270,46 @@ def _generate_vanity_key_parallel(
         monitor = threading.Thread(target=_monitor, name="progress-monitor", daemon=True)
         monitor.start()
 
-        # Use imap_unordered for early exit on first result
-        # Track exact total across workers from their returned counts.
+        # Consume results with an explicit poll instead of `for r in imap(...)`.
+        #
+        # A Pool hangs FOREVER if a worker dies while holding a task: the task is
+        # gone, so its result is never produced and nothing completes the iterator.
+        # The Pool quietly replaces the corpse with a fresh worker that never gets
+        # the lost task, so `is_alive()` stays True and the search simply stops
+        # progressing, silently, forever. concurrent.futures.ProcessPoolExecutor
+        # detects this (BrokenProcessPool); multiprocessing.Pool does not.
+        #
+        # So detect it here: once every worker that could have been running a task
+        # has left the pool, no further result can arrive. A worker that finishes
+        # normally returns its result first, so this cannot fire on a healthy
+        # search - including an unbounded one, where workers legitimately stay
+        # alive for hours without returning anything.
+        #
+        # Original PIDs, not liveness: the auto-replacement workers ARE alive but
+        # hold no tasks, so "is any worker alive?" would never trip.
+        worker_pids = {p.pid for p in getattr(pool, "_pool", [])}
+        results = pool.imap_unordered(_worker_search, worker_args)
         total_attempts = 0
+        received = 0
 
         try:
-            for priv_seed, worker_attempts, _ in pool.imap_unordered(_worker_search, worker_args):
+            while received < workers:
+                try:
+                    priv_seed, worker_attempts, _ = results.next(
+                        timeout=_POOL_POLL_SECONDS
+                    )
+                except mp.TimeoutError:
+                    if _pool_lost_a_task(worker_pids, pool):
+                        raise RuntimeError(
+                            f"all {workers} search workers exited without "
+                            f"returning a result ({received} of {workers} "
+                            f"completed) - usually the OS killing a worker, "
+                            f"e.g. the OOM killer. Retry with fewer workers "
+                            f"(--workers 2) and check free memory."
+                        ) from None
+                    continue
+
+                received += 1
                 total_attempts += worker_attempts
 
                 if priv_seed is not None:
