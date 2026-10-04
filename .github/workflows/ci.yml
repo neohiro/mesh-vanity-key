@@ -28,7 +28,24 @@ jobs:
         # GitHub's default `-o pipefail`: grep exits on first match, SIGPIPE
         # kills the pipeline, and the guard always fired. Making the test itself
         # fail loudly when Pillow is absent is simpler and cannot be defeated.
-        run: python -m pytest -q
+        #
+        # The two faulthandler options and the step cap exist because of an
+        # observed failure, not a hypothetical one: a run wedged for 40+ minutes
+        # with the job producing no output at all, stuck in this very step. The
+        # step had no timeout, so nothing bounded it.
+        #
+        # `faulthandler_timeout` dumps every thread's stack once a single test
+        # passes 300s, which names the test and the line it is stuck on;
+        # `faulthandler_exit_on_timeout` then turns that hang into a non-zero exit
+        # rather than letting it sit there. `timeout-minutes` is the backstop for
+        # a wedged interpreter that faulthandler cannot interrupt at all.
+        # Verified against a deliberately sleeping test: without these it runs
+        # forever; with them it exits 1 in 8s and prints the stuck line.
+        timeout-minutes: 10
+        run: >-
+          python -m pytest -q
+          -o faulthandler_timeout=300
+          -o faulthandler_exit_on_timeout=True
 
       - uses: actions/setup-node@v4
         with:
