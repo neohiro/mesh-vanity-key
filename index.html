@@ -613,7 +613,7 @@
                  would push the row into a horizontal scroll. -->
             <div class="info-row">
                 <a href="https://neohiro.github.io/">← Back to neohiro.github.io</a>
-                <a href="https://github.com/neohiro/meshcore-vanity-key">Go to GitHub repository →</a>
+                <a href="https://github.com/neohiro/meshcore-meshtastic-vanity-key">Go to GitHub repository →</a>
             </div>
         </div>
 
@@ -630,9 +630,9 @@
              horizontally smeared. Intrinsic size also reserves layout, so the
              footer does not reflow when the badge loads. -->
         <div class="visitor-counter">
-            <a href="https://visitorbadge.io/status?path=github.com%2Fneohiro%2Fmeshcore-vanity-key" rel="noopener noreferrer nofollow">
+            <a href="https://visitorbadge.io/status?path=github.com%2Fneohiro%2Fmeshcore-meshtastic-vanity-key" rel="noopener noreferrer nofollow">
                 <img
-                    src="https://api.visitorbadge.io/api/visitors?path=github.com%2Fneohiro%2Fmeshcore-vanity-key&amp;label=Visitors&amp;countColor=%23263759"
+                    src="https://api.visitorbadge.io/api/visitors?path=github.com%2Fneohiro%2Fmeshcore-meshtastic-vanity-key&amp;label=Visitors&amp;countColor=%23263759"
                     alt="Visitors"
                     referrerpolicy="no-referrer"
                     loading="lazy"
@@ -3188,9 +3188,9 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 for (const e of savedKeys) {
                     lines.push(header.map(h => csvCell(e[h])).join(','));
                 }
-                downloadFile('meshcore-vanity-keys.csv', 'text/csv', lines.join('\n'));
+                downloadFile('meshcore-meshtastic-vanity-keys.csv', 'text/csv', lines.join('\n'));
             } else {
-                downloadFile('meshcore-vanity-keys.json', 'application/json',
+                downloadFile('meshcore-meshtastic-vanity-keys.json', 'application/json',
                     JSON.stringify(savedKeys, null, 2));
             }
         }
@@ -3215,10 +3215,10 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                         for (const e of keys) {
                             lines.push(header.map(h => csvCell(e[h])).join(','));
                         }
-                        self.postMessage({ type: 'done', data: lines.join('\\n'), mime: 'text/csv', filename: 'meshcore-vanity-keys.csv' });
+                        self.postMessage({ type: 'done', data: lines.join('\\n'), mime: 'text/csv', filename: 'meshcore-meshtastic-vanity-keys.csv' });
                     } else {
                         const json = JSON.stringify(keys, null, 2);
-                        self.postMessage({ type: 'done', data: json, mime: 'application/json', filename: 'meshcore-vanity-keys.json' });
+                        self.postMessage({ type: 'done', data: json, mime: 'application/json', filename: 'meshcore-meshtastic-vanity-keys.json' });
                     }
                 };
             `;

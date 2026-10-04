@@ -18,9 +18,15 @@
 // Bump CACHE_VERSION when the set of precached files changes so old caches are
 // garbage collected on activate.
 
-// Incremented whenever urlsToCache changes shape.
-const CACHE_VERSION = 3;
-const CACHE_NAME = `meshcore-vanity-v${CACHE_VERSION}`;
+// Incremented whenever the precached file list changes shape.
+//
+// Bumped to 4 for the repository rename (meshcore-vanity-key ->
+// meshcore-meshtastic-vanity-key). The cache name is renamed to match, and the
+// garbage-collection filter below is kept prefix-agnostic so it still clears the
+// caches written under the old name rather than stranding them on disk.
+const CACHE_VERSION = 4;
+const CACHE_NAME = `meshcore-meshtastic-vanity-v${CACHE_VERSION}`;
+const CACHE_NAME_PREFIXES = ['meshcore-vanity-v', 'meshcore-meshtastic-vanity-v'];
 
 const urlsToCache = [
   '/',
@@ -71,7 +77,8 @@ self.addEventListener('activate', (event) => {
       .then((cacheNames) =>
         Promise.all(
           cacheNames
-            .filter((name) => name.startsWith('meshcore-vanity-v') && name !== CACHE_NAME)
+            .filter((name) =>
+                CACHE_NAME_PREFIXES.some((p) => name.startsWith(p)) && name !== CACHE_NAME)
             .map((name) => caches.delete(name))
         )
       )
