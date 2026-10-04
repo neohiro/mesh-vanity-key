@@ -508,6 +508,76 @@ def main() -> int:
                     f"the badge should keep its ~4.4:1 aspect ratio, rendered {badge_ratio:.2f}:1"
                 )
 
+                # The whitespace above the badge must EQUAL the whitespace below
+                # it, measured rather than assumed. It was 28px above against the
+                # frame's bottom padding below - 40px, dropping to 16px under the
+                # 480px breakpoint - so the footer leaned to one side and the
+                # mismatch moved with the viewport. Both edges now come from one
+                # custom property; this asserts the rendered result, at BOTH
+                # widths, because a CSS-only equality can still be broken by the
+                # badge's own box, by margin collapsing, or by the breakpoint.
+                for label, width, height in (
+                    ("desktop", 1280, 900),
+                    ("phone", 390, 844),
+                ):
+                    page.set_viewport_size({"width": width, "height": height})
+                    page.wait_for_timeout(150)
+                    gap = page.evaluate(
+                        "() => {"
+                        " const counter = document.querySelector('.visitor-counter');"
+                        " const badge = counter.querySelector('img');"
+                        " const frame = document.querySelector('.container');"
+                        " const cs = getComputedStyle(frame);"
+                        " const cr = counter.getBoundingClientRect();"
+                        " const br = badge.getBoundingClientRect();"
+                        " /* The gap above is measured from whatever sits directly"
+                        "    above the badge, NOT from the frame's top edge - that"
+                        "    would include the entire height of the tool. */"
+                        " const prev = counter.previousElementSibling;"
+                        " const above = prev"
+                        "   ? cr.top - prev.getBoundingClientRect().bottom"
+                        "   : br.top - (frame.getBoundingClientRect().top"
+                        "       + parseFloat(cs.borderTopWidth));"
+                        " /* Below it is the frame's own bottom padding. */"
+                        " const fRect = frame.getBoundingClientRect();"
+                        " const below = (fRect.bottom - parseFloat(cs.borderBottomWidth))"
+                        "   - br.bottom;"
+                        " return { above: above, below: below };"
+                        "}"
+                    )
+                    assert abs(gap["above"] - gap["below"]) <= 1.0, (
+                        f"{label}: whitespace around the visitor badge is uneven -"
+                        f" {gap['above']:.1f}px above vs {gap['below']:.1f}px below"
+                    )
+                page.set_viewport_size({"width": 1280, "height": 900})
+                page.wait_for_timeout(150)
+
+                # The back link and the repository link share one row, with the
+                # repository link pushed to the right edge.
+                assert page.eval_on_selector_all(
+                    ".info-row a", "els => els.length"
+                ) == 2, "the info row must carry exactly the two links"
+                row_layout = page.evaluate(
+                    "() => { const a = document.querySelectorAll('.info-row a');"
+                    " const f = document.querySelector('.info-row');"
+                    " const fr = f.getBoundingClientRect();"
+                    " const l = a[0].getBoundingClientRect();"
+                    " const r = a[1].getBoundingClientRect();"
+                    " return { sameRow: Math.abs(l.top - r.top) < 2,"
+                    "          rightAligned: Math.abs((fr.right - r.right)) < 2,"
+                    "          href: a[1].getAttribute('href') };"
+                    "}"
+                )
+                assert row_layout["sameRow"], (
+                    "the repository link must sit on the same row as the back link"
+                )
+                assert row_layout["rightAligned"], (
+                    "the repository link must be aligned to the right edge"
+                )
+                assert row_layout["href"] == (
+                    "https://github.com/neohiro/meshcore-vanity-key"
+                ), row_layout["href"]
+
                 # A single transient status line, above the panel. Two of these
                 # is what left 'Starting...' stranded under the figures.
                 assert page.eval_on_selector_all(
