@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "meshcore-meshtastic-vanity-key"
+name = "mesh-vanity-key"
 # Kept in step with __version__ in meshcore_vanity.py, which is what --version
 # reports. tools/test_page_js.mjs and test_meshcore_vanity.py assert the two
 # agree, so a release cannot bump one and forget the other.
@@ -18,14 +18,14 @@ dependencies = ["PyNaCl>=1.5.0"]
 
 [project.scripts]
 # The console entry point. This is what makes a single online command work:
-# `uv run --from git+https://github.com/neohiro/meshcore-meshtastic-vanity-key
+# `uv run --from git+https://github.com/neohiro/mesh-vanity-key
 #   meshcore-vanity ab --encoding hex`
 # installs and runs the tool without the user cloning or downloading anything.
 meshcore-vanity = "meshcore_vanity:main"
 
 [project.urls]
-Homepage = "https://neohiro.github.io/meshcore-meshtastic-vanity-key/"
-Source = "https://github.com/neohiro/meshcore-meshtastic-vanity-key"
+Homepage = "https://neohiro.github.io/mesh-vanity-key/"
+Source = "https://github.com/neohiro/mesh-vanity-key"
 
 [tool.setuptools]
 # A single top-level module rather than a package, so the file keeps working

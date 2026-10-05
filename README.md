@@ -1,13 +1,15 @@
-# meshcore-meshtastic-vanity-key
+# mesh-vanity-key
 
-A fast, MeshCore-compatible Ed25519 vanity public-key generator.
+A fast Ed25519 vanity key generator for mesh networks: MeshCore device keys,
+Meshtastic channel PSKs and `!node` IDs, and any other encoded public key you
+need to match against a pattern.
 
-**[Try it in your browser →](https://neohiro.github.io/meshcore-meshtastic-vanity-key/)**
+**[Try it in your browser →](https://neohiro.github.io/mesh-vanity-key/)**
 No install, no build step, works offline once loaded.
 
 Ships in two forms:
 
-- **[Browser app](https://neohiro.github.io/meshcore-meshtastic-vanity-key/)** — a
+- **[Browser app](https://neohiro.github.io/mesh-vanity-key/)** — a
   zero-install PWA that mines with Web Workers + libsodium WASM.
 - **Python CLI** — bech32/base58/base64 output and parallel multiprocessing.
 
@@ -44,7 +46,7 @@ them is designed. `a3f1…c902` is as arbitrary as a Wi-Fi MAC address, and it h
 to be read off a QR code, dictated over a radio, or pasted into a phone by someone
 who cannot see the screen. Mining is the one case where brute force is the right
 answer: you pay for the search once, and every later contact with the node is
-cheaper. **[meshcore-meshtastic-vanity-key](https://neohiro.github.io/meshcore-meshtastic-vanity-key/)**
+cheaper. **[mesh-vanity-key](https://neohiro.github.io/mesh-vanity-key/)**
 is what this repository is, running entirely in the browser — Web Workers plus
 libsodium WASM, no network round-trip, no telemetry, and it still works offline
 once the page is loaded.
@@ -132,7 +134,7 @@ overwrite a key that peers already hold.
 
 ## Browser Version
 
-**Live: [neohiro.github.io/meshcore-meshtastic-vanity-key](https://neohiro.github.io/meshcore-meshtastic-vanity-key/)**
+**Live: [neohiro.github.io/mesh-vanity-key](https://neohiro.github.io/mesh-vanity-key/)**
 
 The app is a single self-contained PWA (`index.html`) — no build step, and no
 dependencies beyond the checked-in `libsodium.js`. To run your own copy it must
@@ -553,22 +555,22 @@ Nothing to download, clone or install first. This fetches the tool, runs it, and
 throws the environment away afterwards:
 
 ```bash
-uv run --from git+https://github.com/neohiro/meshcore-meshtastic-vanity-key \
+uv run --from git+https://github.com/neohiro/mesh-vanity-key \
   meshcore-vanity abcd --encoding hex
 ```
 
 `uv` is a single self-contained binary ([install](https://docs.astral.sh/uv/)).
-Substitute `pipx run --spec git+https://github.com/neohiro/meshcore-meshtastic-vanity-key
+Substitute `pipx run --spec git+https://github.com/neohiro/mesh-vanity-key
 meshcore-vanity` if you prefer pipx; the arguments after the entry point are
 identical.
 
 ```bash
 # A different prefix AND a different suffix, in one search
-uv run --from git+https://github.com/neohiro/meshcore-meshtastic-vanity-key \
+uv run --from git+https://github.com/neohiro/mesh-vanity-key \
   meshcore-vanity ab --suffix Yc
 
 # A MeshCore bech32 address
-uv run --from git+https://github.com/neohiro/meshcore-meshtastic-vanity-key \
+uv run --from git+https://github.com/neohiro/mesh-vanity-key \
   meshcore-vanity mc1q --encoding bech32
 ```
 
@@ -996,7 +998,7 @@ Found in 123,456 attempts (2.75s, 44,893 keys/s)
 - **Use a strong seed for deterministic mode.** A predictable seed means predictable keys.
 - **Verify the generated key** before using it in production.
 - **Clear the browser history when done.** `Clear All Keys` in the
-  [browser app](https://neohiro.github.io/meshcore-meshtastic-vanity-key/) wipes
+  [browser app](https://neohiro.github.io/mesh-vanity-key/) wipes
   `localStorage`, but exported JSON/CSV files still contain private keys.
 
 ## License

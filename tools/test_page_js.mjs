@@ -1324,9 +1324,9 @@ check('visitor counter: static image badge, centred under the info frame', () =>
     // No script: a counter must not add JS to a page that mines with every core.
     ok(!/freevisitorcounters\.com/.test(html),
         'the retired JS-dependent counter must not come back');
-    ok(/api\.visitorbadge\.io\/api\/visitors\?path=github\.com%2Fneohiro%2Fmeshcore-meshtastic-vanity-key/.test(html),
+    ok(/api\.visitorbadge\.io\/api\/visitors\?path=github\.com%2Fneohiro%2Fmesh-vanity-key/.test(html),
         'the badge must point at this repo visitor-counter path');
-    ok(/visitorbadge\.io\/status\?path=github\.com%2Fneohiro%2Fmeshcore-meshtastic-vanity-key/.test(html),
+    ok(/visitorbadge\.io\/status\?path=github\.com%2Fneohiro%2Fmesh-vanity-key/.test(html),
         'the badge must link to the stats page for this repo');
     ok(/referrerpolicy="no-referrer"/.test(html),
         'the badge must not leak the referring URL');
@@ -1399,7 +1399,7 @@ check('the back link shares its row with the repository link', () => {
 
     ok(/href="https:\/\/neohiro\.github\.io\/">← Back to neohiro\.github\.io<\/a>/.test(html),
         'the back link must survive unchanged');
-    ok(/href="https:\/\/github\.com\/neohiro\/meshcore-meshtastic-vanity-key">Go to GitHub repository →<\/a>/.test(html),
+    ok(/href="https:\/\/github\.com\/neohiro\/mesh-vanity-key">Go to GitHub repository →<\/a>/.test(html),
         'the repository link must sit in the same row, pointing at this repo');
     const row = html.indexOf('class="info-row"');
     const back = html.indexOf('← Back to neohiro.github.io');

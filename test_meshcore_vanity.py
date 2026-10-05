@@ -678,7 +678,7 @@ def test_required_status_check_contexts_match_real_job_names():
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token:
         req = urllib.request.Request(
-            "https://api.github.com/repos/neohiro/meshcore-meshtastic-vanity-key"
+            "https://api.github.com/repos/neohiro/mesh-vanity-key"
             "/branches/main/protection",
             headers={
                 "Authorization": f"Bearer {token}",
@@ -700,7 +700,7 @@ def test_required_status_check_contexts_match_real_job_names():
             try:
                 proc = subprocess.run(
                     ["gh", "api",
-                     "repos/neohiro/meshcore-meshtastic-vanity-key/branches/main/protection"],
+                     "repos/neohiro/mesh-vanity-key/branches/main/protection"],
                     capture_output=True, text=True, timeout=60,
                 )
             except (OSError, subprocess.SubprocessError):
@@ -728,7 +728,7 @@ def test_required_status_check_contexts_match_real_job_names():
         "run can ever satisfy makes EVERY pull request permanently unmergeable. "
         "Fix by setting the required contexts to the real job names (or renaming "
         "a job), via: gh api --method PUT "
-        "repos/neohiro/meshcore-meshtastic-vanity-key/branches/main/protection"
+        "repos/neohiro/mesh-vanity-key/branches/main/protection"
     )
 
 
@@ -1273,7 +1273,7 @@ def test_smoke_server_serves_page():
         port = server.server_address[1]
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/index.html", timeout=10) as r:
             body = r.read().decode("utf-8")
-        assert "MeshCore Vanity Key Generator" in body
+        assert "Mesh Vanity Key Generator" in body
         assert "result-frame" in body or "results" in body
     finally:
         server.shutdown()
