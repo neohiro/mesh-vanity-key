@@ -94,7 +94,7 @@ in one of `048AEIMQUYcgkosw`.
 **Node key and `!` user ID — a different curve, and one more derivation.** A
 Meshtastic node's key is **Curve25519**, not Ed25519, and the `!` + hex ID the
 firmware advertises is a *further* derivation from that node key — since firmware
-2.5, from the public-key identity rather than from a hardware MAC address, which is
+2.8, from the public-key identity rather than from a hardware MAC address, which is
 what lets a node keep its identity across a factory reset. Two separate things
 therefore have to line up:
 
