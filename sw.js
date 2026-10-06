@@ -20,13 +20,13 @@
 
 // Incremented whenever the precached file list changes shape.
 //
-// Bumped to 4 for the repository rename (meshcore-vanity-key ->
-// meshcore-meshtastic-vanity-key). The cache name is renamed to match, and the
+// Bumped to 5 for the repository rename (meshcore-meshtastic-vanity-key ->
+// mesh-vanity-key). The cache name is renamed to match, and the
 // garbage-collection filter below is kept prefix-agnostic so it still clears the
-// caches written under the old name rather than stranding them on disk.
-const CACHE_VERSION = 4;
-const CACHE_NAME = `meshcore-meshtastic-vanity-v${CACHE_VERSION}`;
-const CACHE_NAME_PREFIXES = ['meshcore-vanity-v', 'meshcore-meshtastic-vanity-v'];
+// caches written under the old names rather than stranding them on disk.
+const CACHE_VERSION = 5;
+const CACHE_NAME = `mesh-vanity-v${CACHE_VERSION}`;
+const CACHE_NAME_PREFIXES = ['meshcore-vanity-v', 'meshcore-meshtastic-vanity-v', 'mesh-vanity-v'];
 
 const urlsToCache = [
   '/',

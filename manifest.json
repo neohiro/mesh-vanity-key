@@ -1,7 +1,7 @@
 {
-  "name": "MeshCore Vanity Key Generator",
-  "short_name": "MeshCore Vanity",
-  "description": "Generate Ed25519 vanity keys with custom hex prefix/suffix patterns using libsodium WASM",
+  "name": "Mesh Vanity Key Generator",
+  "short_name": "Mesh Vanity",
+  "description": "Mine Ed25519 vanity keys for mesh networks: MeshCore device keys, Meshtastic channel PSKs and node IDs, with custom prefix/suffix patterns using libsodium WASM",
   "start_url": ".",
   "scope": ".",
   "display": "standalone",

@@ -11,12 +11,12 @@
          it. text-size-adjust=100% pins the authored size. viewport-fit=cover
          is included so the layout reaches under a notch, where the existing
          env(safe-area-inset-*) padding then keeps content clear of it. -->
-    <title>MeshCore Vanity Key Generator</title>
+    <title>Mesh Vanity Key Generator</title>
     <link rel="manifest" href="manifest.json">
     <link rel="icon" href="icon-192.png" type="image/png">
     <link rel="apple-touch-icon" href="icon-192.png">
     <meta name="theme-color" content="#161b22">
-    <meta name="description" content="Generate Ed25519 vanity keys with custom hex prefix/suffix patterns in your browser.">
+    <meta name="description" content="Mine Ed25519 vanity keys for mesh networks in your browser: MeshCore device keys, Meshtastic channel PSKs and node IDs, with custom prefix/suffix patterns.">
     <meta name="color-scheme" content="dark">
     <script src="libsodium.js"></script>
     <style>
@@ -512,8 +512,8 @@
              on the frame could not host a second, independently rotating layer
              behind a mask without also rotating the frame's rounded corners. -->
         <span class="frame-ring" aria-hidden="true"></span>
-        <h1>MeshCore Vanity Key Generator</h1>
-        <p class="subtitle">Generate Ed25519 keys with custom hex prefix/suffix patterns using your browser's computational power.</p>
+        <h1>Mesh Vanity Key Generator</h1>
+        <p class="subtitle">MeshCore device keys, Meshtastic channel PSKs and node IDs: Ed25519 keys with custom hex prefix/suffix patterns, mined by your browser.</p>
 
         <div class="form">
             <div class="field">
@@ -613,7 +613,7 @@
                  would push the row into a horizontal scroll. -->
             <div class="info-row">
                 <a href="https://neohiro.github.io/">← Back to neohiro.github.io</a>
-                <a href="https://github.com/neohiro/meshcore-meshtastic-vanity-key">Go to GitHub repository →</a>
+                <a href="https://github.com/neohiro/mesh-vanity-key">Go to GitHub repository →</a>
             </div>
         </div>
 
@@ -630,9 +630,9 @@
              horizontally smeared. Intrinsic size also reserves layout, so the
              footer does not reflow when the badge loads. -->
         <div class="visitor-counter">
-            <a href="https://visitorbadge.io/status?path=github.com%2Fneohiro%2Fmeshcore-meshtastic-vanity-key" rel="noopener noreferrer nofollow">
+            <a href="https://visitorbadge.io/status?path=github.com%2Fneohiro%2Fmesh-vanity-key" rel="noopener noreferrer nofollow">
                 <img
-                    src="https://api.visitorbadge.io/api/visitors?path=github.com%2Fneohiro%2Fmeshcore-meshtastic-vanity-key&amp;label=Visitors&amp;countColor=%23263759"
+                    src="https://api.visitorbadge.io/api/visitors?path=github.com%2Fneohiro%2Fmesh-vanity-key&amp;label=Visitors&amp;countColor=%23263759"
                     alt="Visitors"
                     referrerpolicy="no-referrer"
                     loading="lazy"
@@ -3188,9 +3188,9 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 for (const e of savedKeys) {
                     lines.push(header.map(h => csvCell(e[h])).join(','));
                 }
-                downloadFile('meshcore-meshtastic-vanity-keys.csv', 'text/csv', lines.join('\n'));
+                downloadFile('mesh-vanity-keys.csv', 'text/csv', lines.join('\n'));
             } else {
-                downloadFile('meshcore-meshtastic-vanity-keys.json', 'application/json',
+                downloadFile('mesh-vanity-keys.json', 'application/json',
                     JSON.stringify(savedKeys, null, 2));
             }
         }
@@ -3215,10 +3215,10 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                         for (const e of keys) {
                             lines.push(header.map(h => csvCell(e[h])).join(','));
                         }
-                        self.postMessage({ type: 'done', data: lines.join('\\n'), mime: 'text/csv', filename: 'meshcore-meshtastic-vanity-keys.csv' });
+                        self.postMessage({ type: 'done', data: lines.join('\\n'), mime: 'text/csv', filename: 'mesh-vanity-keys.csv' });
                     } else {
                         const json = JSON.stringify(keys, null, 2);
-                        self.postMessage({ type: 'done', data: json, mime: 'application/json', filename: 'meshcore-meshtastic-vanity-keys.json' });
+                        self.postMessage({ type: 'done', data: json, mime: 'application/json', filename: 'mesh-vanity-keys.json' });
                     }
                 };
             `;

@@ -65,7 +65,7 @@ assert.match(reportedPublicKey, /^[0-9a-f]{64}$/, 'public key must be 64 hex dig
 assert.match(reportedPrivateKey, /^[0-9a-f]{64}$/, 'reported private key must be 64 hex digits');
 assert.equal(reportedPublicKey, bytesToHex(hexToBytes(reportedPublicKey)), 'hex round-trip');
 
-const message = new TextEncoder().encode('meshcore-meshtastic-vanity-keypair-verification');
+const message = new TextEncoder().encode('mesh-vanity-keypair-verification');
 
 // libsodium signs with the 64-byte EXPANDED secret key (clamped scalar ||
 // nonce), not the 32-byte seed, so expand the reported seed the same way any
