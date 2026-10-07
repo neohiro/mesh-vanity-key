@@ -1810,8 +1810,11 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 const baseKey = await subtle.importKey(
                     'raw', keyMaterial, { name: 'HKDF' }, false, ['deriveKey']
                 );
-                const salt = new Uint8Array(32);
-                (typeof crypto !== 'undefined' && crypto.getRandomValues ? crypto : window.crypto).getRandomValues(salt);
+                // Single RNG call for salt (32) + nonce (12) = 44 bytes
+                const saltNonce = new Uint8Array(44);
+                (typeof crypto !== 'undefined' && crypto.getRandomValues ? crypto : window.crypto).getRandomValues(saltNonce);
+                const salt = saltNonce.subarray(0, 32);
+                const nonce = saltNonce.subarray(32, 44);
                 const aesKey = await subtle.deriveKey(
                     { name: 'HKDF', hash: 'SHA-256', salt, info: new TextEncoder().encode('meshcore-vanity-history-v1') },
                     baseKey,
@@ -1821,8 +1824,6 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 );
 
                 const textBytes = new TextEncoder().encode(plainText);
-                const nonce = new Uint8Array(12);
-                (typeof crypto !== 'undefined' && crypto.getRandomValues ? crypto : window.crypto).getRandomValues(nonce);
                 const ciphertext = await subtle.encrypt(
                     { name: 'AES-GCM', iv: nonce },
                     aesKey,
