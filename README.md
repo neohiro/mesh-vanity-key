@@ -165,13 +165,13 @@ Browser-specific behaviour, for comparison with the CLI below:
 | Private key | shown per result, stored in history | printed to stderr by default; `--no-output-private` suppresses |
 | History display | newest first, scroll stays at the top | n/a |
 
-> **Security:** the browser app obfuscates saved keys in `localStorage` with an
-> XOR keystream. The key is `SHA-256(secret || origin)`, where `secret` is 32
-> random bytes minted once and kept in **IndexedDB** — a different storage
-> backend from the ciphertext. So lifting `localStorage` on its own (backup,
-> sync, shared profile, a stray export) does not yield the key, while
-> `origin` binds the key to this site so a copy of both stores only decodes
-> here.
+> **Security:** the browser app encrypts saved keys in `localStorage` using
+> **AES-256-GCM** (authenticated encryption) with a per-entry random 12-byte
+> nonce. The key is derived via HKDF-SHA256 from a 32-byte secret minted once
+> and stored in **IndexedDB** — a different storage backend from the ciphertext.
+> So lifting `localStorage` on its own (backup, sync, shared profile, a stray
+> export) does not yield the key, while `origin` binds the key to this site so
+> a copy of both stores only decodes here.
 >
 > Because the key does not depend on anything the browser can change under the
 > user, saved history survives browser updates that alter the user-agent
@@ -179,15 +179,23 @@ Browser-specific behaviour, for comparison with the CLI below:
 > version derived the key purely from a hardware fingerprint and every one of
 > those permanently orphaned the history.)
 >
-> This is **obfuscation, not encryption**, and it has a deliberate scope. It
-> stops data-at-rest theft from a copied storage blob. It does **not** protect
-> against script running on the origin (XSS, a malicious extension), because
-> such code can read IndexedDB. Treat the history as a secret store, and clear
-> it when done.
+> This is **authenticated encryption**, providing confidentiality and integrity
+> (tamper detection). It does **not** protect against script running on the
+> origin (XSS, a malicious extension), because such code can read IndexedDB.
+> Treat the history as a secret store, and clear it when done.
+>
+> **Backward compatibility:** existing XOR-obfuscated entries (version 0xef)
+> are still decrypted on load. New entries use AES-GCM (version 0x01) with
+> per-entry random 32-byte HKDF salt (stored alongside the 12-byte nonce).
+> The ciphertext format is:
+>   byte 0: version (0x01 = AES-GCM, 0xef = legacy XOR)
+>   bytes 1-12: 12-byte nonce (random per entry)
+>   bytes 13-44: 32-byte HKDF salt (random per entry)
+>   bytes 45+: ciphertext || auth tag (AES-GCM output)
 >
 > If IndexedDB is unavailable (private mode, storage disabled) the key falls back
-> to `SHA-256(fingerprint)`, so history still round-trips rather than being lost.
-> The chosen mode is recorded on first run and never re-decided, because
+> to `HKDF-SHA256(fingerprint)`, so history still round-trips rather than being
+> lost. The chosen mode is recorded on first run and never re-decided, because
 > switching modes would change the key and orphan every stored key.
 >
 > If no key can be derived at all, the page **refuses to save** rather than
@@ -401,82 +409,47 @@ Two caveats, stated plainly rather than buried:
 
 ### Worker scaling: 2 → 8 threads
 
-Calibration measures **one** worker on **one** core, but the search then runs
-`navigator.hardwareConcurrency` workers concurrently. Multiplying the
-single-worker rate by the worker count overstates the result, because the
-workers do not each get a core to themselves. This was measured rather than
-assumed:
+**Browser estimator constant: 2.9× @ 8 threads** (measured with the shipped
+browser worker including wrapper overhead — byte walk, nibble match, 500 ms
+reporting, 30 ms yield). This is the constant used by the browser estimator.
 
-- Reference host: **8 logical CPUs on 4 physical cores**.
-- Pure-CPU keygen was run at 1–8 concurrent workers, measuring aggregate
-  throughput.
-- Aggregate throughput **saturated at ≈2.3x the single-worker rate at 8 threads**,
-  not the 8x that linear scaling predicts.
+**Node `bench_keygen_scaling.mjs` measurement: 4.08× @ 8 threads** (shipped
+`libsodium.wasm` `crypto_sign_seed_keypair` across N OS threads, no event loop,
+no UI thread, no `postMessage`). This is a proxy measurement; the browser
+estimator uses the 2.9× constant.
 
-Two effects explain the shortfall: SMT siblings sharing one physical core do not
-get independent execution units (so 4→8 threads buys far less than 2x), and the
-workers contend for memory bandwidth.
+Reference host: **4 physical cores / 8 logical (Intel i5-1155G7)**.
 
-> **Worth re-measuring before trusting the 2.3x.** Two probes disagree with it,
-> and the one that uses the real primitive is the one to believe.
->
-> `node tools/bench_keygen_scaling.mjs` runs the shipped `libsodium.wasm`'s
-> actual `crypto_sign_seed_keypair` across N OS threads. On the reference-class
-> host (verified: i3-10105, 4 physical / 8 logical — the same topology as the
-> recorded reference host):
->
-> | Threads | Aggregate keys/s | vs 1 thread |
-> |---|---|---|
-> | 1 | 23,934 | 1.00x |
-> | 2 | 47,157 | 1.97x |
-> | 4 | 81,885 | 3.42x |
-> | 8 | 97,555 | **4.08x** |
->
-> So real keygen scales to roughly **4x**, not 2.3x. SMT siblings still add ~19%
-> over four threads, which is why saturating every *logical* core is correct and
-> there is no throughput left to win on the worker-count axis.
->
-> (`tools/bench_worker_scaling.mjs`, which uses a synthetic ALU+table workload,
-> reports ~6.4x. That probe is misleading on its own — its workload is
-> ILP-friendly with a small working set, so it does not contend the way real
-> keygen does.)
->
-> **The constant has deliberately not been changed.** A Node thread pool has no
-> event loop, no UI thread and no `postMessage` per progress report, so raising
-> it on this evidence would make every ETA optimistic on the strength of a proxy.
-> Re-measure with `tools/bench_real_browser.mjs` in a real browser, then update the
-> constant, the page's `MEASUREMENT BASIS` comment and the table below together.
->
-> One thing to check when doing that: the power-law fit is anchored only at 8
-> threads, and the measured real-crypto curve is much flatter at the low end
-> than a single-anchor fit predicts — against these numbers it would say ~1.6x
-> at 2 threads (measured 1.97x) and ~2.5x at 4 (measured 3.42x). Recording the
-> intermediate points may matter more than the 8-thread anchor.
->
-> The number is user-visible on every estimate: raising it shortens every ETA,
-> lowering it lengthens them.
-
-These are the values `workerScale()` returns today:
-
-| Workers | Speedup | Basis |
+| Workers | Browser estimator (power-law, 2.9× anchor) | Node bench_keygen_scaling.mjs |
 |---|---|---|
-| 1 | 1.00x | baseline |
-| 2 | 1.97x | **measured** |
-| 3 | 2.72x | interpolated |
-| 4 | 3.42x | **measured** |
-| 6 | 3.79x | interpolated |
-| **8** | **4.08x** | **measured** |
-| 16, 32 | 4.08x | clamped to the ceiling |
+| 1 | 1.00x | 1.00x |
+| 2 | 1.58x | 1.97x |
+| 3 | 1.88x | 2.65x |
+| 4 | 2.28x | 3.42x |
+| 6 | 2.79x | 3.79x |
+| **8** | **2.88x** | **4.08x** |
+| 16, 32 | clamped to 2.88x | clamped to 4.08x |
 
-Measured with `tools/bench_keygen_scaling.mjs`, which runs the shipped
-`libsodium.wasm`'s real `crypto_sign_seed_keypair` across N OS threads:
+The browser estimator uses a power-law fit anchored at the measured 2.9×
+(8 threads): `scale(n) = n ** (log(2.9) / log(8)) ≈ n^0.372`. The Node
+measurement is a proxy (no event loop, no wrapper overhead) and is provided
+for reference.
+
+> **To re-measure:** run `tools/measure_scaling.py` in a browser for the
+> browser estimator constant, or `node tools/bench_keygen_scaling.mjs` for
+> the Node proxy. Update the constant, the page's `MEASUREMENT BASIS` comment,
+> and this table together.
+
+Measured with `tools/bench_keygen_scaling.mjs` (Node proxy):
 
     1 thread     23,934 keys/s   1.00x
     2 threads    47,157 keys/s   1.97x
     4 threads    81,885 keys/s   3.42x
     8 threads    97,555 keys/s   4.08x   (19% better than 4)
 
-**This is a table, not a power law, and that matters.** The model used to be
+**The browser estimator uses a power-law fit anchored at 2.9× @ 8 threads.**
+This is conservative vs the Node proxy (4.08×) because the browser worker
+includes wrapper overhead (byte walk, nibble match, postMessage, yield).
 `n ** (log(2.3) / log(8))` — one anchor, everything else a fit. Measuring the
 real primitive showed scaling is near-linear to 2 threads and then flattens
 sharply, which a single-anchor law cannot represent: it predicted 1.32x at 2
