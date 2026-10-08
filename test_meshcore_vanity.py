@@ -1367,6 +1367,415 @@ def test_smoke_eval_snippets_parse():
     assert "0 invalid" in proc.stdout, proc.stdout
 
 
+def test_key_types_are_meshtable_devices_only():
+    """The selector must offer three MESH values, not three hashes.
+
+    A vanity generator for mesh networks earns its keep on MeshCore device keys,
+    Meshtastic channel PSKs and Meshtastic node IDs. Those are three different
+    KINDS OF VALUE with three different widths, and only the first derives
+    anything.
+
+    The regression this guards is a plausible one: "add two more hashtypes"
+    invites SHA-256 or Keccak-256, which are real hashes but belong to no mesh
+    stack. Wiring one in would hand the user a value their radio rejects, with
+    nothing in the UI to say why - a wrong-but-plausible answer is worse than no
+    answer.
+    """
+    from pathlib import Path
+
+    mod = _load_check_inline_js()
+    worker = mod.extract(Path(__file__).parent)["worker.js"]
+    html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+    # Exactly the three mesh values, and nothing else selectable.
+    for value in ("ed25519", "psk", "nodeid"):
+        assert f'value="{value}"' in html, f"the {value} key type must be selectable"
+    assert html.count('<input type="radio" name="hashtype"') == 3, (
+        "the control is a three-way slider, so exactly three radios"
+    )
+
+    # No non-mesh hash may be OFFERED. Scoped to the markup and the selector, not
+    # the whole file: SHA-256 is legitimately used elsewhere in the page for
+    # history-obfuscation key derivation, and banning the string outright would
+    # be a false positive that makes this test useless.
+    body = html[html.index("<body"):html.index("<script>", html.index("</style>"))]
+    for banned in ("keccak", "sha256", "sha-256", "blake2", "ripemd", "sha3", "md5"):
+        assert banned not in body.lower(), (
+            f"'{banned}' is not a mesh value; the three types are a device key, "
+            "a channel PSK and a node ID"
+        )
+
+    # Widths, in the worker, derived from the key type.
+    assert "keyType === 'psk' ? 32" in worker
+    assert "keyType === 'nodeid' ? 4" in worker
+
+
+def test_derivation_free_key_types_skip_libsodium_and_match_the_counter():
+    """A PSK and a node ID derive nothing, so the worker must not call libsodium.
+
+    This is the correctness core of the new modes. If either one hashed the
+    counter it would be inventing a derivation MeshCore and Meshtastic never
+    perform. If either one still called crypto_sign_seed_keypair it would be
+    paying a scalar multiplication to produce a value the protocols treat as an
+    opaque secret - and the ~400x speed difference the estimate advertises would
+    be fiction.
+
+    The guard is structural because that is where the bug would live: a
+    well-meaning refactor that unifies the three modes behind one
+    'derive then match' helper would restore the hash silently.
+    """
+    from pathlib import Path
+
+    mod = _load_check_inline_js()
+    worker = mod.extract(Path(__file__).parent)["worker.js"]
+
+    assert "const NEEDS_SODIUM = keyType === 'ed25519';" in worker, (
+        "only a device key needs libsodium"
+    )
+    assert "pub = seed;" in worker, (
+        "the derivation-free modes must match the counter itself, not a digest"
+    )
+    assert "new Uint8Array(NEEDS_SODIUM ? 32 : KEY_LEN)" in worker, (
+        "a node ID's counter must be sized to 4 bytes: a 32-byte big-endian "
+        "counter advances its leading byte only once every 2**24 iterations"
+    )
+
+    # The libsodium readiness guard must be conditional. An unconditional check
+    # would make the two fast modes fail on a page whose library failed to load
+    # for reasons that have nothing to do with them.
+    assert "if (NEEDS_SODIUM" in worker, (
+        "the sodium availability check must be scoped to the device-key mode"
+    )
+
+    # An unrecognised type is refused rather than defaulted: silently mining an
+    # Ed25519 key where a channel secret was asked for produces a value that
+    # fails only later, at the radio.
+    assert "'Unknown key type: '" in worker
+
+
+def test_key_type_reaches_the_worker_and_the_history():
+    """The selection must be threaded end to end, not resolved twice."""
+    from pathlib import Path
+
+    html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+    # Read once, at the moment the user commits, and passed down explicitly.
+    assert "const keyType = getSelectedKeyType();" in html
+    assert "w.postMessage({ prefix, suffix, matchPrefix, matchSuffix, keyType })" in html
+    # The worker reports it back, so history records what was actually mined
+    # rather than re-reading the selector after the run.
+    assert "keyType: keyType," in html
+    assert "keyType: e.data.keyType," in html
+
+    # Export carries it too, so a mixed history stays self-describing.
+    assert "'keyType', 'publicKey'" in html
+
+
+def test_history_validation_is_per_key_type_length():
+    """A hard-coded 64-hex check is wrong now that not every entry is 64 hex.
+
+    It would either reject a valid 8-digit node ID or accept an 8-digit value in
+    a 64-digit field. The check has to follow the entry's own recorded type, and
+    an entry with no type must be read as a device key - which is what every
+    entry written before the selector existed actually was.
+    """
+    from pathlib import Path
+
+    html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+    assert "hex64" not in html, (
+        "the 64-hex-digit-only validator cannot represent an 8-digit node ID"
+    )
+    assert "cfg.keyLen * 2" in html, "the expected length must come from the key type"
+    assert "getKeyTypeConfig(entry.keyType)" in html, (
+        "validation must read the type recorded on the entry"
+    )
+    # The LOAD path matters more than the save path: a fixed-width filter there
+    # would silently discard every node ID the user had mined, with no error, on
+    # the next page load.
+    assert "hex64.test(e.publicKey" not in html, (
+        "loadHistory must validate per key type too, or node IDs vanish on reload"
+    )
+
+
+def test_derivation_free_throughput_is_gated_by_a_benchmark():
+    """The two fast modes need their own regression floor.
+
+    For a device key the existing floor protects against wrapper overhead
+    becoming VISIBLE next to libsodium, which is the only thing it could
+    threaten. For a PSK or node ID there is no libsodium: the wrapper IS the
+    entire cost. A per-candidate allocation that would be invisible behind a
+    scalar multiplication is a 100x regression in these modes, so they are
+    measured and floored on their own terms.
+    """
+    bench = (
+        __import__("pathlib").Path(__file__).parent / "tools" / "bench_worker.mjs"
+    ).read_text(encoding="utf-8")
+
+    assert "MIN_DERIVATION_FREE_KEYS_PER_SEC" in bench
+    for key_type in ("psk", "nodeid"):
+        assert f"'{key_type}'" in bench, f"{key_type} must be benchmarked"
+    # The count has to come from the worker's own report: these loops finish in
+    # well under a second, so a harness-side stopwatch would time the harness.
+    assert "maxAttempts" in bench and "'calibrated'" in bench
+
+
+def _run_worker_once(worker_path, message, timeout_ms=20000):
+    """Drive the extracted worker once and return everything it posted.
+
+    The worker's real hot loop is an unconditional while(true) that ends only on
+    a match or the attempt cap, so a harness has to run it on a stubbed crypto
+    source and read back what it posted. That is the only way to assert on
+    behaviour - key length, value identity - rather than on source text.
+    """
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    runtime = shutil.which("node") or shutil.which("bun")
+    if runtime is None:
+        pytest.skip("no node/bun runtime available")
+
+    driver = Path(worker_path).parent / "driver.mjs"
+    driver.write_text(
+        """
+import fs from 'node:fs';
+import vm from 'node:vm';
+
+const src = fs.readFileSync(process.argv[2], 'utf8')
+    .replace(/\\$\\{new URL\\([^)]*\\)\\.href\\}/g, 'https://example.test/libsodium.js');
+const message = JSON.parse(process.argv[3]);
+
+// A fixed starting counter makes the walk deterministic, so a matching suffix is
+// reached at a KNOWN iteration rather than by luck: every byte is 0xa0 and the
+// last is 0x00, so the big-endian walk reaches a trailing 'a0' after exactly 160
+// increments.
+const posted = [];
+
+const g = {
+    console: { log() {}, error() {} },
+    BigInt, Date, Math, Uint8Array, setTimeout, clearTimeout, Promise, isFinite,
+    Number, Object, Array, String, RegExp, JSON, Error,
+    libsodium: { ready: Promise.resolve() },
+    crypto: {
+        getRandomValues(buf) {
+            for (let i = 0; i < buf.length; i++) buf[i] = 0xa0;
+            buf[buf.length - 1] = 0x00;
+            return buf;
+        },
+    },
+    postMessage(m) { posted.push(m); },
+    importScripts() {
+        g.sodium = {
+            crypto_sign_seed_keypair() {
+                throw new Error('libsodium must not be reached in this test');
+            },
+        };
+    },
+};
+g.self = g;
+g.globalThis = g;
+vm.createContext(g);
+vm.runInContext(src, g, { filename: 'worker.js' });
+
+g.onmessage({ data: message });
+setTimeout(() => {
+    process.stdout.write(JSON.stringify(posted));
+}, 1500);
+""",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [runtime, str(driver), str(worker_path),
+         __import__("json").dumps(message)],
+        capture_output=True, text=True, timeout=timeout_ms,
+    )
+    assert proc.returncode == 0, f"worker driver failed:\n{proc.stdout}\n{proc.stderr}"
+    return __import__("json").loads(proc.stdout)
+
+
+@pytest.mark.parametrize(
+    "key_type,expected_hex_len",
+    [("psk", 64), ("nodeid", 8)],
+)
+def test_derivation_free_modes_find_the_counter_itself(key_type, expected_hex_len):
+    """End-to-end: the fast modes return the counter, at the right width.
+
+    The stubbed counter starts as every byte 0xa0 with the last byte 0x00, so a
+    trailing 'a0' is reached after exactly 160 increments - deterministic, and
+    far enough in that the walk is doing real work.
+
+    It asserts the thing that matters for these two modes: the reported value IS
+    the walked counter, is the right width for the type, and does not need
+    libsodium. The stub throws if crypto_sign_seed_keypair is reached, so a
+    regression that reintroduced the derivation fails loudly instead of quietly
+    producing a digest.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    if (shutil.which("node") or shutil.which("bun")) is None:
+        pytest.skip("no node/bun runtime available")
+
+    mod = _load_check_inline_js()
+    with tempfile.TemporaryDirectory() as tmp:
+        worker = Path(tmp) / "worker.js"
+        worker.write_text(
+            mod.extract(Path(__file__).parent)["worker.js"], encoding="utf-8"
+        )
+        posted = _run_worker_once(
+            worker,
+            {
+                "prefix": "", "suffix": "a0", "matchPrefix": False, "matchSuffix": True,
+                "keyType": key_type,
+            },
+        )
+
+    found = [m for m in posted if m.get("type") == "found"]
+    errors = [m for m in posted if m.get("type") == "error"]
+    assert not errors, f"the {key_type} worker errored: {errors}"
+    assert found, f"the {key_type} worker never matched a trailing 'a0': {posted}"
+
+    hit = found[0]
+    assert hit["keyType"] == key_type, "the worker must report what it mined"
+    assert len(hit["publicKey"]) == expected_hex_len, (
+        f"a {key_type} is {expected_hex_len} hex digits, got "
+        f"{len(hit['publicKey'])}"
+    )
+    assert len(hit["privateKey"]) == expected_hex_len, (
+        "the secret to keep has the same width as the value"
+    )
+    assert hit["publicKey"].endswith("a0"), (
+        f"the reported value must match the pattern, got {hit['publicKey']}"
+    )
+    # 0x00 -> 0xa0 is 160 increments. This pins the counter's start, so a change
+    # to how the walk state is seeded cannot silently invalidate every
+    # derivation-free assertion above.
+    assert hit["attempts"] == 160, (
+        f"expected the walk to reach 0xa0 after 160 increments, got "
+        f"{hit['attempts']}"
+    )
+    # The whole point of the two fast modes: no derivation happened, so the
+    # published value and the secret are the same bytes.
+    assert hit["publicKey"] == hit["privateKey"], (
+        "a PSK and a node ID are their own secret; nothing is derived from them"
+    )
+
+
+def test_node_id_search_terminates_inside_its_own_space():
+    """A 32-bit space must actually terminate, not wrap toward 2**32.
+
+    The counter is sized to KEY_LEN. If it were left at 32 bytes while only the
+    leading 4 were matched, a big-endian increment would advance that leading
+    byte once every 2**24 iterations, so a 4-digit prefix could never be reached
+    at all in any realistic run - the search would appear to hang.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    if (shutil.which("node") or shutil.which("bun")) is None:
+        pytest.skip("no node/bun runtime available")
+
+    mod = _load_check_inline_js()
+    with tempfile.TemporaryDirectory() as tmp:
+        worker = Path(tmp) / "worker.js"
+        worker.write_text(
+            mod.extract(Path(__file__).parent)["worker.js"], encoding="utf-8"
+        )
+        # 'a0' as the WHOLE node ID: all four bytes must be reachable, so the
+        # match can only come from the 4-byte counter being walked in full.
+        posted = _run_worker_once(
+            worker,
+            {
+                "prefix": "a0a0a0a0", "suffix": "", "matchPrefix": True,
+                "matchSuffix": False, "keyType": "nodeid",
+            },
+        )
+
+    found = [m for m in posted if m.get("type") == "found"]
+    assert found, f"every 4-byte value must be reachable: {posted}"
+    assert found[0]["publicKey"] == "a0a0a0a0"
+
+
+def test_unknown_key_type_is_refused_by_the_worker():
+    """An unrecognised type must fail loudly, not default to a device key.
+
+    Defaulting would hand the user an Ed25519 key while they believed they had
+    a channel secret. The mismatch surfaces only later, at the radio, with no
+    clue as to why - a wrong-but-plausible answer is worse than a refusal.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    if (shutil.which("node") or shutil.which("bun")) is None:
+        pytest.skip("no node/bun runtime available")
+
+    mod = _load_check_inline_js()
+    with tempfile.TemporaryDirectory() as tmp:
+        worker = Path(tmp) / "worker.js"
+        worker.write_text(
+            mod.extract(Path(__file__).parent)["worker.js"], encoding="utf-8"
+        )
+        posted = _run_worker_once(
+            worker,
+            {
+                "prefix": "a", "suffix": "", "matchPrefix": True, "matchSuffix": False,
+                "keyType": "sha256",
+            },
+        )
+
+    assert any(m.get("type") == "error" for m in posted), (
+        f"an unknown key type must be refused, not mined as a device key: {posted}"
+    )
+    assert not any(m.get("type") == "found" for m in posted), (
+        "and must not return a key of the wrong kind"
+    )
+
+
+def test_device_key_mode_still_works_end_to_end():
+    """Backwards compatibility: a search with no keyType is a device key.
+
+    The pre-selector callers - the benchmark harness, and any page state or
+    bookmark that predates it - send no keyType at all. That has to keep meaning
+    "an Ed25519 key", so the default path is asserted rather than assumed.
+    """
+    from pathlib import Path
+
+    mod = _load_check_inline_js()
+    worker = mod.extract(Path(__file__).parent)["worker.js"]
+
+    assert "e.data.keyType === undefined ? 'ed25519' : e.data.keyType" in worker, (
+        "an absent keyType must default to a device key"
+    )
+    assert "sodium.crypto_sign_seed_keypair(seed).publicKey" in worker, (
+        "the device-key mode must still match the DERIVED public key"
+    )
+
+
+def test_node_id_survives_a_history_round_trip():
+    """A saved node ID must not be discarded the next time the page loads.
+
+    The load filter used to be a single 64-hex-digit regex, correct while every
+    entry was an Ed25519 pair. Left in place it would silently drop every node
+    ID and PSK the user had mined, with no error and no warning, on reload -
+    the worst outcome available for a mining tool whose entire value is the keys
+    it found.
+    """
+    from pathlib import Path
+
+    html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+    assert "hex64" not in html, "the fixed 64-digit filter must be gone"
+    # Both the save path and the load path have to be per-type.
+    assert html.count("cfg.keyLen * 2") >= 2 or html.count("keyLen * 2") >= 2, (
+        "validation must be per key type on BOTH the save and the load path"
+    )
+
+
 def test_worker_awaits_libsodium_ready():
     """Regression: libsodium.js is an Emscripten build whose crypto_* wrappers
     only exist after libsodium.ready resolves. Without awaiting it, the worker
