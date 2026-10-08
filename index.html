@@ -1424,7 +1424,7 @@ async function calibrateScaling(logical) {
 
             if (n === nHi) return vHi;
             const t = (Math.log(n) - Math.log(nLo)) / (Math.log(nHi) - Math.log(nLo));
-            const v = Math.exp(Math.log(vLo) + t * (Math.log(vHi) - Math.log(vHi)));
+            const v = Math.exp(Math.log(vLo) + t * (Math.log(vHi) - Math.log(vLo)));
             return Math.min(v, BROWSER_ESTIMATOR_SCALE_MAX);
         }
 
@@ -1511,12 +1511,10 @@ async function calibrateScaling(logical) {
             }
 
             const numWorkers = detectOptimalWorkers();
-            // Scale through the browser estimator curve (2.9x @ 8 threads) instead
-            // of assuming linear, so the headline figure is one people can plan
-            // around. The browser estimator uses a power-law fit anchored at
-            // 2.9x @ 8 threads, which is lower than the Node proxy (4.08x)
-            // because the browser worker includes wrapper overhead.
-            const scale = browserEstimatorScale(numWorkers);
+            // Scale through the effective curve (cached measurement or browser
+            // estimator) so the headline figure reflects the calibration if
+            // one exists, or the browser estimator power-law fit otherwise.
+            const scale = workerScale(numWorkers);
             const modelledRate = ratePerWorker() * scale;
 
             // This line is STATIC for the duration of a search, and is the
