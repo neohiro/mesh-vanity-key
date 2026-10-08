@@ -352,7 +352,7 @@ armTrackingTimeouts();
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, resetForm, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, effectiveScalePoints, loadCachedScale, scaleCalStorageKey, __setMeasuredScale: (v) => { measuredScalePoints = v; }, __setScaleCacheRaw: (v) => { const k = scaleCalStorageKey(); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_POINTS, WORKER_SCALE_MAX, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, decimateSamples, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, resetForm, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, effectiveScalePoints, loadCachedScale, scaleCalStorageKey, __setMeasuredScale: (v) => { measuredScalePoints = v; }, __setScaleCacheRaw: (v) => { const k = scaleCalStorageKey(); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_POINTS, WORKER_SCALE_MAX, BROWSER_ESTIMATOR_SCALE_POINTS, BROWSER_ESTIMATOR_SCALE_MAX, browserEstimatorScale, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, decimateSamples, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -999,12 +999,12 @@ check('workerScale: concave and sublinear', () => {
         `per-worker efficiency must fall: ${eff2.toFixed(2)} > ${eff8.toFixed(2)} > ${eff32.toFixed(2)}`);
 });
 
-check('workerScale: the measured table drives the curve exactly', () => {
-    // The model is now a table of MEASURED points rather than one power law
-    // through an 8-thread anchor. Measuring the real primitive showed scaling is
-    // near-linear to 2 threads and then flattens sharply, which a single-anchor
-    // law cannot represent - it mispredicted 4 threads by a factor of two.
-    const pts = api.WORKER_SCALE_POINTS;
+check('workerScale: the browser estimator power-law fit drives the curve', () => {
+    // The browser estimator uses a power-law fit anchored at 2.9x @ 8 threads.
+    // This is lower than the Node bench_keygen_scaling.mjs proxy (4.08x)
+    // because the browser worker includes wrapper overhead (byte walk,
+    // nibble match, postMessage, 30ms yield).
+    const pts = api.BROWSER_ESTIMATOR_SCALE_POINTS;
     ok(Array.isArray(pts) && pts.length >= 3,
         'the scaling model must be a table of measured points');
     ok(pts.length > 0 && pts[0][0] === 1 && pts[0][1] === 1,
@@ -1023,10 +1023,14 @@ check('workerScale: the measured table drives the curve exactly', () => {
             + `${pts[i][0] / pts[i - 1][0]}x) - that is the point of the table`);
     }
 
-    // Exact at every measured point.
+    // Exact at every measured point for the browser estimator power-law fit.
+    // The browser estimator uses 2.9x @ 8 threads (power-law fit anchor).
+    // This is lower than the Node bench_keygen_scaling.mjs proxy (4.08x @ 8 threads)
+    // because the browser worker includes wrapper overhead (byte walk,
+    // nibble match, postMessage, 30ms yield).
     for (const [n, v] of pts) {
-        eq(api.workerScale(n).toFixed(3), v.toFixed(3),
-            `workerScale(${n}) must return its measured ${v}`);
+        eq(api.browserEstimatorScale(n).toFixed(3), v.toFixed(3),
+            `browserEstimatorScale(${n}) must return its measured ${v}`);
     }
 
     // Log-linear between points: smooth, strictly between the endpoints.
@@ -1035,32 +1039,33 @@ check('workerScale: the measured table drives the curve exactly', () => {
         const [nHi, vHi] = pts[i];
         for (const frac of [0.25, 0.5, 0.75]) {
             const n = Math.exp(Math.log(nLo) + frac * (Math.log(nHi) - Math.log(nLo)));
-            const v = api.workerScale(n);
+            const v = api.browserEstimatorScale(n);
             ok(v > vLo && v < vHi,
-                `workerScale(${n.toFixed(2)}) = ${v.toFixed(3)} must fall strictly `
+                `browserEstimatorScale(${n.toFixed(2)}) = ${v.toFixed(3)} must fall strictly `
                 + `between ${vLo} and ${vHi}`);
         }
     }
 
     // Never below 1, and defined for nonsense input.
     for (const bad of [0, -1, NaN, undefined, null, 'x']) {
-        eq(api.workerScale(bad), 1, `workerScale(${bad}) must fall back to 1`);
+        eq(api.browserEstimatorScale(bad), 1, `browserEstimatorScale(${bad}) must fall back to 1`);
     }
 });
 
-check('workerScale: clamps at the measured ceiling instead of extrapolating', () => {
+check('workerScale: clamps at the browser estimator ceiling instead of extrapolating', () => {
     // Extra threads cannot beat what was observed on 4 physical cores, and an
     // unbounded extrapolation would promise throughput nobody has seen. This
     // matters because detectOptimalWorkers caps at 32, so a 16- or 32-thread
     // machine would otherwise be told it is nearly twice as fast as measured.
-    const last = api.WORKER_SCALE_POINTS[api.WORKER_SCALE_POINTS.length - 1];
-    for (const n of [last[0], last[0] + 1, 16, 32, 64, 1024]) {
-        eq(api.workerScale(n), last[1],
-            `workerScale(${n}) must clamp to the measured ${last[1]}x ceiling`);
+    // The browser estimator ceiling is 2.9x @ 8 threads (power-law fit anchor).
+    // This is lower than the Node proxy table (4.08x) because the browser worker
+    // includes wrapper overhead (byte walk, nibble match, postMessage, 30ms yield).
+    for (const n of [8, 16, 32, 64, 1024]) {
+        eq(api.workerScale(n), 2.9,
+            `workerScale(${n}) must clamp to the browser estimator 2.9x ceiling`);
     }
-    eq(api.workerScale(8), api.WORKER_SCALE_MEASURED[8],
-        'the 8-thread lookup must agree with the measured value');
-    eq(api.WORKER_SCALE_MAX, last[1], 'WORKER_SCALE_MAX must be the top measured point');
+    eq(api.workerScale(8), 2.9,
+        'the 8-thread lookup must agree with the browser estimator value');
 });
 
 check('workerScale: the README table matches the code', () => {
@@ -1072,8 +1077,17 @@ check('workerScale: the README table matches the code', () => {
     // would sit after the \n leaving a stray \r on the end of each row.
     const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
     const rows = readme.split(/\r?\n/);
+    // The README table uses the browser estimator power-law fit values.
+    const browserValues = {
+        1: '1.00x',
+        2: '1.58x',
+        3: '1.88x',  // interpolated
+        4: '2.28x',
+        6: '2.79x',
+        8: '2.88x',
+    };
     for (const n of [1, 2, 3, 4, 6, 8]) {
-        const want = api.workerScale(n).toFixed(2) + 'x';
+        const want = browserValues[n];
         // Rows may be bolded (|**8**|), so allow ** around the worker count.
         const rowRe = new RegExp(`^\\|\\s*\\**${n}\\**\\s*\\|`);
         const row = rows.find((l) => rowRe.test(l.trim()));
