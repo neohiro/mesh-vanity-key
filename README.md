@@ -1,6 +1,6 @@
 # mesh-vanity-key
 
-A fast Ed25519 vanity key generator for mesh networks: MeshCore device keys,
+A fast vanity key generator for mesh networks: MeshCore device keys,
 Meshtastic channel PSKs and `!node` IDs, and any other encoded public key you
 need to match against a pattern.
 
@@ -31,7 +31,46 @@ devices and related tooling.
 
 ## What It Does
 
-Generates Ed25519 cryptographic keypairs until the encoded public key matches a target pattern (prefix, suffix, or both). The search is optimized with a scalar-walk algorithm that avoids repeated hashing, making it significantly faster than naive approaches.
+Generates cryptographic keypairs until the encoded public key matches a target
+pattern (prefix, suffix, or both). The search is optimized with a scalar-walk
+algorithm that avoids repeated hashing, making it significantly faster than
+naive approaches.
+
+### Key types (browser app only)
+
+The three-way selector picks **which value is being mined**. These are three
+different kinds of value, not three hashes over one key — only the first derives
+anything:
+
+| Key type | Value mined | Width | Derivation | Relative cost |
+|---|---|---|---|---|
+| **Device Key** | MeshCore / Meshtastic Ed25519 public key | 32 bytes (64 hex) | seed → Ed25519 public key | baseline |
+| **Channel PSK** | Meshtastic 256-bit channel pre-shared key | 32 bytes (64 hex) | none — the candidate *is* the secret | ~400× faster |
+| **Node ID** | Meshtastic 32-bit node ID (`!xxxxxxxx`) | 4 bytes (8 hex) | none — the candidate *is* the ID | ~400× faster |
+
+The distinction is load-bearing rather than cosmetic:
+
+- **A channel PSK is not a digest.** MeshCore and Meshtastic treat it as an
+  opaque 256-bit shared secret, so there is nothing to hash — searching it means
+  walking a counter and comparing nibbles. An implementation that "SHA-256'd a
+  seed" would return a value neither tool accepts.
+- **A node ID is 32 bits, not 64 hex digits.** Its whole space is 2³², so the
+  pattern limit tightens to 8 hex digits and the counter is sized to 4 bytes. A
+  32-byte counter matched only on its leading 4 bytes would advance that leading
+  byte once every 2²⁴ iterations.
+- **The 00/FF reserved-prefix notice applies only to a Device Key.** It is a
+  MeshCore rule about device keys; in a PSK or a node ID those bytes are
+  ordinary.
+
+Because only the Device Key derives anything, the pre-flight estimate is scaled
+by a per-type throughput factor. Without it the same pattern would be quoted
+with the same time estimate for all three types — wrong by orders of magnitude
+for the two fast ones. The factor is deliberately conservative (below measured),
+because understating the rate only makes a search look slower than it is.
+
+> The Python CLI is unchanged and remains Ed25519-only: it derives keypairs, so
+> it has no PSK or node-ID mode to offer. The selector is browser-only.
+
 
 ## Vanity & Functional Keypair Mining
 

@@ -74,9 +74,35 @@ function getElementById(id) {
     return els.get(id);
 }
 
+
+
 const alerts = [];
 const confirms = [];
 const storage = new Map();
+
+// The key-type selector is a radio group, and the page reads it through
+// querySelector('input[name="hashtype"]:checked') rather than an id - there is
+// no single element to hold the state, which is the point of a radio group.
+// The mock therefore models just that one selector shape, over a registry the
+// tests can populate via setCheckedKeyType().
+const radioRegistry = new Map();   // name -> element currently checked
+
+function setCheckedKeyType(value, name = 'hashtype') {
+    if (value === null) {
+        radioRegistry.delete(name);
+        return null;
+    }
+    const el = makeEl('hashtype-' + value);
+    el.name = name;
+    el.value = value;
+    el.checked = true;
+    radioRegistry.set(name, el);
+    return el;
+}
+
+// The default selection: a device key. Every test that does not care about the
+// selector inherits it, which mirrors the page's checked-on-load radio.
+setCheckedKeyType('ed25519');
 
 const documentMock = {
     getElementById,
@@ -84,6 +110,12 @@ const documentMock = {
     body: makeEl('body'),
     currentScript: null,
     addEventListener() {},
+    querySelector(selector) {
+        // Only the one selector the page uses on a radio group.
+        const m = /^input\[name="([^"]+)"\]:checked$/.exec(String(selector || ''));
+        if (m) return radioRegistry.get(m[1]) || null;
+        throw new Error('documentMock.querySelector: unsupported selector ' + selector);
+    },
 };
 
 // Mutable core-count so detectOptimalWorkers() can be exercised.
@@ -352,7 +384,7 @@ armTrackingTimeouts();
 // wrapper lets us return them.
 vm.createContext(sandbox);
 vm.runInContext(
-    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, resetForm, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, effectiveScalePoints, loadCachedScale, scaleCalStorageKey, __setMeasuredScale: (v) => { measuredScalePoints = v; }, __setScaleCacheRaw: (v) => { const k = scaleCalStorageKey(); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); }, workerScale, smoothEta, resetEtaSmoothing, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_POINTS, WORKER_SCALE_MAX, BROWSER_ESTIMATOR_SCALE_POINTS, BROWSER_ESTIMATOR_SCALE_MAX, browserEstimatorScale, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, decimateSamples, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
+    `${source}\n;globalThis.__api = { formatElapsed, detectOptimalWorkers, updateEstimate, ratePerWorker, validateHex, checkReservedPrefix, validateForm, loadHistory, persistHistory, addKeyToHistory, renderHistory, currentPatternDesc, isQuotaError, sodiumIsUsable, awaitSodium, csvCell, HISTORY_KEY, MAX_SAVED_KEYS, resetForm, getSavedKeys: () => savedKeys, resetRateSmoothing, smoothRate, getSmoothedRate, invalidHexChars, escapeHtml, updatePatternNotice, createMiningWorker, terminateAllWorkers, stopMining, startMining, miningState: () => mining, startingState: () => starting, resetForm, liveWorkerCount: () => workers.length, initTimeoutCount: () => initTimeouts.length, __trackWorker: (w) => workers.push(w), clearHistory, isHistoryUnreadable: () => historyUnreadable, machineFingerprint, deriveObfuscationKeys, getOrCreateObfuscationSecret, legacyFingerprintV1, formatProgressLine, progressEtaClause, formatDayHint, formatEta, etaParts, renderEta, setEtaMessage, pad2, resetLiveLogs, reportActualWorkers, encryptHistoryData, decryptHistoryData, __resetObfKeyCache: () => { obfKeyPromise = null; }, effectiveScalePoints, loadCachedScale, scaleCalStorageKey, __setMeasuredScale: (v) => { measuredScalePoints = v; }, __setScaleCacheRaw: (v) => { const k = scaleCalStorageKey(); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); }, workerScale, smoothEta, resetEtaSmoothing, KEY_TYPES, DEFAULT_KEY_TYPE, getSelectedKeyType, getKeyTypeConfig, maxPatternHexLength, applyKeyTypeLimits, keyTypeThroughputFactor, KEY_TYPE_THROUGHPUT, ETA_MIN_SAMPLES, ETA_SMOOTHING_ALPHA, WORKER_SCALE_MEASURED, WORKER_SCALE_POINTS, WORKER_SCALE_MAX, BROWSER_ESTIMATOR_SCALE_POINTS, BROWSER_ESTIMATOR_SCALE_MAX, browserEstimatorScale, setStatusText, clearStatusText, pushRateGraphSample, resetRateGraph, decimateSamples, rateGraphState: () => rateGraph.map((s) => ({ t: s.t, v: s.v })), RATE_GRAPH_POINTS, RATE_GRAPH_WINDOW_MS, getStatusText: () => document.getElementById('progress-text').textContent, getStatusHidden: () => document.getElementById('progress-text').hidden, getLiveEtaText: (id) => { const el = document.getElementById(id); return el ? el.textContent : null; }, getEstimateText: () => document.getElementById('estimate').textContent, exportHistory, exportHistoryInWorker, downloadFile };`,
     sandbox,
     { filename: 'index.html:main.js' }
 );
@@ -796,6 +828,174 @@ check('updatePatternNotice: a 64-digit prefix alone is still allowed', () => {
     getElementById('suffix').value = '';
     api.updatePatternNotice();
     eq(notice.style.display, 'none', 'exactly 64 digits is satisfiable');
+});
+
+// ---- Key type selector ------------------------------------------------------
+// Three value spaces, not three hashes: only a device key derives anything. The
+// selector therefore has to change what the LENGTH limits are, what the notice
+// says, and how fast the search is claimed to run - all from one source.
+
+check('key types: exactly three, and each names a real mesh value', () => {
+    eq(Object.keys(api.KEY_TYPES).length, 3, 'three-way control, three types');
+    eq(api.DEFAULT_KEY_TYPE, 'ed25519', 'the page opens on a device key');
+
+    const t = api.KEY_TYPES;
+    eq(t.ed25519.keyLen, 32, 'an Ed25519 public key is 32 bytes');
+    eq(t.psk.keyLen, 32, 'a channel PSK is 256 bits');
+    eq(t.nodeid.keyLen, 4, 'a Meshtastic node ID is 32 bits');
+    eq(t.ed25519.maxPatternLen, 64);
+    eq(t.psk.maxPatternLen, 64);
+    eq(t.nodeid.maxPatternLen, 8, 'a node ID is only 8 hex digits wide');
+});
+
+check('key types: every type carries a hint, so the selector is self-explaining', () => {
+    for (const [id, cfg] of Object.entries(api.KEY_TYPES)) {
+        ok(typeof cfg.hint === 'string' && cfg.hint.length > 20,
+            `${id} must explain what it searches for`);
+        ok(Array.isArray(cfg.resultLabels) && cfg.resultLabels.length === 2,
+            `${id} must label both rendered fields`);
+    }
+});
+
+check('getSelectedKeyType: reads the radio, and refuses to invent a value', () => {
+    for (const id of Object.keys(api.KEY_TYPES)) {
+        setCheckedKeyType(id);
+        eq(api.getSelectedKeyType(), id, `selecting ${id} must be read back`);
+    }
+    // No radio checked at all, and a value that does not exist: both fall back
+    // to the default rather than yielding undefined into a worker's match.
+    setCheckedKeyType(null);
+    eq(api.getSelectedKeyType(), api.DEFAULT_KEY_TYPE, 'no selection -> default');
+    // A value the control cannot produce, standing in for a tampered message
+    // or a stale bookmark. It must resolve to the default, never be echoed back
+    // as though it were a supported type.
+    setCheckedKeyType('sha3-256');
+    eq(api.getSelectedKeyType(), api.DEFAULT_KEY_TYPE,
+        'an unknown value must resolve to the default');
+    setCheckedKeyType('ed25519');
+});
+
+check('getKeyTypeConfig: unknown types resolve to the default config', () => {
+    const d = api.getKeyTypeConfig(api.DEFAULT_KEY_TYPE);
+    for (const bad of [undefined, null, '', 'sha256', '__proto__', 'constructor']) {
+        eq(api.getKeyTypeConfig(bad), d, `${String(bad)} must resolve to the default`);
+    }
+});
+
+check('maxPatternHexLength: follows the selection, not a constant', () => {
+    for (const [id, cfg] of Object.entries(api.KEY_TYPES)) {
+        setCheckedKeyType(id);
+        eq(api.maxPatternHexLength(), cfg.maxPatternLen, `${id} budget`);
+        eq(api.maxPatternHexLength(id), cfg.maxPatternLen, `${id} explicit`);
+    }
+    setCheckedKeyType('ed25519');
+});
+
+check('applyKeyTypeLimits: publishes the hint and never narrows the inputs', () => {
+    for (const [id, cfg] of Object.entries(api.KEY_TYPES)) {
+        setCheckedKeyType(id);
+        api.applyKeyTypeLimits();
+        eq(getElementById('hashtype-hint').textContent, cfg.hint, `${id} hint shown`);
+        // The cap stays at the widest type: a validator, not maxlength, is the
+        // single gate, and dropping the cap would block a user from typing the
+        // pattern they are about to be told is impossible.
+        for (const id2 of ['prefix', 'suffix']) {
+            eq(getElementById(id2).maxLength, 64, `${id2} keeps the 64-digit cap`);
+        }
+    }
+    setCheckedKeyType('ed25519');
+});
+
+check('the impossible-pattern notice follows the key type', () => {
+    const notice = getElementById('reserved-notice');
+    // 12 digits: impossible for a node ID, fine for a PSK or a device key.
+    getElementById('prefix').value = 'ab'.repeat(6);
+    getElementById('suffix').value = '';
+    setCheckedKeyType('ed25519');
+
+    setCheckedKeyType('psk');
+    api.updatePatternNotice();
+    eq(notice.style.display, 'none', '12 of 64 digits is fine for a PSK');
+
+    setCheckedKeyType('nodeid');
+    api.updatePatternNotice();
+    eq(notice.style.display, 'block', '12 of 8 digits cannot match a node ID');
+    ok(notice.innerHTML.includes('8'), `must state the real limit: ${notice.innerHTML}`);
+    ok(notice.innerHTML.includes('node id'), `must name the type: ${notice.innerHTML}`);
+
+    setCheckedKeyType('ed25519');
+    api.updatePatternNotice();
+    eq(notice.style.display, 'none', 'back to 64 digits: satisfiable again');
+});
+
+check('validateForm: refuses a pattern the selected type cannot hold', () => {
+    getElementById('prefix').value = 'abcd';
+    setCheckedKeyType('nodeid');
+    getElementById('suffix').value = 'ef01';
+    eq(api.validateForm(), true, '4 + 4 = 8 digits is exactly a node ID');
+    getElementById('suffix').value = 'ef01ab';
+    eq(api.validateForm(), false, '12 digits cannot fit a node ID');
+
+    // The SAME pattern, now against the 64-digit budget. 'g' is not a hex digit,
+    // so the strings here stay inside [0-9a-f] - otherwise validateHex would
+    // reject them first and the length gate would never be reached, which would
+    // make this a test of hex validation wearing a length test's name.
+    setCheckedKeyType('psk');
+    getElementById('prefix').value = 'abcd';
+    getElementById('suffix').value = 'ef01ab';
+    eq(api.validateForm(), true, 'the same pattern is fine for a 256-bit PSK');
+
+    setCheckedKeyType('ed25519');
+});
+
+check('the 00/FF reserved-prefix notice applies only to device keys', () => {
+    // It is a MeshCore rule about device keys. 00 and FF are ordinary bytes in a
+    // channel PSK and a node ID, so warning there would be wrong advice.
+    const notice = getElementById('reserved-notice');
+    getElementById('prefix').value = '00ab';
+    getElementById('suffix').value = '';
+
+    setCheckedKeyType('ed25519');
+    api.updatePatternNotice();
+    eq(notice.style.display, 'block', 'a device key with 00 is reserved');
+
+    for (const id of ['psk', 'nodeid']) {
+        setCheckedKeyType(id);
+        api.updatePatternNotice();
+        eq(notice.style.display, 'none', `00 is not reserved for a ${id}`);
+    }
+    setCheckedKeyType('ed25519');
+});
+
+check('throughput factors: only a device key pays for a curve', () => {
+    eq(api.keyTypeThroughputFactor('ed25519'), 1, 'the measured baseline is 1x');
+    for (const id of ['psk', 'nodeid']) {
+        const f = api.keyTypeThroughputFactor(id);
+        ok(f > 100,
+            `${id} performs no derivation and must be quoted above the Ed25519 rate (got ${f})`);
+    }
+    eq(api.keyTypeThroughputFactor('nope'), 1, 'unknown type falls back, never inflates');
+});
+
+check('the pre-flight estimate does not quote an Ed25519 rate for a PSK', () => {
+    // The same pattern is ~430x more likely to be found when nothing is being
+    // derived, so quoting one rate for both makes one of the two figures a lie
+    // by three orders of magnitude.
+    getElementById('prefix').value = 'ab';
+    getElementById('suffix').value = '';
+
+    setCheckedKeyType('ed25519');
+    api.updateEstimate();
+    const deviceKeyLine = getElementById('estimate').textContent;
+
+    setCheckedKeyType('psk');
+    api.updateEstimate();
+    const pskLine = getElementById('estimate').textContent;
+
+    ok(deviceKeyLine && pskLine, 'both lines must render');
+    ok(pskLine !== deviceKeyLine,
+        'the same pattern must not carry the same time estimate for both types');
+    setCheckedKeyType('ed25519');
 });
 
 check('validateForm: blocks prefix+suffix longer than 64 hex digits', () => {

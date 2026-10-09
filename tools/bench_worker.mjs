@@ -23,7 +23,7 @@ const src = raw.replace(/\$\{new URL\([^)]*\)\.href\}/g, 'https://example.test/l
 // measure is therefore essentially pure wrapper overhead per candidate.
 const KEYGEN_CALLS = { n: 0 };
 
-function runBench({ prefix, suffix, matchPrefix, matchSuffix, ms }) {
+function runBench({ prefix, suffix, matchPrefix, matchSuffix, ms, keyType, maxAttempts }) {
     const posted = [];
     let resolveReady;
     const readyPromise = Promise.resolve();
@@ -60,18 +60,32 @@ function runBench({ prefix, suffix, matchPrefix, matchSuffix, ms }) {
     vm.createContext(workerGlobal);
     vm.runInContext(src, workerGlobal, { filename: 'worker.js' });
 
+    // `maxAttempts` bounds the loop and makes the worker post a 'calibrated'
+    // message carrying its own count and elapsed time. That is how the
+    // derivation-free modes are measured below, because their candidate count is
+    // not observable any other way - the only thing that counts them is the
+    // wrapper itself.
     return new Promise((resolve) => {
         const before = KEYGEN_CALLS.n;
         const t0 = Date.now();
-        workerGlobal.onmessage({ data: { prefix, suffix, matchPrefix, matchSuffix } });
+        const data = { prefix, suffix, matchPrefix, matchSuffix, keyType };
+        if (maxAttempts) data.maxAttempts = maxAttempts;
+        workerGlobal.onmessage({ data });
         const poll = setInterval(() => {
             const found = posted.find((m) => m.type === 'found');
             const err = posted.find((m) => m.type === 'error');
-            if (found || err || Date.now() - t0 > ms) {
+            const done_ = posted.find((m) => m.type === 'calibrated');
+            if (found || err || done_ || Date.now() - t0 > ms) {
                 clearInterval(poll);
                 const dt = (Date.now() - t0) / 1000;
-                const done = KEYGEN_CALLS.n - before;
-                resolve({ keys: done, seconds: dt, rate: dt > 0 ? done / dt : 0, posted, found, err });
+                // Prefer the worker's own count when it reported one; it is
+                // exact and excludes the harness's polling latency.
+                const done = done_ ? done_.attempts : (KEYGEN_CALLS.n - before);
+                const seconds = done_ ? done_.elapsed : dt;
+                resolve({
+                    keys: done, seconds, rate: seconds > 0 ? done / seconds : 0,
+                    posted, found, err, capped: !!done_,
+                });
             }
         }, 10);
     });
@@ -109,6 +123,76 @@ const r = { ...last, rate: Math.max(...rates) };
 console.log(`stub-keygen throughput: ${Math.round(r.rate).toLocaleString()} keys/s (best of ${TRIALS})`);
 console.log(`  candidates: ${r.keys.toLocaleString()} in ${r.seconds.toFixed(2)}s`);
 if (r.found) console.log(`  matched after ${r.found.attempts.toLocaleString()} attempts`);
+
+// The two no-derivation modes are benchmarked too, for a different reason.
+//
+// For a device key the gate above protects against wrapper overhead becoming
+// VISIBLE next to libsodium, which is the only thing it could threaten: keygen
+// costs ~13,500/s in a real browser, so any wrapper at or above that rate is
+// already invisible.
+//
+// A channel PSK and a node ID derive nothing at all. Their entire cost IS the
+// wrapper - an increment and a nibble compare - so the same overhead that is
+// invisible for a device key is the whole cost here. If the matcher ever grew a
+// per-candidate allocation or a string build, these two modes would feel it in
+// full and no amount of real keygen would hide it. Measuring them is the only
+// way the regression gate covers the new hot paths.
+//
+// The candidate count is bounded by maxAttempts rather than a wall clock, and
+// the rate comes from the worker's own elapsed time. Both matter here: these
+// loops finish in a few hundred milliseconds, so a harness-side stopwatch would
+// measure the harness, and a 1.5s budget against a ~50M/s loop is mostly
+// scheduler noise.
+const DERIVATION_FREE_ATTEMPTS = 4_000_000;
+console.log('');
+let pskRate = 0;
+let nodeidRate = 0;
+for (const [label, keyType] of [['channel PSK', 'psk'], ['node ID', 'nodeid']]) {
+    let best = 0;
+    let lastRun = null;
+    for (let t = 0; t < TRIALS; t++) {
+        const run = await runBench({
+            // Unmatchable-by-construction for the bounded run: 6 hex digits on a
+            // value whose counter is walked from a fixed stub start would
+            // otherwise end the trial early on a lucky hit.
+            prefix: 'ffffffffffff', suffix: '', matchPrefix: true, matchSuffix: false,
+            ms: 30000, keyType, maxAttempts: DERIVATION_FREE_ATTEMPTS,
+        });
+        if (run.err) {
+            console.error(`${label} worker error:`, run.err.message);
+            process.exit(1);
+        }
+        if (!run.capped) {
+            console.error(`${label} did not reach its attempt cap in 30s`);
+            process.exit(1);
+        }
+        lastRun = run;
+        best = Math.max(best, run.rate);
+        console.log(`  ${label} trial ${t + 1}/${TRIALS}: ${Math.round(run.rate).toLocaleString()} keys/s`);
+    }
+    console.log(`${label} throughput: ${Math.round(best).toLocaleString()} keys/s (best of ${TRIALS})`);
+    console.log(`  candidates: ${lastRun.keys.toLocaleString()} in ${lastRun.seconds.toFixed(3)}s`);
+    if (keyType === 'psk') pskRate = best; else nodeidRate = best;
+}
+
+// A lower floor than the device-key gate, and deliberately so: these modes do
+// no derivation, so their achievable rate is set by loop overhead rather than by
+// crypto, and it is bounded by the 32-bit/256-bit counter walk rather than by
+// any external cost. 5M/s is comfortably above the device-key gate's 1M/s and
+// three orders of magnitude above the 9,182/s catastrophic cliff it shares.
+const MIN_DERIVATION_FREE_KEYS_PER_SEC = 5_000_000;
+for (const [label, rate] of [['channel PSK', pskRate], ['node ID', nodeidRate]]) {
+    if (rate < MIN_DERIVATION_FREE_KEYS_PER_SEC) {
+        console.error(
+            `\nFAILED: ${label} throughput ${Math.round(rate).toLocaleString()} keys/s `
+            + `is below the ${MIN_DERIVATION_FREE_KEYS_PER_SEC.toLocaleString()} keys/s floor. `
+            + 'These modes derive nothing, so the wrapper IS the whole cost.'
+        );
+        process.exit(1);
+    }
+    console.log(`  ${label} regression floor: `
+        + `${MIN_DERIVATION_FREE_KEYS_PER_SEC.toLocaleString()} keys/s — OK`);
+}
 
 // Regression gate.
 //

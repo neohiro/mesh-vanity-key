@@ -200,6 +200,80 @@
         .checkbox-field input[type="checkbox"] { width: 18px; height: 18px; accent-color: #58a6ff; }
         .checkbox-field input[type="checkbox"]:disabled { opacity: 0.5; }
         .checkbox-field label { margin-bottom: 0; cursor: pointer; }
+
+        /* One-line explanation of the selected key type, under the control. Sits
+           beside the fields it qualifies rather than in the info frame at the
+           bottom, because it changes what the two inputs above it MEAN - the
+           same "ab" is a device key, a channel secret or a node ID. */
+        .hint-text {
+            display: block;
+            margin-top: 6px;
+            font-size: 12px;
+            color: #8b949e;
+            line-height: 1.5;
+        }
+        .hint-text:empty { display: none; }
+        /* Hash type slider: three-way toggle for Device Key / Channel PSK / Node ID */
+        .hashtype-slider {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 999px;
+            padding: 4px;
+            gap: 0;
+        }
+        .hashtype-slider input[type="radio"] {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+        }
+        .hashtype-option {
+            position: relative;
+            z-index: 1;
+            padding: 8px 16px;
+            font-size: 13px;
+            font-weight: 600;
+            color: #8b949e;
+            cursor: pointer;
+            border-radius: 999px;
+            transition: color 0.2s, background 0.2s;
+            white-space: nowrap;
+        }
+        .hashtype-option:hover { color: #c9d1d9; }
+        .hashtype-slider input[type="radio"]:checked + .hashtype-option {
+            color: #0d1117;
+            background: transparent; /* thumb provides the highlight */
+        }
+        /* Keyboard focus must be visible on the segment, not only as the
+           container's border: the radios are visually hidden, so without this a
+           keyboard user gets no indication of which segment they are on. */
+        .hashtype-slider input[type="radio"]:focus-visible + .hashtype-option {
+            outline: 2px solid #c9d1d9;
+            outline-offset: 1px;
+        }
+        .hashtype-slider-thumb {
+            position: absolute;
+            top: 4px;
+            left: 4px;
+            height: calc(100% - 8px);
+            width: calc((100% - 12px) / 3);
+            background: #58a6ff;
+            border-radius: 999px;
+            transition: transform 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            pointer-events: none;
+            z-index: 0;
+        }
+        .hashtype-slider input[id="hashtype-psk"]:checked ~ .hashtype-slider-thumb {
+            transform: translateX(calc((100% - 12px) / 3));
+        }
+        .hashtype-slider input[id="hashtype-nodeid"]:checked ~ .hashtype-slider-thumb {
+            transform: translateX(calc(2 * (100% - 12px) / 3));
+        }
+        .hashtype-slider:focus-within { border-color: #58a6ff; }
+        .hashtype-slider:focus-within .hashtype-option { outline: none; }
+
         .buttons { display: flex; gap: 12px; margin-bottom: 12px; }
         button {
             padding: 10px 24px;
@@ -527,6 +601,37 @@
                 <span class="error-msg" id="suffix-error"></span>
             </div>
 
+            <div class="field">
+                <label for="hashtype-ed25519">Key type</label>
+                <!-- Three-way segmented control.
+                     These are the three value spaces the page has always
+                     advertised ("MeshCore device keys, Meshtastic channel PSKs
+                     and node IDs"); the selector makes them explicit instead of
+                     implying every search is an Ed25519 key. Radios, not a
+                     <select>: each is reachable by one tap on mobile, and the
+                     visible segment IS the checked radio, so state and label can
+                     never disagree. The hidden thumb is decoration - the radio
+                     itself carries the state, so a missing thumb degrades to a
+                     plain radio group rather than an unreadable control. -->
+                <div class="hashtype-slider" role="radiogroup" aria-label="Key type to mine">
+                    <input type="radio" name="hashtype" id="hashtype-ed25519" value="ed25519" checked
+                           onchange="refreshPatternUI()"
+                           title="MeshCore / Meshtastic device key: an Ed25519 public key mined for a hex prefix or suffix">
+                    <label for="hashtype-ed25519" class="hashtype-option">Device Key</label>
+                    <input type="radio" name="hashtype" id="hashtype-psk" value="psk"
+                           onchange="refreshPatternUI()"
+                           title="Meshtastic channel PSK: a 256-bit shared secret mined for a hex prefix or suffix">
+                    <label for="hashtype-psk" class="hashtype-option">Channel PSK</label>
+                    <input type="radio" name="hashtype" id="hashtype-nodeid" value="nodeid"
+                           onchange="refreshPatternUI()"
+                           title="Meshtastic node ID: a 32-bit identifier mined for a hex prefix or suffix">
+                    <label for="hashtype-nodeid" class="hashtype-option">Node ID</label>
+                    <span class="hashtype-slider-thumb" aria-hidden="true"></span>
+                </div>
+                <span class="hint-text" id="hashtype-hint"></span>
+                <span class="error-msg" id="hashtype-error"></span>
+            </div>
+
             <div class="buttons">
                 <button id="start-btn" onclick="startMining()">Start Mining</button>
                 <button id="stop-btn" onclick="stopMining()" disabled>Stop</button>
@@ -661,6 +766,78 @@
         let initTimeouts = [];
         let blobUrls = [];
 
+        // ---- Key types -----------------------------------------------------------
+        // The three value spaces this page can mine. They are NOT three hashes
+        // over one key: each is a different KIND OF VALUE, with a different
+        // length, a different derivation and a very different cost per
+        // candidate. The distinction matters for two reasons:
+        //
+        //  1. Correctness. Only Device Key derives anything: Ed25519 seed ->
+        //     public key. Channel PSK and Node ID ARE the random value, so
+        //     there is nothing to hash. Treating them as "SHA-256 of a seed"
+        //     would invent a derivation MeshCore/Meshtastic never performs, and
+        //     hand back a value neither tool accepts.
+        //
+        //  2. Speed. Deriving an Ed25519 key is a scalar multiplication, so
+        //     Device Key is the expensive mode by roughly three orders of
+        //     magnitude. The other two modes are a counter increment and a
+        //     nibble compare. That is not a defect to apologise for - it is
+        //     why the selector says which space it is searching.
+        //
+        // `keyLen` is the length of the MATCHED value in bytes; `secretLen` is
+        // how many bytes of entropy the user must keep to use the result, which
+        // is why it is tracked separately (they coincide for PSK, not for
+        // anything else).
+        const KEY_TYPES = {
+            ed25519: {
+                name: 'Device Key',
+                keyLen: 32,        // Ed25519 public key
+                maxPatternLen: 64, // 32 bytes of hex
+                hint: 'An Ed25519 public key for a MeshCore or Meshtastic device. '
+                    + 'The 32-byte seed is the private key; keep it safe.',
+                resultLabels: ['Public Key (hex)', 'Private Key (hex)'],
+            },
+            psk: {
+                name: 'Channel PSK',
+                keyLen: 32,        // 256-bit shared secret
+                maxPatternLen: 64,
+                hint: 'A 256-bit Meshtastic channel pre-shared key. The mined '
+                    + 'value IS the secret - there is no derivation step, so '
+                    + 'this searches thousands of times faster than a device key.',
+                resultLabels: ['PSK (hex)', 'PSK (hex)'],
+            },
+            nodeid: {
+                name: 'Node ID',
+                keyLen: 4,         // 32-bit Meshtastic node ID
+                maxPatternLen: 8,
+                hint: 'A 32-bit Meshtastic node ID, shown as !xxxxxxxx. The '
+                    + 'whole space is 2^32, so every character here matters.',
+                resultLabels: ['Node ID (hex)', 'Node ID (hex)'],
+            },
+        };
+        const DEFAULT_KEY_TYPE = 'ed25519';
+
+        // Read the selection defensively. An unknown value must not silently
+        // become Ed25519: a worker mining Ed25519 while the user believes they
+        // are mining a channel PSK would produce a key that does not work for
+        // their stated purpose, and a wrong-but-plausible answer is worse than a
+        // refusal. Anything unrecognised falls back to the default only because
+        // the radio group cannot actually be in that state; the value is
+        // validated again before it reaches a worker.
+        function getSelectedKeyType() {
+            const el = document.querySelector('input[name="hashtype"]:checked');
+            const value = el ? el.value : '';
+            return Object.prototype.hasOwnProperty.call(KEY_TYPES, value)
+                ? value
+                : DEFAULT_KEY_TYPE;
+        }
+
+        function getKeyTypeConfig(keyType) {
+            return Object.prototype.hasOwnProperty.call(KEY_TYPES, keyType)
+                ? KEY_TYPES[keyType]
+                : KEY_TYPES[DEFAULT_KEY_TYPE];
+        }
+
         // A mining worker runs an unconditional `while (true)` until it finds a
         // match, so it has no cooperative-shutdown path: the only way to stop one
         // is to terminate it. Worker pooling was previously attempted here and
@@ -730,6 +907,47 @@
 
         function ratePerWorker() {
             return calibratedRatePerWorker || 200;
+        }
+
+        // How many candidates a single worker gets through per Ed25519 keygen,
+        // per key type.
+        //
+        // A device key derives an Ed25519 public key per candidate, which is a
+        // scalar multiplication and costs ~13,500-23,000/s in a real browser.
+        // A channel PSK and a node ID derive NOTHING: the counter IS the value,
+        // so a candidate is an increment plus a nibble compare.
+        //
+        // The measured gap is large. tools/bench_worker.mjs runs the extracted
+        // worker with a stubbed keygen, so what it measures IS the per-candidate
+        // cost of each mode:
+        //
+        //     device key (wrapper only)   ~3,400,000/s    (1.00x)
+        //     channel PSK (whole cost)     ~71,000,000/s   (~21x)
+        //     node ID     (whole cost)     ~83,000,000/s   (~25x)
+        //
+        // Those ratios understate the real gap, because in the device-key bench
+        // the stub is nearly free while a real scalar multiplication is not.
+        // Against real browser keygen the derivation-free modes are three orders
+        // of magnitude faster.
+        //
+        // 400 is therefore a deliberately CONSERVATIVE factor: it sits below what
+        // the two measurements above support (a real-browser PSK is well over
+        // 10,000,000 candidates/s per worker) but far above 1. Understating
+        // throughput is the safe direction - the figure tells the user their
+        // search will take longer than it will, which costs them a minute of
+        // waiting. Overstating it would have them close the tab on a search that
+        // was seconds from done. Note also that these factors only shape the
+        // PRE-FLIGHT estimate; the live panel reports the real measured rate
+        // within one report interval, so a wrong factor cannot mislead for long.
+        const KEY_TYPE_THROUGHPUT = {
+            ed25519: 1,
+            psk: 400,
+            nodeid: 400,
+        };
+
+        function keyTypeThroughputFactor(keyType) {
+            const f = KEY_TYPE_THROUGHPUT[keyType];
+            return typeof f === 'number' && isFinite(f) && f > 0 ? f : 1;
         }
 
         async function calibrateBenchmark() {
@@ -870,8 +1088,10 @@
         // written as 64 hex digits, so every position is a hex digit.
         const HEX_DIGITS = '0123456789abcdefABCDEF';
 
-        // An Ed25519 public key is 32 bytes = 64 hex digits. A prefix and suffix
-        // pattern together cannot exceed this, or they must overlap.
+        // The widest value this page mines is 32 bytes, so 64 hex digits is the
+        // ceiling on a pattern for every key type. Per-type limits live in
+        // KEY_TYPES and are read through maxPatternHexLength(); this constant is
+        // only the shared upper bound used for the inputs' maxlength.
         const PUBLIC_KEY_HEX_LENGTH = 64;
 
         function escapeHtml(s) {
@@ -915,6 +1135,16 @@
             return false;
         }
 
+        // The hex-digit budget for the CURRENT key type. A Device Key and a
+        // Channel PSK are both 32 bytes, so this is 64 for both; a Node ID is 4
+        // bytes, so it is 8. Centralised here because three separate places need
+        // it (validateForm, the notice, and the input maxlength) and they must
+        // never disagree - a notice that allows what the validator rejects is
+        // worse than no notice.
+        function maxPatternHexLength(keyType) {
+            return getKeyTypeConfig(keyType || getSelectedKeyType()).maxPatternLen;
+        }
+
         function validateForm() {
             const prefixInput = document.getElementById('prefix');
             const suffixInput = document.getElementById('suffix');
@@ -926,16 +1156,17 @@
                 alert('Please enter at least a prefix or suffix.');
                 return false;
             }
-            // A key is 64 hex chars. If the two patterns together exceed that,
-            // they must overlap, and the overlap usually contradicts itself -
-            // the search can then never succeed and would spin on every core
-            // forever. The CLI already rejects this (its combined pattern is
-            // capped at 64); enforce the same rule here so both entry points
-            // agree.
+            // The two patterns cannot together exceed the value being mined: if
+            // they do they must overlap, and the overlap usually contradicts
+            // itself - the search can then never succeed and would spin on every
+            // core forever. The CLI caps its combined pattern the same way, so
+            // both entry points agree.
+            const maxLen = maxPatternHexLength();
             const total = prefixInput.value.length + suffixInput.value.length;
-            if (total > PUBLIC_KEY_HEX_LENGTH) {
+            if (total > maxLen) {
+                const what = getKeyTypeConfig(getSelectedKeyType()).name.toLowerCase();
                 alert('Prefix and suffix together are ' + total + ' characters, but a '
-                    + 'MeshCore public key is only ' + PUBLIC_KEY_HEX_LENGTH
+                    + what + ' is only ' + maxLen
                     + ' hex digits. Patterns this long overlap and can never match.');
                 return false;
             }
@@ -964,10 +1195,38 @@
         // route - typing, cut, paste, or programmatically - retires the notice
         // through one code path instead of each caller remembering to.
         function refreshPatternUI() {
+            // Existing history entries keep their own recorded keyType and are
+            // already labelled from it, so changing the selector must not touch
+            // them. Only the inputs' caps, the hint and the notice follow the
+            // selection.
+            applyKeyTypeLimits();
             validateHex(document.getElementById('prefix'));
             validateHex(document.getElementById('suffix'));
             updateEstimate();
             updatePatternNotice();
+        }
+
+        // Re-apply everything that depends on which key type is selected: the
+        // input caps, the hint line, and the reserved-prefix notice (which only
+        // means anything for a device key).
+        //
+        // The maxlength attributes are lowered rather than raised, never the
+        // reverse. A user who typed a 20-character suffix and then switched to
+        // Node ID keeps the text and sees the impossible-pattern notice, which
+        // is recoverable; silently deleting their input to fit would be the
+        // opposite. Switching back to a wider type restores the full cap.
+        function applyKeyTypeLimits() {
+            const cfg = getKeyTypeConfig(getSelectedKeyType());
+            for (const id of ['prefix', 'suffix']) {
+                const el = document.getElementById(id);
+                // maxlength is the widest type, never less: lowering it would
+                // block the user from typing a pattern they are about to be
+                // told is impossible, and raising it would let them exceed the
+                // CLI's cap unnoticed. The validator is the single gate.
+                el.maxLength = Math.max(PUBLIC_KEY_HEX_LENGTH, cfg.maxPatternLen);
+            }
+            const hint = document.getElementById('hashtype-hint');
+            if (hint) hint.textContent = cfg.hint;
         }
 
         // One shared notice frame for every pattern problem, so the explanation
@@ -1002,7 +1261,10 @@
                 return;
             }
 
-            if (checkReservedPrefix(prefixInput)) {
+            // The 00/FF reservation is a MeshCore rule about DEVICE KEYS. It has
+            // no meaning for a channel PSK or a node ID, where 00 and FF are
+            // ordinary bytes, so it is only raised for the type it applies to.
+            if (getSelectedKeyType() === 'ed25519' && checkReservedPrefix(prefixInput)) {
                 showPatternNotice(
                     '<strong>Notice:</strong> Prefixes starting with <code>00</code> or '
                     + '<code>FF</code> are reserved for MeshCore framework devices '
@@ -1012,15 +1274,20 @@
                 return;
             }
 
-            // Warn while typing when the two patterns are longer than a key.
+            // Warn while typing when the two patterns are longer than the value
+            // being mined. The limit follows the selected key type, so switching
+            // to Node ID tightens it to 8 digits without the user having to
+            // re-learn the rule.
+            const cfg = getKeyTypeConfig(getSelectedKeyType());
             const totalLen = prefixInput.value.length + suffixInput.value.length;
-            if (totalLen > PUBLIC_KEY_HEX_LENGTH) {
+            if (totalLen > cfg.maxPatternLen) {
                 showPatternNotice(
                     '<strong>Impossible pattern:</strong> prefix + suffix is '
-                    + totalLen + ' hex digits, but a MeshCore public key is only '
-                    + PUBLIC_KEY_HEX_LENGTH
+                    + totalLen + ' hex digits, but a '
+                    + escapeHtml(cfg.name.toLowerCase()) + ' is only '
+                    + cfg.maxPatternLen
                     + ' hex digits, so the two must overlap and can never both match. '
-                    + 'Shorten the patterns to ' + PUBLIC_KEY_HEX_LENGTH
+                    + 'Shorten the patterns to ' + cfg.maxPatternLen
                     + ' digits or fewer in total.'
                 );
                 return;
@@ -1515,7 +1782,15 @@ async function calibrateScaling(logical) {
             // estimator) so the headline figure reflects the calibration if
             // one exists, or the browser estimator power-law fit otherwise.
             const scale = workerScale(numWorkers);
-            const modelledRate = ratePerWorker() * scale;
+            // ratePerWorker() is an Ed25519 keygen measurement. A channel PSK
+            // and a node ID perform no derivation at all, so quoting the
+            // Ed25519 rate for them would understate them by roughly three
+            // orders of magnitude - the difference between "about an hour" and
+            // "done before you finish reading this". The multiplier below is
+            // measured per type (see keyTypeThroughputFactor), not guessed.
+            const modelledRate = ratePerWorker()
+                * keyTypeThroughputFactor(getSelectedKeyType())
+                * scale;
 
             // This line is STATIC for the duration of a search, and is the
             // pre-flight projection only. It used to be rewritten on every
@@ -1847,6 +2122,7 @@ function detectOptimalWorkers() {
             const suffix = document.getElementById('suffix').value.toLowerCase();
             const matchPrefix = prefix.length > 0;
             const matchSuffix = suffix.length > 0;
+            const keyType = getSelectedKeyType();
             const numWorkers = detectOptimalWorkers();
 
             // Re-derive the pre-flight line at the moment the user commits, not
@@ -1913,6 +2189,56 @@ function detectOptimalWorkers() {
                         const { prefix, suffix, matchPrefix, matchSuffix } = e.data;
                         const prefixLower = prefix.toLowerCase();
                         const suffixLower = suffix.toLowerCase();
+
+                        // Which value space this worker searches.
+                        //
+                        // Only ed25519 derives anything: the matched value is the
+                        // Ed25519 public key. For psk and nodeid the matched
+                        // value IS the random candidate - a 256-bit channel
+                        // secret and a 32-bit node identifier respectively - so
+                        // there is no hash to apply and no libsodium call to
+                        // make. That is not an optimisation, it is what those two
+                        // values are: MeshCore and Meshtastic treat them as
+                        // opaque secrets, not as digests of anything.
+                        //
+                        // An unrecognised type must not silently mine a device
+                        // key: the user would get an Ed25519 key while believing
+                        // they had a channel secret, and that mistake would not
+                        // surface until the device refused to join. Fail loudly
+                        // instead.
+                        // A MISSING keyType means a caller predating the selector,
+                        // which is a device key and nothing else - so it defaults
+                        // rather than failing. An UNRECOGNISED one is a bug or a
+                        // tampered message, and is refused loudly: silently
+                        // mining an Ed25519 key where the user asked for a
+                        // channel secret would hand back a value their radio
+                        // rejects, with no clue why.
+                        const keyType = e.data.keyType === undefined ? 'ed25519' : e.data.keyType;
+                        const KEY_LEN = keyType === 'psk' ? 32
+                            : keyType === 'nodeid' ? 4
+                            : keyType === 'ed25519' ? 32
+                            : -1;
+                        if (KEY_LEN < 0) {
+                            self.postMessage({
+                                type: 'error',
+                                message: 'Unknown key type: ' + keyType
+                            });
+                            return;
+                        }
+                        // A device key needs libsodium; the other two do not, and
+                        // requiring it would make the two fast modes fail on a
+                        // page whose library failed to load for unrelated
+                        // reasons.
+                        const NEEDS_SODIUM = keyType === 'ed25519';
+                        if (NEEDS_SODIUM
+                            && (typeof sodium === 'undefined'
+                                || typeof sodium.crypto_sign_seed_keypair !== 'function')) {
+                            self.postMessage({
+                                type: 'error',
+                                message: 'Cryptographic library unavailable in worker.'
+                            });
+                            return;
+                        }
 
                         let attempts = 0;
                         const startTime = Date.now();
@@ -2002,7 +2328,19 @@ function detectOptimalWorkers() {
                         // one libsodium call and a handful of integer compares -
                         // no string building at all. Odd-length patterns work
                         // because matching happens per nibble.
-                        const seed = new Uint8Array(32);
+                        // The walk state, sized to the matched value.
+                        //
+                        // 32 bytes for a device key (the Ed25519 seed), KEY_LEN
+                        // for a channel PSK or node ID. The latter two are NOT
+                        // 32 bytes with the tail ignored: the counter is
+                        // big-endian, so it increments from the last byte
+                        // backwards, and a 32-byte buffer matched only on its
+                        // first 4 bytes would leave the leading byte changing
+                        // once every 2**24 iterations - the search would still
+                        // terminate, but the hot path would be walking 28 bytes
+                        // of dead counter for every candidate. Sizing the buffer
+                        // to the value keeps the whole increment in play.
+                        const seed = new Uint8Array(NEEDS_SODIUM ? 32 : KEY_LEN);
                         c.getRandomValues(seed);
 
                         const HEXNIB = new Int8Array(256).fill(-1);
@@ -2019,7 +2357,11 @@ function detectOptimalWorkers() {
                         const suffixNib = decodeNibbles(suffixLower);
                         const prefixLen = prefixNib.length;
                         const suffixLen = suffixNib.length;
-                        const PK_LEN = 32;
+                        // KEY_LEN is fixed above from the key type: 32 for a
+                        // device key and a channel PSK, 4 for a node ID. It is
+                        // the length of the MATCHED value, and the matchers below
+                        // are bounded by it - so a node ID cannot be matched
+                        // against 64 nibbles of nothing.
 
                         // Big-endian +1 with wraparound at 2**256.
                         //
@@ -2036,7 +2378,7 @@ function detectOptimalWorkers() {
                         };
 
                         const startsWithNibbles = (pub, nib, len) => {
-                            if (len > PK_LEN * 2) return false;
+                            if (len > KEY_LEN * 2) return false;
                             for (let j = 0; j < len; j++) {
                                 const b = pub[j >> 1];
                                 if (((j & 1) ? (b & 15) : (b >> 4)) !== nib[j]) return false;
@@ -2045,8 +2387,8 @@ function detectOptimalWorkers() {
                         };
 
                         const endsWithNibbles = (pub, nib, len) => {
-                            if (len > PK_LEN * 2) return false;
-                            const total = PK_LEN * 2;
+                            if (len > KEY_LEN * 2) return false;
+                            const total = KEY_LEN * 2;
                             for (let j = 0; j < len; j++) {
                                 const k = total - len + j;
                                 const b = pub[k >> 1];
@@ -2083,8 +2425,23 @@ function detectOptimalWorkers() {
 
                         while (true) {
                             for (let b = 0; b < BATCH_SIZE; b++) {
-                                const keyPair = sodium.crypto_sign_seed_keypair(seed);
-                                const pub = keyPair.publicKey;
+                                // The matched value depends on the key type.
+                                //
+                                // ed25519: derive the public key from the seed
+                                // and match against THAT. The seed is what the
+                                // user keeps; the public key is what the network
+                                // sees, so it is the value the pattern is about.
+                                //
+                                // psk / nodeid: the candidate IS the secret, so
+                                // match against the seed directly. No derivation,
+                                // no libsodium - which is why these two modes run
+                                // orders of magnitude faster.
+                                let pub;
+                                if (NEEDS_SODIUM) {
+                                    pub = sodium.crypto_sign_seed_keypair(seed).publicKey;
+                                } else {
+                                    pub = seed;
+                                }
 
                                 let match = false;
                                 if (matchPrefix && matchSuffix) {
@@ -2097,8 +2454,20 @@ function detectOptimalWorkers() {
                                 }
 
                                 if (match) {
+                                    // The 'publicKey' field is what matched
+                                    // and the user will paste into their radio
+                                    // config. The 'privateKey' field is what they keep:
+                                    // for a device key that is the Ed25519 seed,
+                                    // and for a channel PSK or node ID it is the
+                                    // same bytes, because the secret IS the
+                                    // published value - there is nothing else to
+                                    // hold. Sending both unconditionally keeps
+                                    // the history schema single-shaped, so export,
+                                    // encryption and rendering need no per-type
+                                    // branch to survive a mixed history.
                                     self.postMessage({
                                         type: 'found',
+                                        keyType: keyType,
                                         publicKey: bytesToHex(pub),
                                         privateKey: bytesToHex(seed),
                                         attempts: attempts,
@@ -2218,7 +2587,7 @@ function detectOptimalWorkers() {
                 if (e.data.type === 'ready') {
                     clearOwnInitTimeout();
                     console.log('[Main] Sending work data to worker ' + i);
-                    w.postMessage({ prefix, suffix, matchPrefix, matchSuffix });
+                    w.postMessage({ prefix, suffix, matchPrefix, matchSuffix, keyType });
                     return;
                 }
                 if (e.data.type === 'progress') {
@@ -2305,6 +2674,7 @@ function detectOptimalWorkers() {
                         document.getElementById('stop-btn').disabled = true;
                         document.getElementById('progress').classList.add('hidden');
                         addKeyToHistory({
+                            keyType: e.data.keyType,
                             publicKey: e.data.publicKey,
                             privateKey: e.data.privateKey,
                             attempts: e.data.attempts,
@@ -3084,15 +3454,35 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                     return;
                 }
                 if (!Array.isArray(parsed)) return;
-                const hex64 = /^[0-9a-fA-F]{64}$/;
-                savedKeys = parsed.filter(e => e
-                    && typeof e === 'object'
-                    && hex64.test(e.publicKey || '')
-                    && hex64.test(e.privateKey || '')).slice(0, MAX_SAVED_KEYS);
+                // Validate each entry against ITS OWN key type, not a fixed 64
+                // hex digits. This filter used to be a single 64-digit regex,
+                // which was correct when every entry was an Ed25519 pair and is
+                // wrong now that a PSK (64) and a node ID (8) can be saved
+                // alongside one: it would silently DISCARD every node ID the
+                // user had mined, with no error, the next time they loaded the
+                // page. Silent data loss on load is the worst outcome available
+                // here, so the length follows the entry.
+                //
+                // An entry with no recorded keyType predates the selector, so it
+                // is a device key - which is what every entry written before it
+                // existed actually was.
+                savedKeys = parsed.filter(e => {
+                    if (!e || typeof e !== 'object') return false;
+                    if (e.keyType !== undefined && !KEY_TYPES[e.keyType]) return false;
+                    const cfg = getKeyTypeConfig(e.keyType);
+                    const hex = new RegExp('^[0-9a-fA-F]{' + cfg.keyLen * 2 + '}$');
+                    return hex.test(e.publicKey || '') && hex.test(e.privateKey || '');
+                }).slice(0, MAX_SAVED_KEYS);
                 for (const e of savedKeys) {
                     // Backfill sequence numbers for entries predating them.
                     if (typeof e.n !== 'number' || isNaN(e.n)) e.n = nextKeyNum++;
                     else if (e.n >= nextKeyNum) nextKeyNum = e.n + 1;
+                    // Normalise the key type so every consumer downstream can
+                    // rely on it being present, rather than each one re-deriving
+                    // "absent means device key" for itself.
+                    e.keyType = getKeyTypeConfig(e.keyType) === KEY_TYPES.nodeid
+                        ? 'nodeid'
+                        : getKeyTypeConfig(e.keyType) === KEY_TYPES.psk ? 'psk' : 'ed25519';
                 }
             } catch (e) {
                 savedKeys = [];  // corrupt/quota-blocked storage: start fresh
@@ -3182,11 +3572,32 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
         }
 
         function addKeyToHistory(entry) {
-            const hex64 = /^[0-9a-fA-F]{64}$/;
-            if (!entry || !hex64.test(entry.publicKey || '') || !hex64.test(entry.privateKey || '')) {
+            // Validate the hex against the LENGTH OF THE KEY TYPE, not a fixed
+            // 64. This used to hard-code 64 because every entry was an Ed25519
+            // keypair; a node ID is 8 hex digits and a PSK is 64, so one
+            // hard-coded test would either reject valid node IDs or let an
+            // 8-digit node ID through a 64-digit field. The check is now
+            // per-type, and an unknown type is rejected rather than assumed.
+            //
+            // An entry with no recorded keyType is a legacy Ed25519 pair from a
+            // saved history, so it is read as a device key - that is what every
+            // entry written before the selector existed actually was.
+            const cfg = getKeyTypeConfig(entry && entry.keyType);
+            if (!entry || entry.keyType !== undefined && !KEY_TYPES[entry.keyType]) {
+                console.warn('Unknown key type rejected:', entry);
+                return;
+            }
+            const hex = new RegExp('^[0-9a-fA-F]{' + cfg.keyLen * 2 + '}$');
+            if (!hex.test(entry.publicKey || '') || !hex.test(entry.privateKey || '')) {
                 console.warn('Invalid key entry rejected:', entry);
                 return;
             }
+            // Normalise so downstream code, export and encryption can rely on
+            // one spelling even if a worker ever changes case.
+            entry.keyType = cfg === KEY_TYPES.ed25519 ? 'ed25519'
+                : cfg === KEY_TYPES.psk ? 'psk' : 'nodeid';
+            entry.publicKey = entry.publicKey.toLowerCase();
+            entry.privateKey = entry.privateKey.toLowerCase();
             entry.n = nextKeyNum++;
             savedKeys.push(entry);
             if (savedKeys.length > MAX_SAVED_KEYS) savedKeys.shift();
@@ -3259,7 +3670,11 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                     const { keys, format } = e.data;
                     const csvCell = (v) => '"' + String(v === undefined || v === null ? '' : v).replace(/"/g, '""') + '"';
                     if (format === 'csv') {
-                        const header = ['n', 'publicKey', 'privateKey', 'attempts', 'elapsed', 'pattern', 'minedAt'];
+                        // keyType is exported so a mixed history (device keys,
+                        // channel PSKs and node IDs in one file) stays
+                        // self-describing: without the column a reader cannot
+                        // tell an 8-digit node ID from a truncated key.
+                        const header = ['n', 'keyType', 'publicKey', 'privateKey', 'attempts', 'elapsed', 'pattern', 'minedAt'];
                         const lines = [header.map(csvCell).join(',')];
                         for (const e of keys) {
                             lines.push(header.map(h => csvCell(e[h])).join(','));
@@ -3360,10 +3775,19 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 frame.className = 'result-frame';
                 const h2 = document.createElement('h2');
                 const keyNum = (typeof entry.n === 'number' && !isNaN(entry.n)) ? entry.n : (index + 1);
-                h2.textContent = 'Key ' + keyNum + ' Found!';
+                const entryCfg = getKeyTypeConfig(entry.keyType);
+                // Heading: "Key N Found!" for a device key, which is the common
+                // case and what the page has always said. The other two name
+                // themselves, because a mixed history otherwise shows an 8-digit
+                // node ID and a 64-digit PSK under identical headings and the
+                // reader has no way to tell them apart.
+                h2.textContent = entryCfg.name === KEY_TYPES.ed25519.name
+                    ? 'Key ' + keyNum + ' Found!'
+                    : entryCfg.name + ' ' + keyNum + ' Found!';
                 frame.appendChild(h2);
-                frame.appendChild(makeKeyField('Public Key (hex)', entry.publicKey, index, 'publicKey'));
-                frame.appendChild(makeKeyField('Private Key (hex)', entry.privateKey, index, 'privateKey'));
+                const [valueLabel, secretLabel] = entryCfg.resultLabels;
+                frame.appendChild(makeKeyField(valueLabel, entry.publicKey, index, 'publicKey'));
+                frame.appendChild(makeKeyField(secretLabel, entry.privateKey, index, 'privateKey'));
                 const stats = document.createElement('p');
                 stats.className = 'result-stats';
                 const attempts = Number(entry.attempts) || 0;
