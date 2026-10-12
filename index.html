@@ -18,7 +18,7 @@
     <meta name="theme-color" content="#161b22">
     <meta name="description" content="Mine Ed25519 vanity keys for mesh networks in your browser: MeshCore device keys, Meshtastic channel PSKs and node IDs, with custom prefix/suffix patterns.">
     <meta name="color-scheme" content="dark">
-    <script src="libsodium.js" integrity="sha384-XY/aA57R0Moz6Bea07cuJEWbTq6QJTPuIWVdI3Sr6jZhwJ45gSlNE2GsH81Z8VwU" crossorigin="anonymous"></script>
+    <script src="libsodium.js"></script>
     <style>
         :root {
             color-scheme: dark;
@@ -655,9 +655,10 @@
                 <!-- Transient status (loading the crypto library, starting up).
                      Sits ABOVE the panel and clears itself once mining reports,
                      so it never lingers as a stale line under the figures. -->
-                <p id="progress-text" class="status-text" aria-live="polite" aria-atomic="true"></p>
-                <!-- Both progress-text (transient status) and live-logs (ongoing figures)
-                     have aria-live so screen readers announce all updates. -->
+                <p id="progress-text" class="status-text"></p>
+                <!-- aria-live moved here: progress-text no longer updates during
+                     mining, so without this a screen reader would never hear
+                     the live figures. -->
                 <div id="live-logs" aria-live="polite" aria-atomic="false">
                     <div class="live-logs-title">Live Logs:</div>
                     <div class="live-logs-grid">
