@@ -3168,7 +3168,8 @@ def test_the_live_progress_line_divides_by_the_quoted_expectation():
     import re
 
     proc = _run_cli("A4", "--suffix", "--encoding", "base64", "--workers", "1",
-                    "--force", "--progress-interval", "1", "--max-attempts", "400")
+                    "--force", "--progress-interval", "1", "--max-attempts", "400",
+                    "--seed", "0000000000000000000000000000000000000000000000000000000000000000")
     m = re.search(r"Estimate: ([\d,]+) expected", proc.stderr)
     assert m, proc.stderr
     quoted = int(m.group(1).replace(",", ""))
