@@ -216,7 +216,8 @@
         /* Hash type slider: three-way toggle for Device Key / Channel PSK / Node ID */
         .hashtype-slider {
             position: relative;
-            display: inline-flex;
+            display: flex;
+            width: 100%;
             align-items: center;
             background: #0d1117;
             border: 1px solid #30363d;
@@ -232,7 +233,12 @@
         .hashtype-option {
             position: relative;
             z-index: 1;
-            padding: 8px 16px;
+            flex: 1;
+            text-align: center;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 8px 12px;
             font-size: 13px;
             font-weight: 600;
             color: #8b949e;
@@ -258,7 +264,7 @@
             top: 4px;
             left: 4px;
             height: calc(100% - 8px);
-            width: calc((100% - 12px) / 3);
+            width: calc((100% - 8px) / 3);
             background: #58a6ff;
             border-radius: 999px;
             transition: transform 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
@@ -266,10 +272,10 @@
             z-index: 0;
         }
         .hashtype-slider input[id="hashtype-psk"]:checked ~ .hashtype-slider-thumb {
-            transform: translateX(calc((100% - 12px) / 3));
+            transform: translateX(100%);
         }
         .hashtype-slider input[id="hashtype-nodeid"]:checked ~ .hashtype-slider-thumb {
-            transform: translateX(calc(2 * (100% - 12px) / 3));
+            transform: translateX(200%);
         }
         .hashtype-slider:focus-within { border-color: #58a6ff; }
         .hashtype-slider:focus-within .hashtype-option { outline: none; }
