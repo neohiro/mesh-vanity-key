@@ -435,6 +435,18 @@
            total-hour count - was a wide dead gap beside every figure. */
         .eta-num { display: inline-block; min-width: 2ch; text-align: right; }
         .eta-num-2 { min-width: 2ch; }   /* minutes and seconds: always 2 */
+        /* When there are 1 or more days in the ETA, make days bigger and brighter,
+           and h,m,s readings smaller/less bright than when no days remain. */
+        #live-eta.has-days .eta-days {
+            font-size: clamp(17px, 4vw, 23px);
+            font-weight: 700;
+            color: #7ef7a0;
+            text-shadow: 0 0 5px #0c1811, 0 0 5px #0c1811;
+        }
+        #live-eta.has-days .eta-unit {
+            font-size: clamp(11px, 2.2vw, 14px);
+            color: #8b949e;
+        }
         /* Two distinct brights: a readable green for the metric name, a hotter
            one for the live figure itself, so the values pop from the labels. */
         .live-k {
@@ -1064,6 +1076,14 @@
             set('live-eta-h', String(p.hours));
             set('live-eta-m', pad2(p.minutes));
             set('live-eta-s', pad2(p.seconds));
+            const liveEtaEl = document.getElementById('live-eta');
+            if (liveEtaEl) {
+                if (p.days > 0) {
+                    liveEtaEl.classList.add('has-days');
+                } else {
+                    liveEtaEl.classList.remove('has-days');
+                }
+            }
         }
 
         // Non-numeric states ("sampling...", "calculating...") have no digits to
@@ -1074,6 +1094,7 @@
             const el = document.getElementById('live-eta');
             if (!el) return;
             if (el.dataset) el.dataset.message = text;
+            el.classList.remove('has-days');
             const set = (id, value) => {
                 const node = document.getElementById(id);
                 if (node) node.textContent = value;
