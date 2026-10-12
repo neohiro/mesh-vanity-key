@@ -18,7 +18,8 @@
     <meta name="theme-color" content="#161b22">
     <meta name="description" content="Mine Ed25519 vanity keys for mesh networks in your browser: MeshCore device keys, Meshtastic channel PSKs and node IDs, with custom prefix/suffix patterns.">
     <meta name="color-scheme" content="dark">
-    <script src="libsodium.js"></script>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; font-src 'self'; manifest-src 'self';">
+    <script src="libsodium.js" integrity="sha384-XY/aA57R0Moz6Bea07cuJEWbTq6QJTPuIWVdI3Sr6jZhwJ45gSlNE2GsH81Z8VwU" crossorigin="anonymous"></script>
     <style>
         :root {
             color-scheme: dark;
@@ -435,6 +436,18 @@
            total-hour count - was a wide dead gap beside every figure. */
         .eta-num { display: inline-block; min-width: 2ch; text-align: right; }
         .eta-num-2 { min-width: 2ch; }   /* minutes and seconds: always 2 */
+        /* When there are 1 or more days in the ETA, make days bigger and brighter,
+           and h,m,s readings smaller/less bright than when no days remain. */
+        #live-eta.has-days .eta-days {
+            font-size: clamp(17px, 4vw, 23px);
+            font-weight: 700;
+            color: #7ef7a0;
+            text-shadow: 0 0 5px #0c1811, 0 0 5px #0c1811;
+        }
+        #live-eta.has-days .eta-unit {
+            font-size: clamp(11px, 2.2vw, 14px);
+            color: #8b949e;
+        }
         /* Two distinct brights: a readable green for the metric name, a hotter
            one for the live figure itself, so the values pop from the labels. */
         .live-k {
@@ -643,10 +656,9 @@
                 <!-- Transient status (loading the crypto library, starting up).
                      Sits ABOVE the panel and clears itself once mining reports,
                      so it never lingers as a stale line under the figures. -->
-                <p id="progress-text" class="status-text"></p>
-                <!-- aria-live moved here: progress-text no longer updates during
-                     mining, so without this a screen reader would never hear
-                     the live figures. -->
+                <p id="progress-text" class="status-text" aria-live="polite" aria-atomic="true"></p>
+                <!-- Both progress-text (transient status) and live-logs (ongoing figures)
+                     have aria-live so screen readers announce all updates. -->
                 <div id="live-logs" aria-live="polite" aria-atomic="false">
                     <div class="live-logs-title">Live Logs:</div>
                     <div class="live-logs-grid">
@@ -1064,6 +1076,14 @@
             set('live-eta-h', String(p.hours));
             set('live-eta-m', pad2(p.minutes));
             set('live-eta-s', pad2(p.seconds));
+            const liveEtaEl = document.getElementById('live-eta');
+            if (liveEtaEl) {
+                if (p.days > 0) {
+                    liveEtaEl.classList.add('has-days');
+                } else {
+                    liveEtaEl.classList.remove('has-days');
+                }
+            }
         }
 
         // Non-numeric states ("sampling...", "calculating...") have no digits to
@@ -1074,6 +1094,7 @@
             const el = document.getElementById('live-eta');
             if (!el) return;
             if (el.dataset) el.dataset.message = text;
+            el.classList.remove('has-days');
             const set = (id, value) => {
                 const node = document.getElementById(id);
                 if (node) node.textContent = value;
