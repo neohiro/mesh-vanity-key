@@ -1449,7 +1449,7 @@
 //  - It cannot break mining. Every failure path - timeout, a worker that never
 //    reports, an unusable reading, storage that throws - falls back to the
 //    imported table, which is exactly what runs today.
-const SCALE_CAL_KEY = 'meshcore-vanity-scale-v1';
+const SCALE_CAL_KEY = 'meshcore-vanity-scale-v2';
 const SCALE_CAL_ROUNDS = [1, 2, 4, 8, 16, 32];
 // Candidates per worker per round.
 //
@@ -2474,7 +2474,7 @@ function detectOptimalWorkers() {
                         // tight: the stop path tears the workers down outright
                         // with terminateAllWorkers() rather than asking them to
                         // stop.
-                        const YIELD_EVERY_MS = 250;
+                        const YIELD_EVERY_MS = 2000;
                         let lastYield = Date.now();
 
                         while (true) {
