@@ -346,8 +346,8 @@ keys/second **regardless of how fast the crypto was**:
 
 - **Yielding per batch.** Browsers clamp nested `setTimeout(0)` to ≥4 ms. Yielding
   after every batch of candidates therefore throttled each worker to ~4,000
-  candidates/s. The worker now yields on a wall-clock budget instead — 250 ms,
-  which is 4 times a second per worker rather than 33.
+  candidates/s. The worker now yields on a wall-clock budget instead — 2000 ms,
+  which reduces yield overhead while keeping the UI responsive.
 - **Rebuilding hex strings per candidate.** Converting the candidate and public
   key to hex and running `startsWith`/`endsWith` costs more than the keygen. The
   walk state is now a 32-byte array incremented in place, and the pattern is
@@ -949,11 +949,11 @@ visible `exceeded max_attempts` rather than running forever.
 - **Deterministic mode requires a seed.** Without `--seed`, each run produces different results.
 - **Browser app is hex-only.** It has no bech32/base58/base64 output; use the CLI for those encodings.
 - **Browser app must be served over HTTP(S).** Blob Web Workers are blocked on `file://` URLs.
-- **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency` with no reserve (capped at 32), which can over- or under-estimate on constrained or shared hardware. The UI stays responsive anyway because the hot loop yields to the event loop every 250 ms.
+- **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency` with no reserve (capped at 32), which can over- or under-estimate on constrained or shared hardware. The UI stays responsive anyway because the hot loop yields to the event loop every 2000 ms.
 - **Browser key history is obfuscated, not encrypted.** The XOR key is derived from an IndexedDB secret plus the origin, so a copied `localStorage` blob cannot be decoded elsewhere. Script on the origin can read IndexedDB, so this is not XSS protection. Clearing site data deletes the secret and orphans the history. History is never written in plaintext: if no key can be derived, saving is refused instead.
 - **Progress is not capped at 100%.** Expected attempts are the mean of a geometric distribution, so ~37% of searches legitimately run past it. The CLI and browser show the overshoot as `+105.00%` plus how far past the mean the search has run. Once past the mean there is no meaningful "time remaining", so the ETA is replaced by the overshoot instead of being dropped or shown negative.
 - **The hot loop is already at the maths limit.** The cost of a candidate is the Ed25519 scalar multiplication, not our code. Measured per core: **Python/native libsodium ~25,000–32,000 keys/s**, **browser libsodium.wasm ~13,500 keys/s** (`python tools/bench_mining.py`, `bun tools/bench_real_browser.mjs`). Our wrapper adds per-candidate overhead measured at ~10M keys/s equivalent — roughly three orders of magnitude cheaper than the derivation it wraps — so optimising it further cannot help. OpenSSL (via `cryptography`) was measured as a separate backend and is ~20% *slower* than libsodium, so switching implementations is not a win either. The only throughput lever is core count.
-- **Browser workers use every logical core**, capped at 32. This previously reserved one core for the UI, which cost 25% throughput on a 4-core machine for no benefit: the hot loop already yields to the event loop every 250 ms, far more often than the browser needs to repaint, so the UI stays responsive anyway. Measured with the real keygen primitive, SMT siblings still add ~19% over four threads (see "Worker scaling"), so saturating every logical core is the right call and there is no throughput left on that axis.
+- **Browser workers use every logical core**, capped at 32. This previously reserved one core for the UI, which cost 25% throughput on a 4-core machine for no benefit: the hot loop already yields to the event loop every 2000 ms, far more often than the browser needs to repaint, so the UI stays responsive anyway. Measured with the real keygen primitive, SMT siblings still add ~19% over four threads (see "Worker scaling"), so saturating every logical core is the right call and there is no throughput left on that axis.
 
   **This is now measured rather than assumed.** `navigator.hardwareConcurrency`
   counts *logical* threads, and there is no browser API for physical cores — so a
