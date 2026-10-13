@@ -842,10 +842,10 @@ check('key types: exactly three, and each names a real mesh value', () => {
     const t = api.KEY_TYPES;
     eq(t.ed25519.keyLen, 32, 'an Ed25519 public key is 32 bytes');
     eq(t.psk.keyLen, 32, 'a channel PSK is 256 bits');
-    eq(t.nodeid.keyLen, 4, 'a Meshtastic node ID is 32 bits');
+    eq(t.x25519.keyLen, 32, 'a Curve25519 public key is 32 bytes');
     eq(t.ed25519.maxPatternLen, 64);
     eq(t.psk.maxPatternLen, 64);
-    eq(t.nodeid.maxPatternLen, 8, 'a node ID is only 8 hex digits wide');
+    eq(t.x25519.maxPatternLen, 64, 'a Curve25519 key is 64 hex digits wide');
 });
 
 check('key types: every type carries a hint, so the selector is self-explaining', () => {
@@ -917,11 +917,13 @@ check('the impossible-pattern notice follows the key type', () => {
     api.updatePatternNotice();
     eq(notice.style.display, 'none', '12 of 64 digits is fine for a PSK');
 
-    setCheckedKeyType('nodeid');
+    setCheckedKeyType('x25519');
     api.updatePatternNotice();
-    eq(notice.style.display, 'block', '12 of 8 digits cannot match a node ID');
-    ok(notice.innerHTML.includes('8'), `must state the real limit: ${notice.innerHTML}`);
-    ok(notice.innerHTML.includes('node id'), `must name the type: ${notice.innerHTML}`);
+    // x25519 has 64-digit limit, so 12 digits is fine (no impossible-pattern notice),
+    // but the TOFU warning is shown as an informational notice.
+    eq(notice.style.display, 'block', 'TOFU warning shown for x25519');
+    ok(notice.innerHTML.includes('TOFU'), `must show TOFU warning: ${notice.innerHTML}`);
+    ok(notice.innerHTML.includes('stranger'), `must explain stranger risk: ${notice.innerHTML}`);
 
     setCheckedKeyType('ed25519');
     api.updatePatternNotice();
@@ -930,11 +932,13 @@ check('the impossible-pattern notice follows the key type', () => {
 
 check('validateForm: refuses a pattern the selected type cannot hold', () => {
     getElementById('prefix').value = 'abcd';
-    setCheckedKeyType('nodeid');
+    setCheckedKeyType('x25519');
     getElementById('suffix').value = 'ef01';
-    eq(api.validateForm(), true, '4 + 4 = 8 digits is exactly a node ID');
-    getElementById('suffix').value = 'ef01ab';
-    eq(api.validateForm(), false, '12 digits cannot fit a node ID');
+    eq(api.validateForm(), true, '4 + 4 = 8 digits is fine for x25519');
+    // x25519 max is 64 hex digits; 65 should fail
+    getElementById('prefix').value = 'a'.repeat(65);
+    getElementById('suffix').value = '';
+    eq(api.validateForm(), false, '65 digits cannot fit x25519 (max 64)');
 
     // The SAME pattern, now against the 64-digit budget. 'g' is not a hex digit,
     // so the strings here stay inside [0-9a-f] - otherwise validateHex would
@@ -950,7 +954,7 @@ check('validateForm: refuses a pattern the selected type cannot hold', () => {
 
 check('the 00/FF reserved-prefix notice applies only to device keys', () => {
     // It is a MeshCore rule about device keys. 00 and FF are ordinary bytes in a
-    // channel PSK and a node ID, so warning there would be wrong advice.
+    // channel PSK and a node key, so warning there would be wrong advice.
     const notice = getElementById('reserved-notice');
     getElementById('prefix').value = '00ab';
     getElementById('suffix').value = '';
@@ -958,22 +962,30 @@ check('the 00/FF reserved-prefix notice applies only to device keys', () => {
     setCheckedKeyType('ed25519');
     api.updatePatternNotice();
     eq(notice.style.display, 'block', 'a device key with 00 is reserved');
+    ok(notice.innerHTML.includes('00'), 'must mention 00');
+    ok(notice.innerHTML.includes('reserved'), 'must mention reserved');
 
-    for (const id of ['psk', 'nodeid']) {
-        setCheckedKeyType(id);
-        api.updatePatternNotice();
-        eq(notice.style.display, 'none', `00 is not reserved for a ${id}`);
-    }
+    // PSK: no reserved warning
+    setCheckedKeyType('psk');
+    api.updatePatternNotice();
+    eq(notice.style.display, 'none', '00 is not reserved for a PSK');
+
+    // x25519: no reserved warning, but TOFU warning is shown
+    setCheckedKeyType('x25519');
+    api.updatePatternNotice();
+    eq(notice.style.display, 'block', 'TOFU warning shown for x25519');
+    ok(notice.innerHTML.includes('TOFU'), 'must show TOFU warning');
+    ok(!notice.innerHTML.includes('00'), 'must NOT mention 00/FF reserved');
+
     setCheckedKeyType('ed25519');
 });
 
-check('throughput factors: only a device key pays for a curve', () => {
+check('throughput factors: only a device key and node key pay for a curve', () => {
     eq(api.keyTypeThroughputFactor('ed25519'), 1, 'the measured baseline is 1x');
-    for (const id of ['psk', 'nodeid']) {
-        const f = api.keyTypeThroughputFactor(id);
-        ok(f > 100,
-            `${id} performs no derivation and must be quoted above the Ed25519 rate (got ${f})`);
-    }
+    eq(api.keyTypeThroughputFactor('x25519'), 1, 'Curve25519 node key pays for a curve');
+    const f = api.keyTypeThroughputFactor('psk');
+    ok(f > 100,
+        `psk performs no derivation and must be quoted above the Ed25519 rate (got ${f})`);
     eq(api.keyTypeThroughputFactor('nope'), 1, 'unknown type falls back, never inflates');
 });
 

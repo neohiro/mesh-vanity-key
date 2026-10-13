@@ -1388,7 +1388,7 @@ def test_key_types_are_meshtable_devices_only():
     html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
 
     # Exactly the three mesh values, and nothing else selectable.
-    for value in ("ed25519", "psk", "nodeid"):
+    for value in ("ed25519", "psk", "x25519"):
         assert f'value="{value}"' in html, f"the {value} key type must be selectable"
     assert html.count('<input type="radio" name="hashtype"') == 3, (
         "the control is a three-way slider, so exactly three radios"
@@ -1406,16 +1406,16 @@ def test_key_types_are_meshtable_devices_only():
         )
 
     # Widths, in the worker, derived from the key type.
-    assert "keyType === 'psk' ? 32" in worker
-    assert "keyType === 'nodeid' ? 4" in worker
+    assert "keyType === 'psk' || keyType === 'x25519'" in worker
+    assert "? 32" in worker
 
 
 def test_derivation_free_key_types_skip_libsodium_and_match_the_counter():
-    """A PSK and a node ID derive nothing, so the worker must not call libsodium.
+    """A PSK derives nothing, so the worker must not call libsodium.
 
-    This is the correctness core of the new modes. If either one hashed the
+    This is the correctness core of the PSK mode. If it hashed the
     counter it would be inventing a derivation MeshCore and Meshtastic never
-    perform. If either one still called crypto_sign_seed_keypair it would be
+    perform. If it still called crypto_sign_seed_keypair it would be
     paying a scalar multiplication to produce a value the protocols treat as an
     opaque secret - and the ~400x speed difference the estimate advertises would
     be fiction.
@@ -1429,22 +1429,22 @@ def test_derivation_free_key_types_skip_libsodium_and_match_the_counter():
     mod = _load_check_inline_js()
     worker = mod.extract(Path(__file__).parent)["worker.js"]
 
-    assert "const NEEDS_SODIUM = keyType === 'ed25519';" in worker, (
-        "only a device key needs libsodium"
+    # Only ed25519 and x25519 need libsodium; PSK does not.
+    assert "const NEEDS_SODIUM = keyType === 'ed25519' || keyType === 'x25519';" in worker, (
+        "device key and node key need libsodium"
     )
     assert "pub = seed;" in worker, (
-        "the derivation-free modes must match the counter itself, not a digest"
+        "the PSK mode must match the counter itself, not a digest"
     )
     assert "new Uint8Array(NEEDS_SODIUM ? 32 : KEY_LEN)" in worker, (
-        "a node ID's counter must be sized to 4 bytes: a 32-byte big-endian "
-        "counter advances its leading byte only once every 2**24 iterations"
+        "PSK's counter must be sized to 32 bytes"
     )
 
     # The libsodium readiness guard must be conditional. An unconditional check
-    # would make the two fast modes fail on a page whose library failed to load
-    # for reasons that have nothing to do with them.
+    # would make the PSK mode fail on a page whose library failed to load
+    # for reasons that have nothing to do with it.
     assert "if (NEEDS_SODIUM" in worker, (
-        "the sodium availability check must be scoped to the device-key mode"
+        "the sodium availability check must be scoped to the device-key/node-key mode"
     )
 
     # An unrecognised type is refused rather than defaulted: silently mining an
@@ -1513,8 +1513,8 @@ def test_derivation_free_throughput_is_gated_by_a_benchmark():
     ).read_text(encoding="utf-8")
 
     assert "MIN_DERIVATION_FREE_KEYS_PER_SEC" in bench
-    for key_type in ("psk", "nodeid"):
-        assert f"'{key_type}'" in bench, f"{key_type} must be benchmarked"
+    # Only PSK is derivation-free; x25519 uses Curve25519 keypair derivation
+    assert "'psk'" in bench, "psk must be benchmarked"
     # The count has to come from the worker's own report: these loops finish in
     # well under a second, so a harness-side stopwatch would time the harness.
     assert "maxAttempts" in bench and "'calibrated'" in bench
@@ -1597,7 +1597,7 @@ setTimeout(() => {
 
 @pytest.mark.parametrize(
     "key_type,expected_hex_len",
-    [("psk", 64), ("nodeid", 8)],
+    [("psk", 64)],
 )
 def test_derivation_free_modes_find_the_counter_itself(key_type, expected_hex_len):
     """End-to-end: the fast modes return the counter, at the right width.
@@ -1687,17 +1687,91 @@ def test_node_id_search_terminates_inside_its_own_space():
         )
         # 'a0' as the WHOLE node ID: all four bytes must be reachable, so the
         # match can only come from the 4-byte counter being walked in full.
-        posted = _run_worker_once(
+        posted = _run_worker_once_x25519(
             worker,
             {
-                "prefix": "a0a0a0a0", "suffix": "", "matchPrefix": True,
-                "matchSuffix": False, "keyType": "nodeid",
+                "prefix": "a0a0a0a0a0a0a0a0", "suffix": "", "matchPrefix": True,
+                "matchSuffix": False, "keyType": "x25519",
             },
         )
 
     found = [m for m in posted if m.get("type") == "found"]
-    assert found, f"every 4-byte value must be reachable: {posted}"
-    assert found[0]["publicKey"] == "a0a0a0a0"
+    assert found, f"every 32-byte value must be reachable: {posted}"
+    assert found[0]["publicKey"].startswith("a0a0a0a0a0a0a0a0")
+    assert "nodeId" in found[0], "x25519 must return derived nodeId"
+
+
+def _run_worker_once_x25519(worker_path, message, timeout_ms=20000):
+    """Drive the extracted worker once for x25519 with proper crypto_box_seed_keypair stub."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    runtime = shutil.which("node") or shutil.which("bun")
+    if runtime is None:
+        pytest.skip("no node/bun runtime available")
+
+    driver = Path(worker_path).parent / "driver_x25519.mjs"
+    driver.write_text(
+        """
+import fs from 'node:fs';
+import vm from 'node:vm';
+
+const src = fs.readFileSync(process.argv[2], 'utf8')
+    .replace(/\\$\\{new URL\\([^)]*\\)\\.href\\}/g, 'https://example.test/libsodium.js');
+const message = JSON.parse(process.argv[3]);
+
+// A fixed starting counter makes the walk deterministic, so a matching suffix is
+// reached at a KNOWN iteration rather than by luck: every byte is 0xa0 and the
+// last is 0x00, so the big-endian walk reaches a trailing 'a0' after exactly 160
+// increments.
+const posted = [];
+
+const g = {
+    console: { log() {}, error() {} },
+    BigInt, Date, Math, Uint8Array, setTimeout, clearTimeout, Promise, isFinite,
+    Number, Object, Array, String, RegExp, JSON, Error,
+    libsodium: { ready: Promise.resolve() },
+    crypto: {
+        getRandomValues(buf) {
+            for (let i = 0; i < buf.length; i++) buf[i] = 0xa0;
+            buf[buf.length - 1] = 0x00;
+            return buf;
+        },
+    },
+    postMessage(m) { posted.push(m); },
+    importScripts() {
+        g.sodium = {
+            crypto_box_seed_keypair(seed) {
+                // Return a public key that's the seed itself (for deterministic testing)
+                return { publicKey: new Uint8Array(seed) };
+            },
+            crypto_sign_seed_keypair() {
+                throw new Error('crypto_sign_seed_keypair must not be called for x25519');
+            },
+        };
+    },
+};
+g.self = g;
+g.globalThis = g;
+vm.createContext(g);
+vm.runInContext(src, g, { filename: 'worker.js' });
+
+g.onmessage({ data: message });
+setTimeout(() => {
+    process.stdout.write(JSON.stringify(posted));
+}, 1500);
+""",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [runtime, str(driver), str(worker_path),
+         __import__("json").dumps(message)],
+        capture_output=True, text=True, timeout=timeout_ms,
+    )
+    assert proc.returncode == 0, f"worker driver failed:\n{proc.stdout}\n{proc.stderr}"
+    return __import__("json").loads(proc.stdout)
 
 
 def test_unknown_key_type_is_refused_by_the_worker():

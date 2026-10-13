@@ -146,8 +146,7 @@ if (r.found) console.log(`  matched after ${r.found.attempts.toLocaleString()} a
 const DERIVATION_FREE_ATTEMPTS = 4_000_000;
 console.log('');
 let pskRate = 0;
-let nodeidRate = 0;
-for (const [label, keyType] of [['channel PSK', 'psk'], ['node ID', 'nodeid']]) {
+for (const [label, keyType] of [['channel PSK', 'psk']]) {
     let best = 0;
     let lastRun = null;
     for (let t = 0; t < TRIALS; t++) {
@@ -172,7 +171,7 @@ for (const [label, keyType] of [['channel PSK', 'psk'], ['node ID', 'nodeid']]) 
     }
     console.log(`${label} throughput: ${Math.round(best).toLocaleString()} keys/s (best of ${TRIALS})`);
     console.log(`  candidates: ${lastRun.keys.toLocaleString()} in ${lastRun.seconds.toFixed(3)}s`);
-    if (keyType === 'psk') pskRate = best; else nodeidRate = best;
+    if (keyType === 'psk') pskRate = best;
 }
 
 // A lower floor than the device-key gate, and deliberately so: these modes do
@@ -181,7 +180,7 @@ for (const [label, keyType] of [['channel PSK', 'psk'], ['node ID', 'nodeid']]) 
 // any external cost. 5M/s is comfortably above the device-key gate's 1M/s and
 // three orders of magnitude above the 9,182/s catastrophic cliff it shares.
 const MIN_DERIVATION_FREE_KEYS_PER_SEC = 5_000_000;
-for (const [label, rate] of [['channel PSK', pskRate], ['node ID', nodeidRate]]) {
+for (const [label, rate] of [['channel PSK', pskRate]]) {
     if (rate < MIN_DERIVATION_FREE_KEYS_PER_SEC) {
         console.error(
             `\nFAILED: ${label} throughput ${Math.round(rate).toLocaleString()} keys/s `
