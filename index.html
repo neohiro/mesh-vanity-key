@@ -525,6 +525,7 @@
             h1 { font-size: 21px; }
         }
         #results { margin-top: 24px; display: flex; flex-direction: column; gap: 16px; max-height: 60vh; overflow-y: auto; }
+        #results:empty { margin-top: 0; max-height: 0; overflow: hidden; }
         .result-frame { padding: 20px; background: #0d1117; border: 1px solid #238636; border-radius: 8px; }
         .result-frame h2 { color: #3fb950; font-size: 18px; margin-bottom: 16px; }
         .result-field { margin-bottom: 16px; }
@@ -726,7 +727,7 @@
 
         <div class="info">
             <p id="how-it-works"><strong>How it works:</strong> This page uses Web Workers with libsodium WASM to search for Ed25519 keys in the background. Workers are auto-detected based on your CPU cores for maximum performance.</p>
-            <p style="margin-top: 8px;"><strong>Tip:</strong> Shorter patterns are found faster. A 2-char prefix takes seconds; a 6-char pattern may take hours.</p>
+            <p id="tip-text" style="margin-top: 8px;"><strong>Tip:</strong> Shorter patterns are found faster. A 2-char prefix takes seconds; a 6-char pattern may take hours.</p>
 
             <p style="margin-top: 8px;">Inspired by <a href="https://meshcore.io/">MeshCore</a>.</p>
             <!-- One row, two directions: back to the parent site on the left, the
@@ -809,33 +810,30 @@
         const KEY_TYPES = {
             ed25519: {
                 name: 'Device Key',
-                keyLen: 32,        // Ed25519 public key
-                maxPatternLen: 64, // 32 bytes of hex
-                hint: 'An Ed25519 public key for MeshCore devices. '
-                    + 'The 32-byte seed is the private key; keep it safe. '
-                    + '⚠ Not compatible with Meshtastic (uses Curve25519).',
+                keyLen: 32,
+                maxPatternLen: 64,
+                hint: 'An Ed25519 public key for MeshCore devices. The 32-byte seed is the private key; keep it safe. ⚠ Not compatible with Meshtastic (uses Curve25519).',
                 resultLabels: ['Public Key (hex)', 'Private Key (hex)'],
-                howItWorks: 'This mode uses Web Workers with libsodium WASM to search for Ed25519 public keys in the background using a scalar-walk optimization. Designed for MeshCore device keys. The private key (32-byte seed) must be kept safe.',
+                howItWorks: 'This mode uses Web Workers with libsodium WASM to search for Ed25519 public keys using a scalar-walk optimization. Designed for MeshCore device keys. The private key (32-byte seed) must be kept safe.',
+                tip: 'Shorter patterns are found faster. A 2-char hex prefix takes seconds; a 6-char pattern may take hours.',
             },
             psk: {
                 name: 'Channel PSK',
-                keyLen: 32,        // 256-bit shared secret
+                keyLen: 32,
                 maxPatternLen: 64,
-                hint: 'A 256-bit Meshtastic channel pre-shared key. The mined '
-                    + 'value IS the secret - there is no derivation step, so '
-                    + 'this searches thousands of times faster than a device key. '
-                    + 'Use --encoding base64 for Meshtastic format.',
+                hint: 'A 256-bit Meshtastic channel pre-shared key. The mined value IS the secret — no derivation step, so this searches ~400x faster than a device key. Use --encoding base64 for Meshtastic format.',
                 resultLabels: ['PSK (hex)', 'PSK (hex)'],
-                howItWorks: 'This mode searches raw 256-bit entropy blocks directly without cryptographic keypair derivation, making it ~400x faster. Suitable for Meshtastic channel pre-shared keys. The mined value IS the secret - there is no private key separate from the PSK.',
+                howItWorks: 'This mode searches raw 256-bit entropy blocks directly without cryptographic keypair derivation, making it ~400x faster. Suitable for Meshtastic channel pre-shared keys. The mined value IS the secret — there is no private key separate from the PSK.',
+                tip: 'PSKs are ~400x faster than device keys. A 4-char base64 prefix is found almost instantly.',
             },
             x25519: {
                 name: 'Node ID / Key',
-                keyLen: 32,        // Curve25519 public key
+                keyLen: 32,
                 maxPatternLen: 64,
-                hint: 'A Curve25519 node key for Meshtastic. The !xxxxxxxx node ID is derived from the last 4 bytes of the public key. '
-                    + '⚠ TOFU-bound: peers pin the first public key they see for your node number.',
+                hint: 'A Curve25519 node key for Meshtastic. The !xxxxxxxx node ID is derived from the last 4 bytes of the public key.',
                 resultLabels: ['Node ID / Public Key (hex)', 'Private Key (hex)'],
-                howItWorks: 'This mode searches for Curve25519 keypairs whose derived public key matches your prefix/suffix pattern. The resulting !xxxxxxxx Node ID is computed directly from the public key for immediate copy/paste into Meshtastic. ⚠ Warning: Meshtastic nodes use Trust On First Use (TOFU) security. Changing your node key after peers have already cached your node ID makes you appear as a "stranger" who replaced someone else, causing neighbor table rejections and packet drops until peer caches expire.',
+                howItWorks: 'This mode searches for Curve25519 keypairs whose derived public key matches your prefix/suffix pattern. The resulting !xxxxxxxx Node ID is computed directly from the public key for immediate copy/paste into Meshtastic.',
+                tip: 'Curve25519 node keys take comparable time to Ed25519 keys (~13.5k keys/s/core). Keep patterns short (2–4 chars) for interactive mining.',
             },
         };
         const DEFAULT_KEY_TYPE = 'ed25519';
@@ -1241,9 +1239,13 @@
 
         function updateHowItWorks() {
             const cfg = getKeyTypeConfig(getSelectedKeyType());
-            const el = document.getElementById('how-it-works');
-            if (el && cfg.howItWorks) {
-                el.innerHTML = '<strong>How it works:</strong> ' + cfg.howItWorks;
+            const howEl = document.getElementById('how-it-works');
+            if (howEl && cfg.howItWorks) {
+                howEl.innerHTML = '<strong>How it works:</strong> ' + cfg.howItWorks;
+            }
+            const tipEl = document.getElementById('tip-text');
+            if (tipEl && cfg.tip) {
+                tipEl.innerHTML = '<strong>Tip:</strong> ' + cfg.tip;
             }
         }
 
