@@ -834,7 +834,7 @@
                 maxPatternLen: 64,
                 hint: 'A Curve25519 node key for Meshtastic. The !xxxxxxxx node ID is derived from the last 4 bytes of the public key. '
                     + '⚠ TOFU-bound: peers pin the first public key they see for your node number.',
-                resultLabels: ['Node ID (!xxxxxxxx)', 'Curve25519 Public Key (hex)', 'Private Key (hex)'],
+                resultLabels: ['Node ID / Public Key (hex)', 'Private Key (hex)'],
                 howItWorks: 'This mode searches for Curve25519 keypairs whose derived public key matches your prefix/suffix pattern. The resulting !xxxxxxxx Node ID is computed directly from the public key for immediate copy/paste into Meshtastic. ⚠ Warning: Meshtastic nodes use Trust On First Use (TOFU) security. Changing your node key after peers have already cached your node ID makes you appear as a "stranger" who replaced someone else, causing neighbor table rejections and packet drops until peer caches expire.',
             },
         };
@@ -965,7 +965,7 @@
         const KEY_TYPE_THROUGHPUT = {
             ed25519: 1,
             psk: 400,
-            nodeid: 400,
+            x25519: 1,
         };
 
         function keyTypeThroughputFactor(keyType) {
@@ -1330,6 +1330,20 @@
                     + ' hex digits, so the two must overlap and can never both match. '
                     + 'Shorten the patterns to ' + cfg.maxPatternLen
                     + ' digits or fewer in total.'
+                );
+                return;
+            }
+
+            // TOFU warning for Meshtastic Node ID / Key (x25519) - shown only when
+            // no other warnings apply, since it's informational not blocking.
+            if (getSelectedKeyType() === 'x25519') {
+                showPatternNotice(
+                    '<strong>⚠ TOFU Warning:</strong> Meshtastic uses Trust On First Use (TOFU) security. '
+                    + 'The first public key peers see for your node number is permanently cached. '
+                    + 'If you change your node key after deployment, you become a <strong>"stranger"</strong> '
+                    + 'who replaced someone else — neighbors will reject your packets until their caches expire '
+                    + '(typically hours to days). Only mine a new node key for a <strong>fresh device</strong> '
+                    + 'or one you are deliberately re-provisioning. Never rotate keys on an active node.'
                 );
                 return;
             }
@@ -2233,14 +2247,12 @@ function detectOptimalWorkers() {
 
                         // Which value space this worker searches.
                         //
-                        // Only ed25519 derives anything: the matched value is the
-                        // Ed25519 public key. For psk and nodeid the matched
-                        // value IS the random candidate - a 256-bit channel
-                        // secret and a 32-bit node identifier respectively - so
-                        // there is no hash to apply and no libsodium call to
-                        // make. That is not an optimisation, it is what those two
-                        // values are: MeshCore and Meshtastic treat them as
-                        // opaque secrets, not as digests of anything.
+                        // Only ed25519 and x25519 derive public keys: the matched
+                        // value is the Ed25519 or Curve25519 public key respectively.
+                        // For psk the candidate IS the secret - a 256-bit channel
+                        // secret - so there is no hash to apply and no libsodium call
+                        // to make. That is not an optimisation, it is what a PSK is:
+                        // an opaque secret, not a digest of anything.
                         //
                         // An unrecognised type must not silently mine a device
                         // key: the user would get an Ed25519 key while believing
@@ -2267,9 +2279,12 @@ function detectOptimalWorkers() {
                         }
                         // A device key and node key need libsodium; PSK does not.
                         const NEEDS_SODIUM = keyType === 'ed25519' || keyType === 'x25519';
+                        const needSign = keyType === 'ed25519';
+                        const needBox = keyType === 'x25519';
                         if (NEEDS_SODIUM
                             && (typeof sodium === 'undefined'
-                                || typeof sodium.crypto_sign_seed_keypair !== 'function')) {
+                                || (needSign && typeof sodium.crypto_sign_seed_keypair !== 'function')
+                                || (needBox && typeof sodium.crypto_box_seed_keypair !== 'function'))) {
                             self.postMessage({
                                 type: 'error',
                                 message: 'Cryptographic library unavailable in worker.'
@@ -3523,8 +3538,8 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                     // Normalise the key type so every consumer downstream can
                     // rely on it being present, rather than each one re-deriving
                     // "absent means device key" for itself.
-                    e.keyType = getKeyTypeConfig(e.keyType) === KEY_TYPES.nodeid
-                        ? 'nodeid'
+                    e.keyType = getKeyTypeConfig(e.keyType) === KEY_TYPES.x25519
+                        ? 'x25519'
                         : getKeyTypeConfig(e.keyType) === KEY_TYPES.psk ? 'psk' : 'ed25519';
                 }
             } catch (e) {
