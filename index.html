@@ -274,7 +274,7 @@
         .hashtype-slider input[id="hashtype-psk"]:checked ~ .hashtype-slider-thumb {
             transform: translateX(100%);
         }
-        .hashtype-slider input[id="hashtype-nodeid"]:checked ~ .hashtype-slider-thumb {
+        .hashtype-slider input[id="hashtype-x25519"]:checked ~ .hashtype-slider-thumb {
             transform: translateX(200%);
         }
         .hashtype-slider:focus-within { border-color: #58a6ff; }
@@ -640,10 +640,10 @@
                            onchange="refreshPatternUI()"
                            title="Meshtastic channel PSK: a 256-bit shared secret mined for a hex prefix or suffix">
                     <label for="hashtype-psk" class="hashtype-option">Channel PSK</label>
-                    <input type="radio" name="hashtype" id="hashtype-nodeid" value="nodeid"
+                    <input type="radio" name="hashtype" id="hashtype-x25519" value="x25519"
                            onchange="refreshPatternUI()"
-                           title="Meshtastic node ID: a 32-bit identifier mined for a hex prefix or suffix">
-                    <label for="hashtype-nodeid" class="hashtype-option">Node ID</label>
+                           title="Meshtastic Curve25519 node key / node ID: mined for public key prefix or suffix">
+                    <label for="hashtype-x25519" class="hashtype-option">Node ID / Key</label>
                     <span class="hashtype-slider-thumb" aria-hidden="true"></span>
                 </div>
                 <span class="hint-text" id="hashtype-hint"></span>
@@ -725,7 +725,7 @@
         </div>
 
         <div class="info">
-            <p><strong>How it works:</strong> This page uses Web Workers with libsodium WASM to search for Ed25519 keys in the background. Workers are auto-detected based on your CPU cores for maximum performance.</p>
+            <p id="how-it-works"><strong>How it works:</strong> This page uses Web Workers with libsodium WASM to search for Ed25519 keys in the background. Workers are auto-detected based on your CPU cores for maximum performance.</p>
             <p style="margin-top: 8px;"><strong>Tip:</strong> Shorter patterns are found faster. A 2-char prefix takes seconds; a 6-char pattern may take hours.</p>
 
             <p style="margin-top: 8px;">Inspired by <a href="https://meshcore.io/">MeshCore</a>.</p>
@@ -811,9 +811,11 @@
                 name: 'Device Key',
                 keyLen: 32,        // Ed25519 public key
                 maxPatternLen: 64, // 32 bytes of hex
-                hint: 'An Ed25519 public key for a MeshCore or Meshtastic device. '
-                    + 'The 32-byte seed is the private key; keep it safe.',
+                hint: 'An Ed25519 public key for MeshCore devices. '
+                    + 'The 32-byte seed is the private key; keep it safe. '
+                    + '⚠ Not compatible with Meshtastic (uses Curve25519).',
                 resultLabels: ['Public Key (hex)', 'Private Key (hex)'],
+                howItWorks: 'This mode uses Web Workers with libsodium WASM to search for Ed25519 public keys in the background using a scalar-walk optimization. Designed for MeshCore device keys. The private key (32-byte seed) must be kept safe.',
             },
             psk: {
                 name: 'Channel PSK',
@@ -821,16 +823,19 @@
                 maxPatternLen: 64,
                 hint: 'A 256-bit Meshtastic channel pre-shared key. The mined '
                     + 'value IS the secret - there is no derivation step, so '
-                    + 'this searches thousands of times faster than a device key.',
+                    + 'this searches thousands of times faster than a device key. '
+                    + 'Use --encoding base64 for Meshtastic format.',
                 resultLabels: ['PSK (hex)', 'PSK (hex)'],
+                howItWorks: 'This mode searches raw 256-bit entropy blocks directly without cryptographic keypair derivation, making it ~400x faster. Suitable for Meshtastic channel pre-shared keys. The mined value IS the secret - there is no private key separate from the PSK.',
             },
-            nodeid: {
-                name: 'Node ID',
-                keyLen: 4,         // 32-bit Meshtastic node ID
-                maxPatternLen: 8,
-                hint: 'A 32-bit Meshtastic node ID, shown as !xxxxxxxx. The '
-                    + 'whole space is 2^32, so every character here matters.',
-                resultLabels: ['Node ID (hex)', 'Node ID (hex)'],
+            x25519: {
+                name: 'Node ID / Key',
+                keyLen: 32,        // Curve25519 public key
+                maxPatternLen: 64,
+                hint: 'A Curve25519 node key for Meshtastic. The !xxxxxxxx node ID is derived from the last 4 bytes of the public key. '
+                    + '⚠ TOFU-bound: peers pin the first public key they see for your node number.',
+                resultLabels: ['Node ID (!xxxxxxxx)', 'Curve25519 Public Key (hex)', 'Private Key (hex)'],
+                howItWorks: 'This mode searches for Curve25519 keypairs whose derived public key matches your prefix/suffix pattern. The resulting !xxxxxxxx Node ID is computed directly from the public key for immediate copy/paste into Meshtastic. ⚠ Warning: Meshtastic nodes use Trust On First Use (TOFU) security. Changing your node key after peers have already cached your node ID makes you appear as a "stranger" who replaced someone else, causing neighbor table rejections and packet drops until peer caches expire.',
             },
         };
         const DEFAULT_KEY_TYPE = 'ed25519';
@@ -1231,6 +1236,15 @@
             validateHex(document.getElementById('suffix'));
             updateEstimate();
             updatePatternNotice();
+            updateHowItWorks();
+        }
+
+        function updateHowItWorks() {
+            const cfg = getKeyTypeConfig(getSelectedKeyType());
+            const el = document.getElementById('how-it-works');
+            if (el && cfg.howItWorks) {
+                el.innerHTML = '<strong>How it works:</strong> ' + cfg.howItWorks;
+            }
         }
 
         // Re-apply everything that depends on which key type is selected: the
@@ -2241,8 +2255,7 @@ function detectOptimalWorkers() {
                         // channel secret would hand back a value their radio
                         // rejects, with no clue why.
                         const keyType = e.data.keyType === undefined ? 'ed25519' : e.data.keyType;
-                        const KEY_LEN = keyType === 'psk' ? 32
-                            : keyType === 'nodeid' ? 4
+                        const KEY_LEN = (keyType === 'psk' || keyType === 'x25519') ? 32
                             : keyType === 'ed25519' ? 32
                             : -1;
                         if (KEY_LEN < 0) {
@@ -2252,11 +2265,8 @@ function detectOptimalWorkers() {
                             });
                             return;
                         }
-                        // A device key needs libsodium; the other two do not, and
-                        // requiring it would make the two fast modes fail on a
-                        // page whose library failed to load for unrelated
-                        // reasons.
-                        const NEEDS_SODIUM = keyType === 'ed25519';
+                        // A device key and node key need libsodium; PSK does not.
+                        const NEEDS_SODIUM = keyType === 'ed25519' || keyType === 'x25519';
                         if (NEEDS_SODIUM
                             && (typeof sodium === 'undefined'
                                 || typeof sodium.crypto_sign_seed_keypair !== 'function')) {
@@ -2454,17 +2464,14 @@ function detectOptimalWorkers() {
                             for (let b = 0; b < BATCH_SIZE; b++) {
                                 // The matched value depends on the key type.
                                 //
-                                // ed25519: derive the public key from the seed
-                                // and match against THAT. The seed is what the
-                                // user keeps; the public key is what the network
-                                // sees, so it is the value the pattern is about.
-                                //
-                                // psk / nodeid: the candidate IS the secret, so
-                                // match against the seed directly. No derivation,
-                                // no libsodium - which is why these two modes run
-                                // orders of magnitude faster.
+                                // ed25519: derive Ed25519 public key from seed
+                                // x25519: derive Curve25519 public key from seed
+                                // psk: the candidate IS the secret, so
+                                // match against the seed directly. No derivation.
                                 let pub;
-                                if (NEEDS_SODIUM) {
+                                if (keyType === 'x25519') {
+                                    pub = sodium.crypto_box_seed_keypair(seed).publicKey;
+                                } else if (NEEDS_SODIUM) {
                                     pub = sodium.crypto_sign_seed_keypair(seed).publicKey;
                                 } else {
                                     pub = seed;
@@ -2485,18 +2492,26 @@ function detectOptimalWorkers() {
                                     // and the user will paste into their radio
                                     // config. The 'privateKey' field is what they keep:
                                     // for a device key that is the Ed25519 seed,
-                                    // and for a channel PSK or node ID it is the
-                                    // same bytes, because the secret IS the
-                                    // published value - there is nothing else to
-                                    // hold. Sending both unconditionally keeps
+                                    // for x25519 it's the Curve25519 seed,
+                                    // and for a channel PSK it's the same bytes as the PSK.
+                                    // Sending both unconditionally keeps
                                     // the history schema single-shaped, so export,
                                     // encryption and rendering need no per-type
                                     // branch to survive a mixed history.
+                                    // For x25519, also send the derived node ID (!xxxxxxxx)
+                                    let nodeId = null;
+                                    if (keyType === 'x25519') {
+                                        // Meshtastic node ID is the last 4 bytes of the Curve25519 public key, big-endian
+                                        const last4 = pub.slice(-4);
+                                        const nodeNum = (last4[0] << 24) | (last4[1] << 16) | (last4[2] << 8) | last4[3];
+                                        nodeId = '!' + nodeNum.toString(16).padStart(8, '0');
+                                    }
                                     self.postMessage({
                                         type: 'found',
                                         keyType: keyType,
                                         publicKey: bytesToHex(pub),
                                         privateKey: bytesToHex(seed),
+                                        nodeId: nodeId,
                                         attempts: attempts,
                                         elapsed: (Date.now() - startTime) / 1000
                                     });
@@ -2704,6 +2719,7 @@ function detectOptimalWorkers() {
                             keyType: e.data.keyType,
                             publicKey: e.data.publicKey,
                             privateKey: e.data.privateKey,
+                            nodeId: e.data.nodeId,
                             attempts: e.data.attempts,
                             elapsed: e.data.elapsed,
                             pattern: currentPatternDesc(),
@@ -3622,7 +3638,7 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
             // Normalise so downstream code, export and encryption can rely on
             // one spelling even if a worker ever changes case.
             entry.keyType = cfg === KEY_TYPES.ed25519 ? 'ed25519'
-                : cfg === KEY_TYPES.psk ? 'psk' : 'nodeid';
+                : cfg === KEY_TYPES.psk ? 'psk' : 'x25519';
             entry.publicKey = entry.publicKey.toLowerCase();
             entry.privateKey = entry.privateKey.toLowerCase();
             entry.n = nextKeyNum++;
@@ -3670,7 +3686,7 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
         function doExportHistory(format) {
             if (!savedKeys.length) return;
             if (format === 'csv') {
-                const header = ['n', 'publicKey', 'privateKey', 'attempts', 'elapsed', 'pattern', 'minedAt'];
+                const header = ['n', 'keyType', 'publicKey', 'privateKey', 'nodeId', 'attempts', 'elapsed', 'pattern', 'minedAt'];
                 const lines = [header.map(csvCell).join(',')];
                 for (const e of savedKeys) {
                     lines.push(header.map(h => csvCell(e[h])).join(','));
@@ -3701,7 +3717,7 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                         // channel PSKs and node IDs in one file) stays
                         // self-describing: without the column a reader cannot
                         // tell an 8-digit node ID from a truncated key.
-                        const header = ['n', 'keyType', 'publicKey', 'privateKey', 'attempts', 'elapsed', 'pattern', 'minedAt'];
+                        const header = ['n', 'keyType', 'publicKey', 'privateKey', 'nodeId', 'attempts', 'elapsed', 'pattern', 'minedAt'];
                         const lines = [header.map(csvCell).join(',')];
                         for (const e of keys) {
                             lines.push(header.map(h => csvCell(e[h])).join(','));
@@ -3815,6 +3831,10 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 const [valueLabel, secretLabel] = entryCfg.resultLabels;
                 frame.appendChild(makeKeyField(valueLabel, entry.publicKey, index, 'publicKey'));
                 frame.appendChild(makeKeyField(secretLabel, entry.privateKey, index, 'privateKey'));
+                // For x25519, also show the derived node ID (!xxxxxxxx)
+                if (entry.keyType === 'x25519' && entry.nodeId) {
+                    frame.appendChild(makeKeyField('Node ID', entry.nodeId, index, 'nodeId'));
+                }
                 const stats = document.createElement('p');
                 stats.className = 'result-stats';
                 const attempts = Number(entry.attempts) || 0;
