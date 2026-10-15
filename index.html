@@ -821,10 +821,10 @@
                 name: 'Channel PSK',
                 keyLen: 32,
                 maxPatternLen: 64,
-                hint: 'A 256-bit Meshtastic channel pre-shared key. The mined value IS the secret — no derivation step, so this searches ~400x faster than a device key. Use --encoding base64 for Meshtastic format.',
+                hint: 'A 256-bit Meshtastic channel pre-shared key. The mined value IS the secret — no derivation step, so this searches ~400x faster than a device key. Use --encoding base64 for Meshtastic format. Note: prefix matches the END of the PSK (least significant bytes) for feasible search speed; the start (most significant bytes) changes only once per 2^248 attempts.',
                 resultLabels: ['PSK (hex)', 'PSK (hex)'],
-                howItWorks: 'This mode searches raw 256-bit entropy blocks directly without cryptographic keypair derivation, making it ~400x faster. Suitable for Meshtastic channel pre-shared keys. The mined value IS the secret — there is no private key separate from the PSK.',
-                tip: 'PSKs are ~400x faster than device keys. A 4-char base64 prefix is found almost instantly.',
+                howItWorks: 'This mode searches raw 256-bit entropy blocks directly without cryptographic keypair derivation, making it ~400x faster. Suitable for Meshtastic channel pre-shared keys. The mined value IS the secret — there is no private key separate from the PSK. Prefix patterns match the least significant bytes of the PSK (displayed at the end of the hex string) because those change every iteration; the most significant bytes (start of hex) are effectively fixed.',
+                tip: 'PSKs are ~400x faster than device keys. A 4-char hex prefix is found in seconds. Prefix matches the end of the displayed hex.',
             },
             x25519: {
                 name: 'Node ID / Key',
@@ -2451,6 +2451,23 @@ function detectOptimalWorkers() {
                             return true;
                         };
 
+                        // PSK: little-endian nibble accessors (counter LSBs change fastest).
+                        // Nibble order matches display order: high nibble first, so a user's
+                        // "1234" prefix matches when the seed ENDS with bytes 0x12, 0x34...
+                        const startsWithNibblesLE = (pub, nib, len) => {
+                            if (len > KEY_LEN * 2) return false;
+                            for (let j = 0; j < len; j++) {
+                                // Read from END of array (LSBs) but high nibble first.
+                                // nibble pair j covers byte KEY_LEN - 1 - (j >> 1)
+                                const byteIdx = KEY_LEN - 1 - (j >> 1);
+                                const b = pub[byteIdx];
+                                // High nibble first (j even), then low nibble (j odd)
+                                const expected = (j & 1) ? (b & 15) : (b >> 4);
+                                if (expected !== nib[j]) return false;
+                            }
+                            return true;
+                        };
+
                         const bytesToHex = (bytes) => {
                             let out = '';
                             for (let i = 0; i < bytes.length; i++) {
@@ -2477,14 +2494,8 @@ function detectOptimalWorkers() {
                         const YIELD_EVERY_MS = 2000;
                         let lastYield = Date.now();
 
-                        while (true) {
+while (true) {
                             for (let b = 0; b < BATCH_SIZE; b++) {
-                                // The matched value depends on the key type.
-                                //
-                                // ed25519: derive Ed25519 public key from seed
-                                // x25519: derive Curve25519 public key from seed
-                                // psk: the candidate IS the secret, so
-                                // match against the seed directly. No derivation.
                                 let pub;
                                 if (keyType === 'x25519') {
                                     pub = sodium.crypto_box_seed_keypair(seed).publicKey;
@@ -2495,11 +2506,15 @@ function detectOptimalWorkers() {
                                 }
 
                                 let match = false;
+                                const isPsk = keyType === 'psk';
+                                // PSK: prefix uses LE (LSBs, fast). Suffix always uses BE (LSBs, fast).
+                                // This makes prefix search feasible while keeping suffix search working.
+                                const useLePrefix = isPsk && matchPrefix;
                                 if (matchPrefix && matchSuffix) {
-                                    match = startsWithNibbles(pub, prefixNib, prefixLen)
+                                    match = (useLePrefix ? startsWithNibblesLE : startsWithNibbles)(pub, prefixNib, prefixLen)
                                          && endsWithNibbles(pub, suffixNib, suffixLen);
                                 } else if (matchPrefix) {
-                                    match = startsWithNibbles(pub, prefixNib, prefixLen);
+                                    match = (useLePrefix ? startsWithNibblesLE : startsWithNibbles)(pub, prefixNib, prefixLen);
                                 } else {
                                     match = endsWithNibbles(pub, suffixNib, suffixLen);
                                 }
