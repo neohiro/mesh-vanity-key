@@ -2,38 +2,17 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <!-- Chrome on Android boosts the font size of text blocks it considers
-         "too small" relative to the viewport, unless told not to. That is why
-         the estimate line ran off the side of the page on a phone even though
-         the container is correctly sized: the text was being silently
-         enlarged, and the line is a single unbroken run with nothing to wrap
-         it. text-size-adjust=100% pins the authored size. viewport-fit=cover
-         is included so the layout reaches under a notch, where the existing
-         env(safe-area-inset-*) padding then keeps content clear of it. -->
-    <title>Mesh Vanity Key Generator</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeshCore Vanity Key Generator</title>
     <link rel="manifest" href="manifest.json">
     <link rel="icon" href="icon-192.png" type="image/png">
     <link rel="apple-touch-icon" href="icon-192.png">
     <meta name="theme-color" content="#161b22">
-    <meta name="description" content="Mine Ed25519 vanity keys for mesh networks in your browser: MeshCore device keys, Meshtastic channel PSKs and node IDs, with custom prefix/suffix patterns.">
+    <meta name="description" content="Generate Ed25519 vanity keys with custom hex prefix/suffix patterns in your browser.">
     <meta name="color-scheme" content="dark">
     <script src="libsodium.js"></script>
     <style>
-        :root {
-            color-scheme: dark;
-            /* The frame's own bottom padding, as ONE value.
-
-               The visitor badge is the last element inside the frame, so the
-               space below it *is* this padding. Pointing the badge's margin-top
-               at the same variable is what makes the gap above and below it
-               symmetric. They were not: 28px above against the padding below
-               (40px, dropping to 16px under the 480px breakpoint), so the
-               footer read as leaning to one side - and the mismatch moved with
-               the breakpoint instead of being fixed. Deriving both from one
-               token means the two cannot drift apart again, on any screen. */
-            --frame-pad-bottom: max(40px, env(safe-area-inset-bottom));
-        }
+        :root { color-scheme: dark; }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -87,97 +66,12 @@
         .container, .info { position: relative; z-index: 1; }
         .container {
             background: #161b22;
-            /* A shade brighter than the #30363d it replaces - still inside the
-               muted range the rest of the chrome uses, so the frame reads as a
-               crisper edge rather than a brighter one. */
-            border: 1px solid #3a424c;
+            border: 1px solid #30363d;
             border-radius: 12px;
-            /* Extremely minimal outward glow: a 1px spread ring for edge
-               definition, plus a single wide blur with a heavy negative spread
-               so it stays a faint lift off the background instead of a halo.
-               Painted once and never animated, so it costs nothing per frame. */
-            box-shadow:
-                0 0 0 1px rgba(88, 166, 255, 0.05),
-                0 0 26px -10px rgba(88, 166, 255, 0.16);
-            /* 40px normally, but never less than the notch inset once
-               viewport-fit=cover is set. Without this the layout would extend
-               under a notch in landscape and the first row of controls would
-               sit partly beneath it. The bottom edge is the shared token so the
-               visitor badge below can match it exactly. */
-            padding: max(40px, env(safe-area-inset-top)) max(40px, env(safe-area-inset-right))
-                     var(--frame-pad-bottom) max(40px, env(safe-area-inset-left));
+            padding: 40px;
             max-width: 600px;
             width: 100%;
         }
-        /* Rotating hue across the frame line.
-
-           Structure matters here. The visible ring is produced by a MASK on this
-           element, and this element never moves - only the gradient *behind* the
-           mask turns. That is the whole trick: rotating the ring element itself
-           would rotate the rounded rectangle with it and visibly peel the
-           corners off the frame, whereas masking a static frame and spinning
-           something behind it keeps every corner exactly where it was.
-
-           The gradient is deliberately mostly transparent, with three faint hue
-           stops rather than a full rainbow: a lit edge that cycles through
-           lighter hues, not a light show. */
-        .frame-ring {
-            position: absolute;
-            inset: 0;
-            border-radius: inherit;
-            padding: 1px;
-            pointer-events: none;
-            /* Keep only the 1px band the border occupies. The padding box is
-               the whole area and the content box is inset by the padding, so
-               `exclude` retains what lies between them - exactly the border. */
-            -webkit-mask: linear-gradient(#000 0 0) content-box exclude,
-                          linear-gradient(#000 0 0);
-            mask: linear-gradient(#000 0 0) content-box exclude,
-                  linear-gradient(#000 0 0);
-            -webkit-mask-composite: xor;
-            mask-composite: exclude;
-        }
-        .frame-ring::before {
-            content: "";
-            position: absolute;
-            left: 50%;
-            top: 50%;
-            /* Square and larger than the frame, so there is always gradient
-               beneath every edge and this element's own shape never shows. */
-            width: 180%;
-            height: 180%;
-            margin: -90% 0 0 -90%;
-            background: conic-gradient(from 0deg,
-                rgba(88, 166, 255, 0)     0deg,
-                rgba(88, 166, 255, 0.34) 45deg,
-                rgba(126, 231, 135, 0.30) 95deg,
-                rgba(188, 140, 255, 0.28) 150deg,
-                rgba(88, 166, 255, 0)     235deg,
-                rgba(88, 166, 255, 0)     360deg);
-            /* An animated @property angle would be the shorter way to write
-               this, but it repaints the gradient on every frame on the main
-               thread. `transform` is the one rotation a compositor performs
-               without asking the main thread to repaint anything, which is what
-               keeps this free while the workers are busy. */
-            will-change: transform;
-            backface-visibility: hidden;
-            animation: frame-sheen 18s linear infinite;
-        }
-        @keyframes frame-sheen {
-            to { transform: rotate(1turn); }
-        }
-        /* A search is the point of the page, and it takes every core it can
-           reach. Decoration yields to it: the sheen pauses the moment a search
-           runs, so it never competes with the mining it surrounds. */
-        body.is-mining .frame-ring::before { animation-play-state: paused; }
-        @media (prefers-reduced-motion: reduce) {
-            .frame-ring::before { animation: none; }
-        }
-        /* Chrome on Android also boosts font size in wide blocks unless told
-           not to. Both halves are needed: this stops the boost, and the
-           wrapping rule on #estimate stops the (deliberately long) estimate
-           line from forcing the page wider than the screen. */
-        html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
         h1 { color: #58a6ff; margin-bottom: 8px; font-size: 24px; }
         .subtitle { color: #8b949e; margin-bottom: 32px; font-size: 14px; }
         .form { margin-bottom: 24px; }
@@ -200,86 +94,6 @@
         .checkbox-field input[type="checkbox"] { width: 18px; height: 18px; accent-color: #58a6ff; }
         .checkbox-field input[type="checkbox"]:disabled { opacity: 0.5; }
         .checkbox-field label { margin-bottom: 0; cursor: pointer; }
-
-        /* One-line explanation of the selected key type, under the control. Sits
-           beside the fields it qualifies rather than in the info frame at the
-           bottom, because it changes what the two inputs above it MEAN - the
-           same "ab" is a device key, a channel secret or a node ID. */
-        .hint-text {
-            display: block;
-            margin-top: 6px;
-            font-size: 12px;
-            color: #8b949e;
-            line-height: 1.5;
-        }
-        .hint-text:empty { display: none; }
-        /* Hash type slider: three-way toggle for Device Key / Channel PSK / Node ID */
-        .hashtype-slider {
-            position: relative;
-            display: flex;
-            width: 100%;
-            align-items: center;
-            background: #0d1117;
-            border: 1px solid #30363d;
-            border-radius: 999px;
-            padding: 4px;
-            gap: 0;
-        }
-        .hashtype-slider input[type="radio"] {
-            position: absolute;
-            opacity: 0;
-            pointer-events: none;
-        }
-        .hashtype-option {
-            position: relative;
-            z-index: 1;
-            flex: 1;
-            text-align: center;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 9px 12px 7px 12px;
-            font-size: 13px;
-            font-weight: 600;
-            color: #8b949e;
-            cursor: pointer;
-            border-radius: 999px;
-            transition: color 0.2s, background 0.2s;
-            white-space: nowrap;
-        }
-        .hashtype-option:hover { color: #c9d1d9; }
-        .hashtype-slider input[type="radio"]:checked + .hashtype-option {
-            color: #0d1117;
-            background: transparent; /* thumb provides the highlight */
-        }
-        /* Keyboard focus must be visible on the segment, not only as the
-           container's border: the radios are visually hidden, so without this a
-           keyboard user gets no indication of which segment they are on. */
-        .hashtype-slider input[type="radio"]:focus-visible + .hashtype-option {
-            outline: 2px solid #c9d1d9;
-            outline-offset: 1px;
-        }
-        .hashtype-slider-thumb {
-            position: absolute;
-            top: 4px;
-            left: 4px;
-            height: calc(100% - 8px);
-            width: calc((100% - 8px) / 3);
-            background: #58a6ff;
-            border-radius: 999px;
-            transition: transform 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-            pointer-events: none;
-            z-index: 0;
-        }
-        .hashtype-slider input[id="hashtype-psk"]:checked ~ .hashtype-slider-thumb {
-            transform: translateX(100%);
-        }
-        .hashtype-slider input[id="hashtype-x25519"]:checked ~ .hashtype-slider-thumb {
-            transform: translateX(200%);
-        }
-        .hashtype-slider:focus-within { border-color: #58a6ff; }
-        .hashtype-slider:focus-within .hashtype-option { outline: none; }
-
         .buttons { display: flex; gap: 12px; margin-bottom: 12px; }
         button {
             padding: 10px 24px;
@@ -298,21 +112,20 @@
         #stop-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
         #new-search-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
         .status-text { font-size: 14px; color: #8b949e; font-family: 'SFMono-Regular', Consolas, monospace; }
-        /* The transient status line is shown/hidden via the `hidden` property
-           (see setStatusText). Emptying the text alone was not enough: the <p>
-           kept its line box, so a retired "Starting..." still reserved a blank
-           row under the figure. `hidden` removes it from the box tree and the
-           accessibility tree together. The class is kept in the rule below so
-           the two never drift. */
-        .status-text[hidden] { display: none; }
+        /* Live logs are a visual dashboard, not a status stream: the
+           numeric cells change every ~500 ms and announcing each change
+           is the classic live-region-spam anti-pattern. aria-live is
+           therefore off here; meaningful status reaches the user via
+           the throttled summary below. */
+        .sr-only {
+            position: absolute; width: 1px; height: 1px;
+            padding: 0; margin: -1px; overflow: hidden;
+            clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+        }
         /* Centred below the info frame with breathing room above it, so it reads
-           as a quiet footer rather than competing with the tool itself.
-
-           margin-top is the frame's own bottom padding, so the whitespace above
-           the badge and the whitespace below it are the same height by
-           construction - see --frame-pad-bottom. */
+           as a quiet footer rather than competing with the tool itself. */
         .visitor-counter {
-            margin-top: var(--frame-pad-bottom);
+            margin-top: 28px;
             text-align: center;
             line-height: 0;
         }
@@ -320,12 +133,6 @@
             display: inline-block;
             opacity: 0.75;
             transition: opacity 0.2s;
-            /* Defend the badge's own proportions. The SVG is ~4.4:1; without
-               this the box is free to stretch it again, which is exactly the
-               smeared look this replaced. `auto` height follows the rendered
-               width, so the two can never disagree. */
-            height: auto;
-            max-width: 100%;
         }
         .visitor-counter a:hover img,
         .visitor-counter a:focus-visible img { opacity: 1; }
@@ -389,36 +196,13 @@
             min-width: 0;
         }
         /* The ETA gets its own full-width row so the digit slots have room to
-           stay put no matter how large the duration grows. It is also the
-           positioning context for the rate graph drawn behind the digits. */
+           stay put no matter how large the duration grows. */
         .live-cell-eta {
-            position: relative;   /* anchor for the absolutely-placed rate graph */
             grid-column: 1 / -1;
             align-items: flex-start;
             margin-top: 2px;
             padding-top: clamp(6px, 1.4vw, 10px);
             border-top: 1px solid #16301f;
-        }
-        /* Rate-over-time trace, as a backdrop on the ETA row.
-           Absolute + pointer-events:none so it never intercepts clicks or
-           affects layout, and z-index 0 keeps it under the digit slots. The
-           digits carry z-index 1 and a text-shadow, so the trace stays legible
-           where it passes behind them instead of fighting the figures. */
-        .rate-graph {
-            position: absolute;
-            left: 0;
-            bottom: 0;
-            width: 100%;
-            height: clamp(26px, 6vw, 40px);
-            z-index: 0;
-            pointer-events: none;
-            opacity: 0.9;
-        }
-        /* Once a trace exists, push the digits above it. */
-        .live-cell-eta .eta-fields,
-        .live-cell-eta .live-k {
-            position: relative;
-            z-index: 1;
         }
         .eta-fields {
             /* Tabular figures are what actually stop the digits from changing
@@ -431,28 +215,15 @@
         }
         .eta-days {
             color: #3fb950;
-            font-size: clamp(13px, 2.6vw, 16px);
-            font-weight: 600;
-            min-width: 5ch;   /* reserved so the hours slot never shifts */
+            font-size: clamp(11px, 2.2vw, 13px);
+            min-width: 8ch;   /* reserved so the hours slot never shifts */
         }
         .eta-unit { color: inherit; }
-        /* Hours are now the hours WITHIN the day (0-23), so two digits is the
-           widest case and the old 20ch reservation - sized for an unbounded
-           total-hour count - was a wide dead gap beside every figure. */
-        .eta-num { display: inline-block; min-width: 2ch; text-align: right; }
+        /* 20+ digits reserved for hours: a multi-week run reaches 4-5 figures,
+           and reserving the widest case means the layout is identical from the
+           first minute to the last instead of shifting as the count grows. */
+        .eta-num { display: inline-block; min-width: 20ch; text-align: right; }
         .eta-num-2 { min-width: 2ch; }   /* minutes and seconds: always 2 */
-        /* When there are 1 or more days in the ETA, make days bigger and brighter,
-           and h,m,s readings smaller/less bright than when no days remain. */
-        #live-eta.has-days .eta-days {
-            font-size: clamp(17px, 4vw, 23px);
-            font-weight: 700;
-            color: #7ef7a0;
-            text-shadow: 0 0 5px #0c1811, 0 0 5px #0c1811;
-        }
-        #live-eta.has-days .eta-unit {
-            font-size: clamp(11px, 2.2vw, 14px);
-            color: #8b949e;
-        }
         /* Two distinct brights: a readable green for the metric name, a hotter
            one for the live figure itself, so the values pop from the labels. */
         .live-k {
@@ -469,10 +240,6 @@
             font-weight: 600;
             text-align: right;
             overflow-wrap: anywhere;
-            /* The rate trace is painted behind the ETA row, so the digits get a
-               matching dark halo. Without it the line crossing a glyph makes the
-               figure harder to read than the plain text it replaced. */
-            text-shadow: 0 0 4px #0c1811, 0 0 4px #0c1811;
         }
         /* Narrow screens: one column, still right-aligned, with separators so
            the stack stays readable. */
@@ -481,51 +248,15 @@
             .live-cell { padding: 4px 0; border-bottom: 1px solid #16301f; }
             .live-cell:last-child { border-bottom: none; }
             .live-cell-eta { grid-column: 1 / -1; }
-            /* Hours are 0-23 now that days carry the magnitude, so this only has to
-               stop the panel reflowing on a narrow screen. */
-            .eta-num { min-width: 2ch; }
-            .eta-days { min-width: 5ch; }
+            /* Narrow screens cannot afford the full 20ch reservation without
+               overflowing the panel. 10ch is still far more than a multi-week
+               run needs (a 3-week ETA is ~500h, four digits), and being fixed
+               rather than proportional is the part that prevents reflow. */
+            .eta-num { min-width: 10ch; }
+            .eta-days { min-width: 6ch; }
         }
-        #estimate {
-            margin-top: 12px;
-            /* MUST WRAP. This line is one unbroken run of text - "Expected
-               attempts: 65,536 | Estimated time: ~2.1d (8 workers, up to 92,000
-               keys/s estimated)" - and it had no wrapping rule at all. On a
-               360px phone the container's content box is only 280px after its
-               40px padding, so the line overflowed the panel and the viewport
-               and the page scrolled sideways.
-               anywhere (not break-word) because the separators and digit groups
-               would otherwise be left stranded at a line end. */
-            overflow-wrap: anywhere;
-            /* Belt and braces: a single unbreakable run must never widen the
-               layout even if a future edit removes a space. */
-            min-width: 0;
-            max-width: 100%;
-            /* Honour the newlines in the estimate text (see updateEstimate).
-               Without pre-line they collapse to spaces and the lines run
-               together again. */
-            white-space: pre-line;
-            line-height: 1.5;
-        }
-        @media (max-width: 480px) {
-            /* 40px of padding each side leaves only 280px of content box on a
-               360px phone, which the estimate line and the 32-hex inputs do not
-               fit into comfortably. Tightening it to 16px recovers 48px, which
-               is the difference between the ETA wrapping mid-number and
-               wrapping between facts. */
-            .container {
-                padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
-                         var(--frame-pad-bottom) max(16px, env(safe-area-inset-left));
-                border-radius: 10px;
-            }
-            /* Re-point the shared token at the tightened edge, so the badge's
-               top margin tightens with the frame instead of staying at 40px and
-               leaving a gap four times larger than the one below it. */
-            :root { --frame-pad-bottom: max(16px, env(safe-area-inset-bottom)); }
-            h1 { font-size: 21px; }
-        }
+        #estimate { margin-top: 12px; }
         #results { margin-top: 24px; display: flex; flex-direction: column; gap: 16px; max-height: 60vh; overflow-y: auto; }
-        #results:empty { margin-top: 0; max-height: 0; overflow: hidden; }
         .result-frame { padding: 20px; background: #0d1117; border: 1px solid #238636; border-radius: 8px; }
         .result-frame h2 { color: #3fb950; font-size: 18px; margin-bottom: 16px; }
         .result-field { margin-bottom: 16px; }
@@ -573,15 +304,6 @@
         .info { margin-top: 20px; padding: 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; font-size: 12px; color: #8b949e; }
         .info a { color: #58a6ff; text-decoration: none; }
         .info a:hover { text-decoration: underline; }
-        /* Two links sharing the row the "back" link used to occupy alone. */
-        .info-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: baseline;
-            flex-wrap: wrap;
-            gap: 4px 16px;
-            margin-top: 8px;
-        }
     </style>
 </head>
 <body>
@@ -599,14 +321,8 @@
     </div>
 
     <div class="container">
-        <!-- Decorative rotating sheen on the frame line. Empty and inert: it is
-             aria-hidden, takes no pointer events, and carries no text. Kept as
-             markup rather than a ::before on .container because a pseudo-element
-             on the frame could not host a second, independently rotating layer
-             behind a mask without also rotating the frame's rounded corners. -->
-        <span class="frame-ring" aria-hidden="true"></span>
-        <h1>Mesh Vanity Key Generator</h1>
-        <p class="subtitle">MeshCore device keys, Meshtastic channel PSKs and node IDs: Ed25519 keys with custom hex prefix/suffix patterns, mined by your browser.</p>
+        <h1>MeshCore Vanity Key Generator</h1>
+        <p class="subtitle">Generate Ed25519 keys with custom hex prefix/suffix patterns using your browser's computational power.</p>
 
         <div class="form">
             <div class="field">
@@ -618,37 +334,6 @@
                 <label for="suffix">Suffix (hex)</label>
                 <input type="text" id="suffix" placeholder="e.g., cd" maxlength="64" oninput="refreshPatternUI()">
                 <span class="error-msg" id="suffix-error"></span>
-            </div>
-
-            <div class="field">
-                <label for="hashtype-ed25519">Key type</label>
-                <!-- Three-way segmented control.
-                     These are the three value spaces the page has always
-                     advertised ("MeshCore device keys, Meshtastic channel PSKs
-                     and node IDs"); the selector makes them explicit instead of
-                     implying every search is an Ed25519 key. Radios, not a
-                     <select>: each is reachable by one tap on mobile, and the
-                     visible segment IS the checked radio, so state and label can
-                     never disagree. The hidden thumb is decoration - the radio
-                     itself carries the state, so a missing thumb degrades to a
-                     plain radio group rather than an unreadable control. -->
-                <div class="hashtype-slider" role="radiogroup" aria-label="Key type to mine">
-                    <input type="radio" name="hashtype" id="hashtype-ed25519" value="ed25519" checked
-                           onchange="refreshPatternUI()"
-                           title="MeshCore / Meshtastic device key: an Ed25519 public key mined for a hex prefix or suffix">
-                    <label for="hashtype-ed25519" class="hashtype-option">Device Key</label>
-                    <input type="radio" name="hashtype" id="hashtype-psk" value="psk"
-                           onchange="refreshPatternUI()"
-                           title="Meshtastic channel PSK: a 256-bit shared secret mined for a hex prefix or suffix">
-                    <label for="hashtype-psk" class="hashtype-option">Channel PSK</label>
-                    <input type="radio" name="hashtype" id="hashtype-x25519" value="x25519"
-                           onchange="refreshPatternUI()"
-                           title="Meshtastic Curve25519 node key / node ID: mined for public key prefix or suffix">
-                    <label for="hashtype-x25519" class="hashtype-option">Node ID / Key</label>
-                    <span class="hashtype-slider-thumb" aria-hidden="true"></span>
-                </div>
-                <span class="hint-text" id="hashtype-hint"></span>
-                <span class="error-msg" id="hashtype-error"></span>
             </div>
 
             <div class="buttons">
@@ -663,29 +348,24 @@
                      Sits ABOVE the panel and clears itself once mining reports,
                      so it never lingers as a stale line under the figures. -->
                 <p id="progress-text" class="status-text"></p>
-                <!-- aria-live moved here: progress-text no longer updates during
-                     mining, so without this a screen reader would never hear
-                     the live figures. -->
-                <div id="live-logs" aria-live="polite" aria-atomic="false">
-                    <div class="live-logs-title">Live Logs:</div>
-                    <div class="live-logs-grid">
-                        <div class="live-cell"><span class="live-k">Attempts</span><span class="live-v" id="live-attempts">0</span></div>
-                        <div class="live-cell"><span class="live-k">Rate</span><span class="live-v" id="live-rate">0/s</span></div>
-                        <div class="live-cell"><span class="live-k">Progress</span><span class="live-v" id="live-progress">0.00%</span></div>
-                        <!-- Workers and cores are read together, as one comparison: the point of
-                             showing cores at all is to let you see the two numbers
-                             side by side. As separate full-width rows they were
-                             two lines that had to be mentally joined, which is
-                             exactly the comparison they exist to support. Workers
-                             shows the workers ACTUALLY running, so a shortfall
-                             against the core count is visible rather than
-                             mysterious. -->
-                        <div class="live-cell live-cell-pair">
-                            <span class="live-k">Workers | Cores</span>
-                            <span class="live-v" id="live-workers">0 | -</span>
-                        </div>
-                        <!-- The ETA spans the full width and is split into fixed
-                             digit slots. As a single string it reflowed every time
+                <!-- Live logs are a visual dashboard; the cells change several
+                     times a second, so aria-live is OFF here to avoid live-region
+                     spam. A single, throttled summary line is exposed to assistive
+                     tech via the sr-only region below instead of announcing every
+                     digit tick. -->
+                <div id="live-logs" aria-live="off" aria-atomic="false">
+                 <div class="live-logs-title">Live Logs:</div>
+                 <div class="live-logs-grid">
+                     <div class="live-cell"><span class="live-k">Attempts</span><span class="live-v" id="live-attempts">0</span></div>
+                     <div class="live-cell"><span class="live-k">Rate</span><span class="live-v" id="live-rate">0/s</span></div>
+                     <div class="live-cell"><span class="live-k">Progress</span><span class="live-v" id="live-progress">0.00%</span></div>
+                     <!-- Shows the workers ACTUALLY running, so a discrepancy
+                          against the pre-flight estimate is visible rather
+                          than mysterious. -->
+                     <div class="live-cell"><span class="live-k">Workers</span><span class="live-v" id="live-workers">0</span></div>
+                     <div class="live-cell"><span class="live-k">Cores</span><span class="live-v" id="live-cores">-</span></div>
+                     <!-- The ETA spans the full width and is split into fixed
+                          digit slots. As a single string it reflowed every time
                              a field lost a digit ("9h 5m 3s" -> "9h 5m 13s"), so
                              the figures visibly hopped. Each slot reserves its
                              width and renders in tabular figures, so the layout is
@@ -694,24 +374,19 @@
                              changes slowly. -->
                         <div class="live-cell live-cell-eta">
                             <span class="live-k">ETA</span>
-                            <!-- Rate-over-time trace, drawn BEHIND the ETA digits.
-                                 The plot is absolutely positioned and the digits sit
-                                 above it (z-index), so the trace reads as a backdrop
-                                 on the ETA row rather than a separate chart block
-                                 that pushes the panel taller. It is decorative and
-                                 hidden from assistive tech: the numbers it shows
-                                 are already announced by the live region. -->
-                            <canvas class="rate-graph" id="rate-graph"
-                                    aria-hidden="true"></canvas>
                             <span class="live-v eta-fields" id="live-eta">
                                 <span class="eta-days" id="live-eta-days"></span>
                                 <span class="eta-unit"><span class="eta-num" id="live-eta-h"></span>h</span>
                                 <span class="eta-unit"><span class="eta-num eta-num-2" id="live-eta-m"></span>m</span>
                                 <span class="eta-unit"><span class="eta-num eta-num-2" id="live-eta-s"></span>s</span>
                             </span>
-                        </div>
-                    </div>
-                </div>
+</div>
+                 </div>
+                 <!-- Throttled summary for screen readers: updates every 2 seconds -->
+                 <div id="live-summary" class="sr-only" aria-live="polite" aria-atomic="true">
+                     <span id="live-summary-text"></span>
+                 </div>
+             </div>
             </div>
             <div id="reserved-notice" class="reserved-notice" style="display: none;"></div>
         </div>
@@ -726,19 +401,11 @@
         </div>
 
         <div class="info">
-            <p id="how-it-works"><strong>How it works:</strong> This page uses Web Workers with libsodium WASM to search for Ed25519 keys in the background. Workers are auto-detected based on your CPU cores for maximum performance.</p>
-            <p id="tip-text" style="margin-top: 8px;"><strong>Tip:</strong> Shorter patterns are found faster. A 2-char prefix takes seconds; a 6-char pattern may take hours.</p>
+            <p><strong>How it works:</strong> This page uses Web Workers with libsodium WASM to search for Ed25519 keys in the background. Workers are auto-detected based on your CPU cores for maximum performance.</p>
+            <p style="margin-top: 8px;"><strong>Tip:</strong> Shorter patterns are found faster. A 2-char prefix takes seconds; a 6-char pattern may take hours.</p>
 
             <p style="margin-top: 8px;">Inspired by <a href="https://meshcore.io/">MeshCore</a>.</p>
-            <!-- One row, two directions: back to the parent site on the left, the
-                 source on the right. flex-wrap matters here rather than being
-                 decoration - on a narrow phone the two labels are wider together
-                 than the content box, and without wrapping the right-hand link
-                 would push the row into a horizontal scroll. -->
-            <div class="info-row">
-                <a href="https://neohiro.github.io/">← Back to neohiro.github.io</a>
-                <a href="https://github.com/neohiro/mesh-vanity-key">Go to GitHub repository →</a>
-            </div>
+            <p style="margin-top: 8px;"><a href="https://neohiro.github.io/">← Back to neohiro.github.io</a></p>
         </div>
 
         <!-- Visitor counter, centred under the info frame. This is the
@@ -746,21 +413,15 @@
              workspace: a plain <img>, no script, no cookies, and it survives
              GitHub's image proxy. A shields.io endpoint cannot count visits
              (it only proxies JSON/metrics), so the same visitorbadge.io path
-             is used here for consistency.
-
-             The width/height below match the badge's own aspect ratio (~4.4:1).
-             It was declared 120x20 - a 6:1 box for a 123.5x28 SVG - so the image
-             was stretched wide and squashed short, which is what made it look
-             horizontally smeared. Intrinsic size also reserves layout, so the
-             footer does not reflow when the badge loads. -->
+             is used here for consistency. -->
         <div class="visitor-counter">
-            <a href="https://visitorbadge.io/status?path=github.com%2Fneohiro%2Fmesh-vanity-key" rel="noopener noreferrer nofollow">
+            <a href="https://visitorbadge.io/status?path=github.com%2Fneohiro%2Fmeshcore-vanity-key" rel="noopener noreferrer nofollow">
                 <img
-                    src="https://api.visitorbadge.io/api/visitors?path=github.com%2Fneohiro%2Fmesh-vanity-key&amp;label=Visitors&amp;countColor=%23263759"
+                    src="https://api.visitorbadge.io/api/visitors?path=github.com%2Fneohiro%2Fmeshcore-vanity-key&amp;label=Visitors&amp;countColor=%23263759"
                     alt="Visitors"
                     referrerpolicy="no-referrer"
                     loading="lazy"
-                    width="88"
+                    width="120"
                     height="20">
             </a>
         </div>
@@ -769,95 +430,11 @@
     <script>
         let workers = [];
         let mining = false;
-        // Mirror `mining` onto <body> so CSS can stand the decoration down while
-        // a search runs: the workers want every core, and the frame sheen is not
-        // worth competing with them. A setter rather than a classList call at
-        // each exit, because the flag is cleared on four separate worker
-        // callbacks plus stopMining() - one of them forgetting is exactly how a
-        // decorative animation ends up spinning through a finished search.
-        function setMining(value) {
-            mining = value;
-            document.body.classList.toggle('is-mining', mining);
-        }
         // Guards double-start while startMining() awaits libsodium.ready:
         // `mining` is still false during that await, so it cannot block re-entry.
         let starting = false;
         let initTimeouts = [];
         let blobUrls = [];
-
-        // ---- Key types -----------------------------------------------------------
-        // The three value spaces this page can mine. They are NOT three hashes
-        // over one key: each is a different KIND OF VALUE, with a different
-        // length, a different derivation and a very different cost per
-        // candidate. The distinction matters for two reasons:
-        //
-        //  1. Correctness. Only Device Key derives anything: Ed25519 seed ->
-        //     public key. Channel PSK and Node ID ARE the random value, so
-        //     there is nothing to hash. Treating them as "SHA-256 of a seed"
-        //     would invent a derivation MeshCore/Meshtastic never performs, and
-        //     hand back a value neither tool accepts.
-        //
-        //  2. Speed. Deriving an Ed25519 key is a scalar multiplication, so
-        //     Device Key is the expensive mode by roughly three orders of
-        //     magnitude. The other two modes are a counter increment and a
-        //     nibble compare. That is not a defect to apologise for - it is
-        //     why the selector says which space it is searching.
-        //
-        // `keyLen` is the length of the MATCHED value in bytes; `secretLen` is
-        // how many bytes of entropy the user must keep to use the result, which
-        // is why it is tracked separately (they coincide for PSK, not for
-        // anything else).
-        const KEY_TYPES = {
-            ed25519: {
-                name: 'Device Key',
-                keyLen: 32,
-                maxPatternLen: 64,
-                hint: 'An Ed25519 public key for MeshCore devices. The 32-byte seed is the private key; keep it safe. ⚠ Not compatible with Meshtastic (uses Curve25519).',
-                resultLabels: ['Public Key (hex)', 'Private Key (hex)'],
-                howItWorks: 'This mode uses Web Workers with libsodium WASM to search for Ed25519 public keys using a scalar-walk optimization. Designed for MeshCore device keys. The private key (32-byte seed) must be kept safe.',
-                tip: 'Shorter patterns are found faster. A 2-char hex prefix takes seconds; a 6-char pattern may take hours.',
-            },
-            psk: {
-                name: 'Channel PSK',
-                keyLen: 32,
-                maxPatternLen: 64,
-                hint: 'A 256-bit Meshtastic channel pre-shared key. The mined value IS the secret — no derivation step, so this searches ~400x faster than a device key. Use --encoding base64 for Meshtastic format. Note: prefix matches the END of the PSK (least significant bytes) for feasible search speed; the start (most significant bytes) changes only once per 2^248 attempts.',
-                resultLabels: ['PSK (hex)', 'PSK (hex)'],
-                howItWorks: 'This mode searches raw 256-bit entropy blocks directly without cryptographic keypair derivation, making it ~400x faster. Suitable for Meshtastic channel pre-shared keys. The mined value IS the secret — there is no private key separate from the PSK. Prefix patterns match the least significant bytes of the PSK (displayed at the end of the hex string) because those change every iteration; the most significant bytes (start of hex) are effectively fixed.',
-                tip: 'PSKs are ~400x faster than device keys. A 4-char hex prefix is found in seconds. Prefix matches the end of the displayed hex.',
-            },
-            x25519: {
-                name: 'Node ID / Key',
-                keyLen: 32,
-                maxPatternLen: 64,
-                hint: 'A Curve25519 node key for Meshtastic. The !xxxxxxxx node ID is derived from the last 4 bytes of the public key.',
-                resultLabels: ['Node ID / Public Key (hex)', 'Private Key (hex)'],
-                howItWorks: 'This mode searches for Curve25519 keypairs whose derived public key matches your prefix/suffix pattern. The resulting !xxxxxxxx Node ID is computed directly from the public key for immediate copy/paste into Meshtastic.',
-                tip: 'Curve25519 node keys take comparable time to Ed25519 keys (~13.5k keys/s/core). Keep patterns short (2–4 chars) for interactive mining.',
-            },
-        };
-        const DEFAULT_KEY_TYPE = 'ed25519';
-
-        // Read the selection defensively. An unknown value must not silently
-        // become Ed25519: a worker mining Ed25519 while the user believes they
-        // are mining a channel PSK would produce a key that does not work for
-        // their stated purpose, and a wrong-but-plausible answer is worse than a
-        // refusal. Anything unrecognised falls back to the default only because
-        // the radio group cannot actually be in that state; the value is
-        // validated again before it reaches a worker.
-        function getSelectedKeyType() {
-            const el = document.querySelector('input[name="hashtype"]:checked');
-            const value = el ? el.value : '';
-            return Object.prototype.hasOwnProperty.call(KEY_TYPES, value)
-                ? value
-                : DEFAULT_KEY_TYPE;
-        }
-
-        function getKeyTypeConfig(keyType) {
-            return Object.prototype.hasOwnProperty.call(KEY_TYPES, keyType)
-                ? KEY_TYPES[keyType]
-                : KEY_TYPES[DEFAULT_KEY_TYPE];
-        }
 
         // A mining worker runs an unconditional `while (true)` until it finds a
         // match, so it has no cooperative-shutdown path: the only way to stop one
@@ -930,51 +507,10 @@
             return calibratedRatePerWorker || 200;
         }
 
-        // How many candidates a single worker gets through per Ed25519 keygen,
-        // per key type.
-        //
-        // A device key derives an Ed25519 public key per candidate, which is a
-        // scalar multiplication and costs ~13,500-23,000/s in a real browser.
-        // A channel PSK and a node ID derive NOTHING: the counter IS the value,
-        // so a candidate is an increment plus a nibble compare.
-        //
-        // The measured gap is large. tools/bench_worker.mjs runs the extracted
-        // worker with a stubbed keygen, so what it measures IS the per-candidate
-        // cost of each mode:
-        //
-        //     device key (wrapper only)   ~3,400,000/s    (1.00x)
-        //     channel PSK (whole cost)     ~71,000,000/s   (~21x)
-        //     node ID     (whole cost)     ~83,000,000/s   (~25x)
-        //
-        // Those ratios understate the real gap, because in the device-key bench
-        // the stub is nearly free while a real scalar multiplication is not.
-        // Against real browser keygen the derivation-free modes are three orders
-        // of magnitude faster.
-        //
-        // 400 is therefore a deliberately CONSERVATIVE factor: it sits below what
-        // the two measurements above support (a real-browser PSK is well over
-        // 10,000,000 candidates/s per worker) but far above 1. Understating
-        // throughput is the safe direction - the figure tells the user their
-        // search will take longer than it will, which costs them a minute of
-        // waiting. Overstating it would have them close the tab on a search that
-        // was seconds from done. Note also that these factors only shape the
-        // PRE-FLIGHT estimate; the live panel reports the real measured rate
-        // within one report interval, so a wrong factor cannot mislead for long.
-        const KEY_TYPE_THROUGHPUT = {
-            ed25519: 1,
-            psk: 400,
-            x25519: 1,
-        };
-
-        function keyTypeThroughputFactor(keyType) {
-            const f = KEY_TYPE_THROUGHPUT[keyType];
-            return typeof f === 'number' && isFinite(f) && f > 0 ? f : 1;
-        }
-
         async function calibrateBenchmark() {
             try {
                 await awaitSodium();
-                const N = 256;
+                const N = 48;
                 const seed = new Uint8Array(32);
                 if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
                     crypto.getRandomValues(seed);
@@ -983,12 +519,7 @@
                 for (let i = 0; i < N; i++) {
                     seed[0] = i & 0xff;
                     sodium.crypto_sign_seed_keypair(seed);
-                    // Yield every 32 keys rather than every 8: nested timers are
-                    // clamped to >=4ms, so yielding every 8 would spend most of
-                    // this loop asleep. 256 samples is ~15ms of real work and
-                    // lands a far steadier per-worker figure than the 48 this
-                    // used, which was short enough to be dominated by noise.
-                    if (i % 32 === 31) await new Promise(r => setTimeout(r, 0));
+                    if (i % 8 === 7) await new Promise(r => setTimeout(r, 0));
                 }
                 const dt = (performance.now() - t0) / 1000;
                 if (dt > 0) {
@@ -1049,18 +580,10 @@
         // Kept separate from formatEta() because the plain-text form is still
         // needed for aria-labels and tests, while the display form must pad
         // minutes and seconds to two digits so they cannot reflow.
-        //
-        // `hours` is deliberately the hours WITHIN the day, not the total. It
-        // used to be the total, which meant a 4.8-day search rendered as
-        // "116h 25m" - and because formatDayHint() withholds its hint beyond
-        // ~10 days, the longest searches showed no day figure at all. That is
-        // the scale at which a reader most wants "4d", and least wants to do
-        // the division themselves.
         function etaParts(seconds) {
             const total = Math.max(0, Math.floor(Number(seconds) || 0));
             return {
-                days: Math.floor(total / 86400),
-                hours: Math.floor((total % 86400) / 3600),
+                hours: Math.floor(total / 3600),
                 minutes: Math.floor((total % 3600) / 60),
                 seconds: total % 60,
                 dayHint: formatDayHint(total),
@@ -1078,21 +601,10 @@
                 if (el) el.textContent = text;
             };
             const p = etaParts(seconds);
-            // Real days, not the approximate parenthetical: "4d 19h" is both
-            // shorter and more exact than "116h (~4.5 days)". The hint is kept
-            // in etaParts() for the plain-text/aria form.
-            set('live-eta-days', p.days > 0 ? p.days + 'd' : '');
+            set('live-eta-days', p.dayHint);
             set('live-eta-h', String(p.hours));
             set('live-eta-m', pad2(p.minutes));
             set('live-eta-s', pad2(p.seconds));
-            const liveEtaEl = document.getElementById('live-eta');
-            if (liveEtaEl) {
-                if (p.days > 0) {
-                    liveEtaEl.classList.add('has-days');
-                } else {
-                    liveEtaEl.classList.remove('has-days');
-                }
-            }
         }
 
         // Non-numeric states ("sampling...", "calculating...") have no digits to
@@ -1103,7 +615,6 @@
             const el = document.getElementById('live-eta');
             if (!el) return;
             if (el.dataset) el.dataset.message = text;
-            el.classList.remove('has-days');
             const set = (id, value) => {
                 const node = document.getElementById(id);
                 if (node) node.textContent = value;
@@ -1118,10 +629,8 @@
         // written as 64 hex digits, so every position is a hex digit.
         const HEX_DIGITS = '0123456789abcdefABCDEF';
 
-        // The widest value this page mines is 32 bytes, so 64 hex digits is the
-        // ceiling on a pattern for every key type. Per-type limits live in
-        // KEY_TYPES and are read through maxPatternHexLength(); this constant is
-        // only the shared upper bound used for the inputs' maxlength.
+        // An Ed25519 public key is 32 bytes = 64 hex digits. A prefix and suffix
+        // pattern together cannot exceed this, or they must overlap.
         const PUBLIC_KEY_HEX_LENGTH = 64;
 
         function escapeHtml(s) {
@@ -1165,16 +674,6 @@
             return false;
         }
 
-        // The hex-digit budget for the CURRENT key type. A Device Key and a
-        // Channel PSK are both 32 bytes, so this is 64 for both; a Node ID is 4
-        // bytes, so it is 8. Centralised here because three separate places need
-        // it (validateForm, the notice, and the input maxlength) and they must
-        // never disagree - a notice that allows what the validator rejects is
-        // worse than no notice.
-        function maxPatternHexLength(keyType) {
-            return getKeyTypeConfig(keyType || getSelectedKeyType()).maxPatternLen;
-        }
-
         function validateForm() {
             const prefixInput = document.getElementById('prefix');
             const suffixInput = document.getElementById('suffix');
@@ -1186,17 +685,16 @@
                 alert('Please enter at least a prefix or suffix.');
                 return false;
             }
-            // The two patterns cannot together exceed the value being mined: if
-            // they do they must overlap, and the overlap usually contradicts
-            // itself - the search can then never succeed and would spin on every
-            // core forever. The CLI caps its combined pattern the same way, so
-            // both entry points agree.
-            const maxLen = maxPatternHexLength();
+            // A key is 64 hex chars. If the two patterns together exceed that,
+            // they must overlap, and the overlap usually contradicts itself -
+            // the search can then never succeed and would spin on every core
+            // forever. The CLI already rejects this (its combined pattern is
+            // capped at 64); enforce the same rule here so both entry points
+            // agree.
             const total = prefixInput.value.length + suffixInput.value.length;
-            if (total > maxLen) {
-                const what = getKeyTypeConfig(getSelectedKeyType()).name.toLowerCase();
+            if (total > PUBLIC_KEY_HEX_LENGTH) {
                 alert('Prefix and suffix together are ' + total + ' characters, but a '
-                    + what + ' is only ' + maxLen
+                    + 'MeshCore public key is only ' + PUBLIC_KEY_HEX_LENGTH
                     + ' hex digits. Patterns this long overlap and can never match.');
                 return false;
             }
@@ -1225,62 +723,10 @@
         // route - typing, cut, paste, or programmatically - retires the notice
         // through one code path instead of each caller remembering to.
         function refreshPatternUI() {
-            // Existing history entries keep their own recorded keyType and are
-            // already labelled from it, so changing the selector must not touch
-            // them. Only the inputs' caps, the hint and the notice follow the
-            // selection.
-            applyKeyTypeLimits();
             validateHex(document.getElementById('prefix'));
             validateHex(document.getElementById('suffix'));
             updateEstimate();
             updatePatternNotice();
-            updateHowItWorks();
-        }
-
-        function updateHowItWorks() {
-            const cfg = getKeyTypeConfig(getSelectedKeyType());
-            const howEl = document.getElementById('how-it-works');
-            if (howEl && cfg.howItWorks) {
-                howEl.innerHTML = '<strong>How it works:</strong> ' + cfg.howItWorks;
-            }
-            const tipEl = document.getElementById('tip-text');
-            if (tipEl && cfg.tip) {
-                tipEl.innerHTML = '<strong>Tip:</strong> ' + cfg.tip;
-            }
-        }
-
-        // Re-apply everything that depends on which key type is selected: the
-        // input caps, the hint line, and the reserved-prefix notice (which only
-        // means anything for a device key).
-        //
-        // The maxlength attributes are lowered rather than raised, never the
-        // reverse. A user who typed a 20-character suffix and then switched to
-        // Node ID keeps the text and sees the impossible-pattern notice, which
-        // is recoverable; silently deleting their input to fit would be the
-        // opposite. Switching back to a wider type restores the full cap.
-        function applyKeyTypeLimits() {
-            const keyType = getSelectedKeyType();
-            const cfg = getKeyTypeConfig(keyType);
-            const prefixInput = document.getElementById('prefix');
-
-            if (keyType === 'psk') {
-                prefixInput.disabled = true;
-                prefixInput.value = '';
-                prefixInput.placeholder = 'Disabled for Channel PSK (suffix only)';
-                prefixInput.classList.remove('error');
-                const errEl = document.getElementById('prefix-error');
-                if (errEl) errEl.style.display = 'none';
-            } else {
-                prefixInput.disabled = false;
-                prefixInput.placeholder = 'e.g., ab';
-            }
-
-            for (const id of ['prefix', 'suffix']) {
-                const el = document.getElementById(id);
-                el.maxLength = Math.max(PUBLIC_KEY_HEX_LENGTH, cfg.maxPatternLen);
-            }
-            const hint = document.getElementById('hashtype-hint');
-            if (hint) hint.textContent = cfg.hint;
         }
 
         // One shared notice frame for every pattern problem, so the explanation
@@ -1291,7 +737,7 @@
             const prefixInput = document.getElementById('prefix');
             const suffixInput = document.getElementById('suffix');
 
-            const badPrefix = prefixInput.disabled ? [] : invalidHexChars(prefixInput.value);
+            const badPrefix = invalidHexChars(prefixInput.value);
             const badSuffix = invalidHexChars(suffixInput.value);
 
             if (badPrefix.length || badSuffix.length) {
@@ -1315,10 +761,7 @@
                 return;
             }
 
-            // The 00/FF reservation is a MeshCore rule about DEVICE KEYS. It has
-            // no meaning for a channel PSK or a node ID, where 00 and FF are
-            // ordinary bytes, so it is only raised for the type it applies to.
-            if (getSelectedKeyType() === 'ed25519' && checkReservedPrefix(prefixInput)) {
+            if (checkReservedPrefix(prefixInput)) {
                 showPatternNotice(
                     '<strong>Notice:</strong> Prefixes starting with <code>00</code> or '
                     + '<code>FF</code> are reserved for MeshCore framework devices '
@@ -1328,35 +771,16 @@
                 return;
             }
 
-            // Warn while typing when the two patterns are longer than the value
-            // being mined. The limit follows the selected key type, so switching
-            // to Node ID tightens it to 8 digits without the user having to
-            // re-learn the rule.
-            const cfg = getKeyTypeConfig(getSelectedKeyType());
+            // Warn while typing when the two patterns are longer than a key.
             const totalLen = prefixInput.value.length + suffixInput.value.length;
-            if (totalLen > cfg.maxPatternLen) {
+            if (totalLen > PUBLIC_KEY_HEX_LENGTH) {
                 showPatternNotice(
                     '<strong>Impossible pattern:</strong> prefix + suffix is '
-                    + totalLen + ' hex digits, but a '
-                    + escapeHtml(cfg.name.toLowerCase()) + ' is only '
-                    + cfg.maxPatternLen
+                    + totalLen + ' hex digits, but a MeshCore public key is only '
+                    + PUBLIC_KEY_HEX_LENGTH
                     + ' hex digits, so the two must overlap and can never both match. '
-                    + 'Shorten the patterns to ' + cfg.maxPatternLen
+                    + 'Shorten the patterns to ' + PUBLIC_KEY_HEX_LENGTH
                     + ' digits or fewer in total.'
-                );
-                return;
-            }
-
-            // TOFU warning for Meshtastic Node ID / Key (x25519) - shown only when
-            // no other warnings apply, since it's informational not blocking.
-            if (getSelectedKeyType() === 'x25519') {
-                showPatternNotice(
-                    '<strong>⚠ TOFU Warning:</strong> Meshtastic uses Trust On First Use (TOFU) security. '
-                    + 'The first public key peers see for your node number is permanently cached. '
-                    + 'If you change your node key after deployment, you become a <strong>"stranger"</strong> '
-                    + 'who replaced someone else — neighbors will reject your packets until their caches expire '
-                    + '(typically hours to days). Only mine a new node key for a <strong>fresh device</strong> '
-                    + 'or one you are deliberately re-provisioning. Never rotate keys on an active node.'
                 );
                 return;
             }
@@ -1366,461 +790,38 @@
         }
 
         // ---- Worker scaling model ------------------------------------------------
-        // The pre-flight estimate uses a measured scaling constant for the
-        // browser worker (2.9x @ 8 threads on the reference host). This is
-        // lower than the Node bench_keygen_scaling.mjs proxy (4.08x @ 8
-        // threads) because the browser worker includes wrapper overhead
-        // (byte walk, nibble match, postMessage, 30ms yield).
+        // The pre-flight estimate used to be a flat per-worker extrapolation
+        // (rate x workers) plus a vague "actual will be lower" caveat. That is
+        // not actionable, so the sub-linear scaling is now modelled explicitly
+        // and folded into the estimate.
         //
-        // WHY A TABLE AND NOT A POWER LAW. The model used to be
-        // `n ** (log(2.3)/log(8))` - one measured anchor, everything else a
-        // fit. Measuring the real primitive across thread counts shows why that
-        // cannot work here: scaling is near-linear to 2 threads and then
-        // flattens sharply, because SMT siblings share execution units and
-        // memory bandwidth. A single-anchor power law mispredicts the interior
-        // badly - it said 1.32x at 2 threads against 1.97x measured, and 1.74x
-        // at 4 against 3.42x measured. So the measured points are recorded
-        // directly and interpolated between.
+        // MEASUREMENT BASIS: on the reference host (4 physical cores / 8 logical,
+        // Intel i5-1155G7) the shipped worker runs at 2.9x aggregate throughput
+        // with 8 workers. That is the measured ceiling, not a theoretical limit.
+        // Sublinear scaling has two causes:
+        //   1. Per-candidate JS work (32-byte walk, nibble match, postMessage)
+        //      that scales with wall-clock time rather than raw compute.
+        //   2. Thermal/SMT behavior on this particular CPU, documented as 2.9x.
+        // A power-law fit anchored to the measured 8-thread end point gives
+        // intermediate points without over-promising (the curve is concave).
         //
-        // MEASUREMENT BASIS. tools/bench_keygen_scaling.mjs runs the actual
-        // primitive - the shipped libsodium.wasm's crypto_sign_seed_keypair -
-        // across N real OS threads. On the calibration host (i3-10105, 4
-        // physical / 8 logical cores):
+        // Only the 8-thread end point was measured directly; intermediate
+        // points come from a power-law fit anchored to that measurement:
+        //     scale(n) = n ** (log(2.9) / log(8))   -> exponent ~0.372
+        // giving ~1.58x at 2 threads, ~2.28x at 4, ~2.79x at 6, and 2.9x at 8:
+        // concave, and never above the measured ceiling.
         //
-        //     1 thread     23,934 keys/s    1.00x
-        //     2 threads    47,157 keys/s    1.97x
-        //     4 threads    81,885 keys/s    3.42x
-        //     8 threads    97,555 keys/s    4.08x
-        //
-        // SMT siblings still add ~19% over four threads, which is why
-        // saturating every LOGICAL core (detectOptimalWorkers) is correct and
-        // there is no throughput left on that axis.
-        //
-        // BROWSER ESTIMATOR CONSTANT: 2.9x @ 8 threads (power-law fit anchor).
-        // This is lower than the Node proxy (4.08x) because the browser worker
-        // includes wrapper overhead (byte walk, nibble match, postMessage,
-        // 30ms yield). The browser estimator uses a power-law fit anchored at
-        // 2.9x: scale(n) = n ** (log(2.9)/log(8)) ≈ n^0.372.
-        //
-        // HONEST CAVEAT. The table below is Node OS threads, not browser Web
-        // Workers: no event loop, no UI thread, no postMessage per progress
-        // report. The browser estimator uses the 2.9x anchor; the table is
-        // provided for reference and for the dynamic calibration system.
-        //
-        // On this machine that caveat no longer bites: the browser measures its
-        // own scaling curve on the first search and caches it (see the
-        // calibration below), and ratePerWorker() above is measured on the same
-        // CPU. So the pre-flight estimate is grounded in this machine rather
-        // than imported - which is what makes it safe for the grey line to be
-        // static instead of being revised mid-search.
-        //
-        // To re-measure on different hardware, replace this table with fresh
-        // bench_keygen_scaling.mjs output and update the README table beside
-        // it; the interpolation and clamping below need no changes. The browser
-        // estimator constant (2.9x @ 8 threads) should be re-measured with
-        // tools/measure_scaling.py in a real browser.
-        const WORKER_SCALE_POINTS = [
-            // [threads, measured aggregate speedup] - ascending in both.
-            [1, 1.00],
-            [2, 1.97],
-            [4, 3.42],
-            [8, 4.08],
-        ];
-        // Kept as a lookup for the tests and for callers that only need the
-        // measured value at a specific thread count.
-        // Browser estimator uses 2.9x @ 8 threads (power-law fit anchor).
-        // Node bench_keygen_scaling.mjs proxy measures 4.08x @ 8 threads.
+        // To re-measure on different hardware, update WORKER_SCALE_MEASURED and
+        // the exponent together; nothing else needs to change.
         const WORKER_SCALE_MEASURED = { 8: 2.9 };
-        const WORKER_SCALE_MAX = WORKER_SCALE_POINTS[WORKER_SCALE_POINTS.length - 1][1];
+        const WORKER_SCALE_EXPONENT =
+            Math.log(WORKER_SCALE_MEASURED[8]) / Math.log(8);
 
-        // ---- Scaling, measured on this machine ------------------------------------
-//
-// WORKER_SCALE_POINTS was measured on a 4-physical-core machine. The shape is
-// reasonable, but on any other CPU it is a guess - and a guess that has already
-// produced an estimate 8x away from what the machine actually did.
-//
-// The specific gap: there is no browser API for physical core count.
-// `navigator.hardwareConcurrency` counts LOGICAL threads, so a 4-core/8-thread
-// machine is indistinguishable from a genuine 8-core one without measuring.
-// That distinction decides the worker count: SMT siblings share execution units
-// and, for this workload, share them badly. Ed25519 keygen is a chain of
-// dependent 128-bit multiplications with long carry reductions, so the second
-// thread on a physical core contends for the same ALU and carry resources
-// rather than filling idle ones.
-//
-// So the first search on a machine measures its own curve over a fixed budget
-// of candidates and caches it against the machine fingerprint. Every later
-// session uses the measurement instead of the imported table.
-//
-// Two properties make this safe to ship:
-//
-//  - It is bounded and cheap. This measures the SHAPE of the curve, not
-//    absolute speed, so a handful of candidates per worker per round is enough,
-//    and the total is bounded by a timeout.
-//  - It cannot break mining. Every failure path - timeout, a worker that never
-//    reports, an unusable reading, storage that throws - falls back to the
-//    imported table, which is exactly what runs today.
-const SCALE_CAL_KEY = 'meshcore-vanity-scale-v2';
-const SCALE_CAL_ROUNDS = [1, 2, 4, 8, 16, 32];
-// Candidates per worker per round.
-//
-// Sized against the WORKER's own keygen clock, not the round's wall time, so
-// this is pure measurement: at a typical 2,000 keys/s a worker spends ~128ms
-// here, which is long enough for Date.now() to resolve it and short enough that
-// four rounds fit inside SCALE_CAL_TOTAL_MS. It used to be 32, chosen when the
-// denominator still included worker startup; with startup excluded a longer run
-// is what actually buys signal.
-const SCALE_CAL_PER_WORKER = 256;
-// Per-round ceiling, and a ceiling on the whole calibration. Both matter: the
-// first search must not stall, so the total is capped independently of how many
-// rounds fit inside it.
-const SCALE_CAL_ROUND_MS = 500;
-const SCALE_CAL_TOTAL_MS = 1500;
-// A step must add at least this much to be worth taking. Below it, the extra
-// workers are SMT siblings or otherwise contended: they cost main-thread time
-// (every worker report is a message, a layout and a canvas repaint) and buy
-// almost nothing.
-const SCALE_CAL_MIN_MARGINAL = 1.10;
-// Absolute deadline for the calibration, passed down to each round so a slow
-// machine stops adding rounds instead of taking one per timeout.
-let scaleCalDeadline = 0;
-
-// 64 bits of pattern: unreachable in any budget this calibration uses, so a
-// calibration worker can never report a match and end early.
-const SCALE_CAL_PATTERN = 'deadbeefdeadbeefcafe';
-
-let measuredScalePoints = null;   // [[threads, speedup], ...] or null
-        // Set once a calibration attempt fails, so a machine where it cannot
-        // work (storage blocked, workers unavailable, a pathologically slow
-        // CPU) does not pay the timeout on every single search.
-        let scaleCalFailed = false;
-
-function scaleCalStorageKey() {
-    return SCALE_CAL_KEY + '|' + machineFingerprint();
-}
-
-function loadCachedScale() {
-    if (measuredScalePoints) return measuredScalePoints;
-    try {
-        const raw = localStorage.getItem(scaleCalStorageKey());
-        if (!raw) return null;
-        const parsed = JSON.parse(raw);
-        if (!Array.isArray(parsed) || parsed.length < 2) return null;
-        const points = parsed
-            .filter((p) => Array.isArray(p) && p.length === 2
-                && Number.isFinite(p[0]) && p[0] >= 1
-                && Number.isFinite(p[1]) && p[1] > 0)
-            .map((p) => [p[0], p[1]])
-            .sort((a, b) => a[0] - b[0]);
-        // A single point cannot describe a curve.
-        if (points.length < 2 || points[0][0] !== 1) return null;
-        measuredScalePoints = points;
-        return measuredScalePoints;
-    } catch (e) {
-        return null;              // storage disabled or corrupt: use the table
-    }
-}
-
-function storeCachedScale(points) {
-    try {
-        localStorage.setItem(scaleCalStorageKey(), JSON.stringify(points));
-    } catch (e) {
-        /* storage unavailable; the measurement still applies this session */
-    }
-}
-
-// Aggregate candidates/second using `count` real workers on real keygen.
-function measureScaleRound(count) {
-    return new Promise((resolve) => {
-        let pool = [];
-        let done = 0;
-        let attempts = 0;
-        // Longest keygen time any worker reported. This - not the main thread's
-        // wall clock - is what the round is divided by.
-        let slowest = 0;
-        let finished = false;
-        let t0 = 0;
-
-        // The rate is candidates per second of actual keygen, measured by the
-        // worker itself from after `await readyPromise`.
-        //
-        // Using main-thread wall time instead would time WORKER STARTUP and the
-        // libsodium initialise, not keygen: 32 candidates is ~16ms of work
-        // against tens or hundreds of milliseconds to spin up a worker and its
-        // WASM. Startup also scales with the worker count, so the bias runs
-        // directly against the larger counts this measurement exists to judge,
-        // and the figure would not be comparable with the mining rate, which is
-        // timed from after init.
-        //
-        // The workers run concurrently, so the round takes as long as its
-        // slowest one.
-        const rate = () => (slowest > 0
-            ? attempts / slowest
-            : 0);
-        // Fallback for a round where no worker reported its elapsed time (a
-        // partial round, or an old worker build): wall clock is better than
-        // nothing.
-        const wallRate = () => (done > 0
-            ? attempts / Math.max((Date.now() - t0) / 1000, 1e-3)
-            : 0);
-        const settle = (r) => {
-            if (finished) return;
-            finished = true;
-            for (const w of pool) {
-                try { w.terminate(); } catch (e) { /* ignore */ }
-            }
-            try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
-            pool = [];
-            resolve(r);
-        };
-
-        // One timer for the round: if a worker never reports we must not wait
-        // forever, and a partially-completed round is still usable as long as at
-        // least one worker finished. Bounded by the overall deadline too, so
-        // the calibration as a whole cannot stall Start.
-        const budget = Math.max(
-            50, Math.min(SCALE_CAL_ROUND_MS, scaleCalDeadline - Date.now()));
-        const timer = setTimeout(() => {
-            settle(rate() || wallRate());
-        }, budget);
-
-        let url;
-        try {
-            const src = createCalibrationWorkerSource();
-            const blob = new Blob([src], { type: 'application/javascript' });
-            url = URL.createObjectURL(blob);
-        } catch (e) {
-            clearTimeout(timer);
-            settle(0);
-            return;
-        }
-
-        try {
-            for (let i = 0; i < count; i++) {
-                const w = new Worker(url);
-                pool.push(w);
-                w.onerror = () => { /* counted as never reporting */ };
-                w.onmessage = (e) => {
-                    if (finished) return;
-                    const d = e.data || {};
-                    if (d.type === 'ready') {
-                        w.postMessage({
-                            prefix: SCALE_CAL_PATTERN,
-                            suffix: '',
-                            matchPrefix: true,
-                            matchSuffix: false,
-                            maxAttempts: SCALE_CAL_PER_WORKER,
-                        });
-                        return;
-                    }
-                    if (d.type === 'calibrated') {
-                        attempts += Number(d.attempts) || 0;
-                        // The worker times its own keygen loop, from after the
-                        // WASM is ready. Taking the slowest keeps the rate a
-                        // true aggregate for a concurrently-running round.
-                        const el = Number(d.elapsed);
-                        if (isFinite(el) && el > slowest) slowest = el;
-                        done++;
-                        if (done === count) {
-                            clearTimeout(timer);
-                            settle(rate() || wallRate());
-                        }
-                    }
-                };
-            }
-            t0 = Date.now();
-        } catch (e) {
-            clearTimeout(timer);
-            settle(0);
-        }
-    });
-}
-
-// Build a worker that loads the same libsodium as the miner. Kept separate from
-// the mining worker because the mining one carries the UI-facing progress and
-// yield logic the calibration neither needs nor wants.
-function createCalibrationWorkerSource() {
-    return `
-        /* calibration-worker */
-        let sodium = null;
-        const readyPromise = new Promise((resolve) => {
-            try {
-                importScripts('${new URL('./libsodium.js', location.href).href}');
-            } catch (e) { /* reported below as an error message */ }
-            if (typeof libsodium !== 'undefined' && libsodium.ready) {
-                libsodium.ready.then(() => {
-                    sodium = typeof libsodium === 'function'
-                        ? sodiumModule() : libsodium;
-                    resolve();
-                });
-            } else {
-                resolve();
-            }
-        });
-        function sodiumModule() {
-            try { return self.Module; } catch (e) { return self.libsodium; }
-        }
-        const seed = new Uint8Array(32);
-        if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-            crypto.getRandomValues(seed);
-        }
-        self.onmessage = async function (e) {
-            try {
-                await readyPromise;
-                if (typeof sodium === 'undefined'
-                    || typeof sodium.crypto_sign_seed_keypair !== 'function') {
-                    self.postMessage({ type: 'error', message: 'calibration: no crypto' });
-                    return;
-                }
-                const cap = Number(e.data.maxAttempts) || 0;
-                const t0 = Date.now();
-                for (let i = 0; i < cap; i++) {
-                    seed[0] = (seed[0] + 1) & 0xff;
-                    sodium.crypto_sign_seed_keypair(seed);
-                }
-                self.postMessage({
-                    type: 'calibrated',
-                    attempts: cap,
-                    elapsed: (Date.now() - t0) / 1000,
-                });
-            } catch (err) {
-                self.postMessage({ type: 'error', message: 'calibration: ' + err.message });
-            }
-        };
-    `;
-}
-
-// Measure this machine's scaling curve. Resolves to [[threads, speedup], ...]
-// or null when the measurement could not be made.
-async function calibrateScaling(logical) {
-    scaleCalDeadline = Date.now() + SCALE_CAL_TOTAL_MS;
-    const rounds = SCALE_CAL_ROUNDS.filter((n) => n <= logical);
-    if (rounds[rounds.length - 1] !== logical) rounds.push(logical);
-    rounds.sort((a, b) => a - b);
-
-    const points = [];
-    let base = 0;
-    for (const n of rounds) {
-        // Out of time: keep what we have rather than starting a round that
-        // cannot finish. A partial curve is still better than the imported
-        // table, provided it has enough points to be a curve.
-        if (Date.now() >= scaleCalDeadline) break;
-        const rate = await measureScaleRound(n);
-        if (!(rate > 0)) return null;          // unusable: keep the table
-        if (n === 1) {
-            base = rate;
-            points.push([1, 1]);
-            continue;
-        }
-        const speedup = rate / base;
-        const prev = points[points.length - 1][1];
-        points.push([n, speedup]);
-        // Stop once a step stops paying: those threads are not worth starting.
-        if (speedup / prev < SCALE_CAL_MIN_MARGINAL) break;
-    }
-    return points.length >= 2 ? points : null;
-}
-
-// The curve to use: this machine's if we have measured one, else the imported
-// The curve to use: this machine's if we have measured one, else the imported
-        // Node benchmark table. Every caller goes through here so the estimate
-        // and the worker count can never disagree about which curve they are
-        // using.
-        function effectiveScalePoints() {
-            return loadCachedScale() || WORKER_SCALE_POINTS;
-        }
-
-        // Browser estimator power-law fit points: scale(n) = n ** (log(2.9)/log(8))
-        // These are the anchor points for the browser estimator's power-law fit.
-        // scale(n) = n ** (log(2.9)/log(8)) ≈ n^0.372
-        const BROWSER_ESTIMATOR_SCALE_POINTS = [
-            [1, 1.00],
-            [2, 1.58],
-            [4, 2.28],
-            [6, 2.79],
-            [8, 2.88],
-        ];
-        const BROWSER_ESTIMATOR_SCALE_MAX = BROWSER_ESTIMATOR_SCALE_POINTS[BROWSER_ESTIMATOR_SCALE_POINTS.length - 1][1];
-
-        // Browser estimator power-law fit: scale(n) = n ** (log(2.9)/log(8))
-        // Used for the pre-flight estimate instead of the Node proxy table.
-        function browserEstimatorScale(workers) {
-            const n = Number(workers);
-            if (!isFinite(n) || n <= 1) return 1;
-            const pts = BROWSER_ESTIMATOR_SCALE_POINTS;
-            const last = pts.length - 1;
-            if (n >= pts[last][0]) return pts[last][1];
-
-            // Find the bracketing pair.
-            let hi = 1;
-            while (hi < pts.length - 1 && pts[hi][0] < n) hi++;
-            const [nHi, vHi] = pts[hi];
-            const [nLo, vLo] = pts[hi - 1];
-
-            if (n === nHi) return vHi;
-            const t = (Math.log(n) - Math.log(nLo)) / (Math.log(nHi) - Math.log(nLo));
-            const v = Math.exp(Math.log(vLo) + t * (Math.log(vHi) - Math.log(vLo)));
-            return Math.min(v, BROWSER_ESTIMATOR_SCALE_MAX);
-        }
-
-        // Aggregate throughput at `workers` threads, from the measured table.
-        //
-        // Interpolates log-linearly between measured points - i.e. a power law
-        // PER SEGMENT rather than one law through the whole range, which is what
-        // lets the curve be near-linear to 2 threads and flat after 4.
-        //
-        // Two deliberate edge behaviours:
-        //
-        // - Above the largest measured thread count it CLAMPS to the measured
-        //   value rather than extrapolating. Extra threads cannot beat what was
-        //   observed on 4 physical cores, and an extrapolation would promise
-        //   throughput nobody has seen. detectOptimalWorkers already caps at 32,
-        //   so a 16- or 32-thread machine gets the measured 8-thread ceiling.
-        // - Below the smallest measured point above 1 it interpolates toward 1,
-        //   so a 2-core laptop is not told it is faster than it can be.
         function workerScale(workers) {
             const n = Number(workers);
             if (!isFinite(n) || n <= 1) return 1;
-
-            // This machine's curve when we have measured one; the imported
-            // table otherwise. The browser estimator ceiling (2.9x @ 8 threads)
-            // bounds the curve for the imported table, reflecting the browser
-            // worker's wrapper overhead. Cached measurements use their own
-            // ceiling (their last point).
-            const pts = effectiveScalePoints();
-            const last = pts.length - 1;
-            const isImportedTable = pts[last][0] === 8 && pts[last][1] === WORKER_SCALE_POINTS[WORKER_SCALE_POINTS.length - 1][1];
-            const ceiling = isImportedTable ? WORKER_SCALE_MEASURED[8] : pts[last][1];
-            if (n >= pts[last][0]) return isImportedTable ? WORKER_SCALE_MEASURED[8] : pts[last][1];
-
-            // Find the bracketing pair.
-            let hi = 1;
-            while (hi < last && pts[hi][0] < n) hi++;
-            const [nHi, vHi] = pts[hi];
-            const [nLo, vLo] = pts[hi - 1];
-
-            if (n === nHi) return Math.min(vHi, isImportedTable ? WORKER_SCALE_MEASURED[8] : pts[last][1]);
-            const t = (Math.log(n) - Math.log(nLo)) / (Math.log(nHi) - Math.log(nLo));
-            const v = Math.exp(Math.log(vLo) + t * (Math.log(vHi) - Math.log(vLo)));
-            return Math.min(v, isImportedTable ? WORKER_SCALE_MEASURED[8] : pts[last][1]);
+            return Math.pow(n, WORKER_SCALE_EXPONENT);
         }
-
-        // There used to be a live-rate self-calibration here: every worker's
-        // reported rate was collected, and once each had reported twice the grey
-        // pre-flight line was REWRITTEN from the modelled rate to the measured
-        // one. That made the estimate a moving target mid-search, duplicating
-        // what the green live-logs panel already shows from the same samples -
-        // the live rate, the progress figure and an ETA computed from each
-        // worker's own reported rate.
-        //
-        // It is removed, not merely unwired. With the grey line static there is
-        // nothing left to read it, and dead machinery whose comments claimed it
-        // was "the whole point" is worse than none: it invites the next reader
-        // to trust a code path that nothing exercises.
-        //
-        // What keeps the pre-flight figure honest instead is the per-machine
-        // calibration below, which measures ratePerWorker() and the scaling
-        // curve on this CPU rather than importing them from other hardware.
 
         function updateEstimate() {
             const prefix = document.getElementById('prefix').value;
@@ -1846,42 +847,13 @@ async function calibrateScaling(logical) {
             }
 
             const numWorkers = detectOptimalWorkers();
-            // Scale through the effective curve (cached measurement or browser
-            // estimator) so the headline figure reflects the calibration if
-            // one exists, or the browser estimator power-law fit otherwise.
+            // Scale through the measured curve instead of assuming linear, so
+            // the headline figure is one people can plan around.
             const scale = workerScale(numWorkers);
-            // ratePerWorker() is an Ed25519 keygen measurement. A channel PSK
-            // and a node ID perform no derivation at all, so quoting the
-            // Ed25519 rate for them would understate them by roughly three
-            // orders of magnitude - the difference between "about an hour" and
-            // "done before you finish reading this". The multiplier below is
-            // measured per type (see keyTypeThroughputFactor), not guessed.
-            const modelledRate = ratePerWorker()
-                * keyTypeThroughputFactor(getSelectedKeyType())
-                * scale;
-
-            // This line is STATIC for the duration of a search, and is the
-            // pre-flight projection only. It used to be rewritten on every
-            // progress event so it could flip from "estimated" to "measured"
-            // once the workers had reported. That was the wrong place for a
-            // moving number: the green live-logs panel beside it already shows
-            // what is actually happening - attempts, the live rate, progress and
-            // a live ETA computed from each worker's own reported rate. Two
-            // figures changing under the user at once, one of them in grey
-            // above the other, made the pre-flight line look like part of the
-            // live read-out when it is a projection made before any work
-            // started.
-            //
-            // It is still a projection worth trusting, because ratePerWorker()
-            // and workerScale() are both measured on THIS machine now (the
-            // scaling curve is calibrated and cached per machine), so this is
-            // no longer a number imported from other hardware.
-            const totalRate = modelledRate;
-
-            // Say which one the user is looking at. Without this a user would
-            // have no way of knowing whether the figure is a measurement or a
-            // guess, and would reasonably assume the stronger claim.
-            const rateLabel = calibratedRatePerWorker ? 'calibrated' : 'estimated';
+            const totalRate = ratePerWorker() * scale;
+            const rateLabel = calibratedRatePerWorker
+                ? 'calibrated'
+                : 'estimated';
             let timeStr;
             if (totalRate <= 0 || !isFinite(expected / totalRate)) {
                 timeStr = 'unknown (calibrating...)';
@@ -1897,42 +869,17 @@ async function calibrateScaling(logical) {
                     timeStr = (estSeconds / 86400).toFixed(1) + 'd';
                 }
             }
-            // Report the count that the rate actually describes.
-            //
-            // Pre-flight, that is the planned worker count: this line is never
-            // rewritten mid-search, so there is no "actually running" count to
-            // contradict it. If some workers fail to initialise the live panel
-            // shows the real figure.
-            const shownWorkers = numWorkers;
-            const workerLabel = shownWorkers === 1 ? 'worker' : 'workers';
-            // Only actual measurements go in the grey line: expected attempts,
-            // estimated time, worker count and the measured keys/s rate.
-            //
-            // The worker-scaling multiplier is NOT shown. It used to appear as
-            // "workers share cores, improvement is only ~2.3x at 8 threads",
-            // which is a property of the extrapolation model rather than
-            // anything measured about this machine, and printing it there made
-            // the line long enough to wrap on a narrow screen. The model still
-            // drives `totalRate` and therefore the ETA - it is just not
-            // advertised. Provenance stays in WORKER_SCALE_MEASURED and the
-            // README's "Worker scaling" section.
+            const workerLabel = numWorkers === 1 ? 'worker' : 'workers';
+            // The per-worker calibration is a genuine single-core measurement,
+            // but the workers then share those cores, so aggregate throughput is
+            // rate x scale, not rate x workers. State the multiplier explicitly
+            // rather than hedging, and keep the provenance next to it.
             estimateEl.textContent = 'Expected attempts: ' + expected.toLocaleString()
-                // These newlines are NOT conditional. `white-space: pre-line`
-                // honours them on every screen, so the estimate is always three
-                // short labelled lines rather than one long one. That is
-                // deliberate: a single-line summary of four facts (attempts,
-                // time, workers, rate) was cramped to read even where it fitted,
-                // and could not be made to fit where it did not. Three lines,
-                // each naming one fact, is scannable at any width and cannot
-                // overflow at any width.
-                //
-                // The `|` separators this replaced were a desktop affordance
-                // that stranded at the start of wrapped lines - and the
-                // estimate was the one element that could widen the page.
-                + '\nEstimated time: ~' + timeStr
-                + '\n(' + shownWorkers + ' ' + workerLabel
+                + ' | Estimated time: ~' + timeStr
+                + ' (' + numWorkers + ' ' + workerLabel
                 + ', up to ' + Math.round(totalRate).toLocaleString() + ' keys/s ' + rateLabel
-                + ')';
+                + '; workers share cores, improvement is only ~' + scale.toFixed(1)
+                + 'x at ' + numWorkers + ' threads; scale derived from 2.9x at 8 threads)';
         }
 
         // Single formatter for the live progress line. The status line and the live
@@ -1992,58 +939,22 @@ async function calibrateScaling(logical) {
             set('live-attempts', '0');
             set('live-rate', '0/s');
             set('live-progress', '0.00%');
-            // One "N | M" string, matching the single Workers | Cores cell.
-            set('live-workers', (workers == null ? 0 : workers) + ' | ' +
-                (cores == null ? '-' : cores));
+            set('live-workers', String(workers == null ? 0 : workers));
+            set('live-cores', String(cores == null ? '-' : cores));
             // Start at zeroed but rendered, so the slots exist at their full
             // reserved width from the first frame instead of snapping wider the
             // moment a real duration appears.
             renderEta(0);
         }
 
-        // Clear the transient status line (the "Loading crypto library..." /
-        // "Starting..." messages) by hiding the ELEMENT, not just emptying it.
-        //
-        // Emptied text alone still left a rendered line box: the <p> kept its
-        // font size and line-height, so the panel showed a blank gap that
-        // pushed the figures down, and because the element stayed in the
-        // accessibility tree a screen reader still announced an empty status.
-        // Toggling `hidden` removes it from both the box tree and the a11y tree,
-        // and the space it occupied collapses with it.
-        //
-        // Every transient status is set through setStatusText(), so anything
-        // that shows one hides it again on the same path.
-        function setStatusText(text) {
-            const el = document.getElementById('progress-text');
-            if (!el) return;
-            el.textContent = text || '';
-            el.hidden = !text;
-        }
-
-        // Hide the transient status line. Called as soon as mining reports
-        // real figures, so "Starting..." cannot survive into the running state.
-        //
-        // Swallows its own errors deliberately. This runs as the FIRST
-        // statement of the progress handler, so anything thrown here would skip
-        // every live figure behind it and leave them frozen on stale values.
-        // Retiring a cosmetic status line must never be able to stop the numbers
-        // updating.
-        function clearStatusText() {
-            try {
-                setStatusText('');
-            } catch (err) {
-                console.warn('could not clear the status line', err);
-            }
-        }
-
         // Report how many workers actually started, not how many were planned.
         // A short search may create fewer than requested if the browser cannot
         // spawn them all, and silently reporting the plan would hide it.
         function reportActualWorkers(created) {
-            const cores = navigator.hardwareConcurrency || '-';
             const el = document.getElementById('live-workers');
-            // "N | M" in one cell, matching the Workers | Cores label.
-            if (el) el.textContent = created + ' | ' + cores;
+            if (el) el.textContent = String(created);
+            const coresEl = document.getElementById('live-cores');
+            if (coresEl) coresEl.textContent = String(navigator.hardwareConcurrency || '-');
             return created;
         }
 
@@ -2056,56 +967,17 @@ async function calibrateScaling(logical) {
         // Use every logical core.
 //
 // This previously reserved one core for the UI. The hot loop already yields to
-// the event loop every 250ms, which is still far more often than the browser
-// needs to repaint, so the UI stays responsive without sacrificing a core - and
-// on a 4-core machine that reserve was a 25% throughput loss for no benefit.
+// the event loop every 30ms, which is far more often than the browser needs to
+// repaint, so the UI stays responsive without sacrificing a core - and on a
+// 4-core machine that reserve was a 25% throughput loss for no benefit.
 //
 // Capped at 32: past roughly the physical core count extra workers only add
 // context-switching overhead, and unbounded counts on a high-core machine can
 // make the tab unresponsive long before the browser would refuse.
 function detectOptimalWorkers() {
-            const logical = Math.max(navigator.hardwareConcurrency || 4, 1);
-            const cap = Math.min(logical, 32);
-
-            // When this machine's own curve has been measured, take the largest
-            // thread count that still earned its place on it. Everything above
-            // that point was measured to add less than SCALE_CAL_MIN_MARGINAL,
-            // which on an SMT machine means the extra threads are siblings
-            // contending for the same execution units - they cost main-thread
-            // time and buy nothing.
-            //
-            // With no measurement, this is unchanged: one worker per logical
-            // thread, which is right on a machine without SMT and the best
-            // available guess before we have measured one.
-            const pts = loadCachedScale();
-            if (pts) {
-                // Walk the curve and keep the last step that paid for itself.
-                //
-                // `prevSpeedup` is tracked directly rather than re-read from the
-                // array by index. It used to do `pts[best]`, where `best` holds a
-                // THREAD COUNT - so it indexed by 4 on a curve whose fourth entry
-                // is at index 3, and handed scalePointAt() a [threads, speedup]
-                // pair where a number was expected. That coerced to NaN, the
-                // comparison was always false, and the ratio degenerated to
-                // speedup/1 - so the 10% rule could never fire and the loop
-                // always returned the last point. It looked correct only
-                // because the curve it was tested with had every step paying,
-                // which is exactly the case the rule exists to catch.
-                let best = 1;
-                let prevSpeedup = 1;
-                for (const [threads, speedup] of pts) {
-                    if (threads > cap) continue;         // beyond the cap
-                    if (threads > 1
-                        && speedup / prevSpeedup < SCALE_CAL_MIN_MARGINAL) {
-                        break;                           // not worth taking
-                    }
-                    best = threads;
-                    prevSpeedup = speedup;
-                }
-                return Math.max(1, Math.min(best, cap));
-            }
-            return cap;
-        }
+    const cores = navigator.hardwareConcurrency || 4;
+    return Math.min(Math.max(cores, 1), 32);
+}
 
         async function startMining() {
             if (mining || starting) return;
@@ -2121,95 +993,37 @@ function detectOptimalWorkers() {
             const startBtn = document.getElementById('start-btn');
             starting = true;
             startBtn.disabled = true;
-            setStatusText('Loading crypto library...');
+            const progressEl0 = document.getElementById('progress-text');
+            progressEl0.textContent = 'Loading crypto library...';
             document.getElementById('progress').classList.remove('hidden');
             try {
                 await awaitSodium();
             } catch (e) {
                 starting = false;
                 startBtn.disabled = false;
-                // Clear the status as well as hiding the panel. Hiding alone
-                // leaves "Loading crypto library..." sitting in the DOM, and it
-                // is still there on the next attempt - the same stale-status
-                // class of bug the other terminal paths handle.
-                clearStatusText();
                 document.getElementById('progress').classList.add('hidden');
                 revokeBlobUrls();
                 alert('Failed to load cryptographic library: ' + e.message
                     + ' Check your internet connection and refresh.');
                 return;
             }
-            // The user may have cancelled while we waited for libsodium - the
-            // Stop button and the new-search button both clear `starting` while
-            // leaving `mining` false, so `starting` is the cancellation signal.
-            //
-            // This used to read `if (mining) return;`, which could never fire:
-            // `mining` is not set true until the workers are created, well
-            // below this point, and the Stop button is disabled for the whole
-            // startup window. The comment described a guard the code did not
-            // implement, and the flag it checked was not the one a cancellation
-            // would move.
-            if (!starting) return;
-
-            // Measure this machine's scaling curve, once, before choosing a worker
-            // count. Skipped when a previous session already cached it for this
-            // fingerprint, and skipped entirely if it has already failed, so the
-            // cost is paid at most once and never again after a failure.
-            //
-            // Any error or timeout here falls through to the imported table and
-            // the unchanged one-worker-per-logical-thread behaviour, so this can
-            // never stop a search from starting.
-            if (!loadCachedScale() && !scaleCalFailed) {
-                setStatusText('Measuring this machine...');
-                try {
-                    const logical = Math.min(
-                        Math.max(navigator.hardwareConcurrency || 4, 1), 32);
-                    const points = await calibrateScaling(logical);
-                    if (points) {
-                        measuredScalePoints = points;
-                        storeCachedScale(points);
-                    } else {
-                        scaleCalFailed = true;
-                    }
-                } catch (e) {
-                    scaleCalFailed = true;
-                }
-                if (!starting) {
-                    // Cancelled while measuring. Clear the transient status
-                    // rather than leaving "Measuring this machine..." in the
-                    // DOM: the panel is hidden, but stopMining() does not clear
-                    // the text, and the other terminal paths all do.
-                    clearStatusText();
-                    return;
-                }
-            }
-
             starting = false;
+            // The user may have hit Stop while we waited.
+            if (mining) return;
 
             const prefix = document.getElementById('prefix').value.toLowerCase();
             const suffix = document.getElementById('suffix').value.toLowerCase();
             const matchPrefix = prefix.length > 0;
             const matchSuffix = suffix.length > 0;
-            const keyType = getSelectedKeyType();
             const numWorkers = detectOptimalWorkers();
-
-            // Re-derive the pre-flight line at the moment the user commits, not
-            // only when they last typed. It is static from here on, so this is
-            // its last chance to reflect anything learned since the last edit -
-            // notably the per-machine scaling calibration, which may have just
-            // completed, and which changes both the rate and the worker count
-            // this line quotes.
-            updateEstimate();
 
             window.liveEstimateShown = false;
             resetRateSmoothing();
             resetEtaSmoothing();
-            resetRateGraph();
             resetLiveLogs(numWorkers, navigator.hardwareConcurrency || '-');
-            // Only a genuinely transient state. clearStatusText() drops this the
-            // moment the first worker reports, so it can never sit on screen for
-            // the whole run the way it used to.
-            setStatusText('Starting...');
+            const progressEl = document.getElementById('progress-text');
+            progressEl.textContent = 'Starting...';
+            progressEl.className = 'status-text';
             document.getElementById('progress').classList.remove('hidden');
 
             const workerCode = `
@@ -2243,7 +1057,6 @@ function detectOptimalWorkers() {
                 })();
 
                 self.onmessage = async function(e) {
-                    console.log('[Worker] Received message:', e.data.type || e.data);
                     try {
                         // Main thread only posts work after 'ready', but await
                         // defensively so a race can never surface as a raw TypeError.
@@ -2258,69 +1071,8 @@ function detectOptimalWorkers() {
                         const prefixLower = prefix.toLowerCase();
                         const suffixLower = suffix.toLowerCase();
 
-                        // Which value space this worker searches.
-                        //
-                        // Only ed25519 and x25519 derive public keys: the matched
-                        // value is the Ed25519 or Curve25519 public key respectively.
-                        // For psk the candidate IS the secret - a 256-bit channel
-                        // secret - so there is no hash to apply and no libsodium call
-                        // to make. That is not an optimisation, it is what a PSK is:
-                        // an opaque secret, not a digest of anything.
-                        //
-                        // An unrecognised type must not silently mine a device
-                        // key: the user would get an Ed25519 key while believing
-                        // they had a channel secret, and that mistake would not
-                        // surface until the device refused to join. Fail loudly
-                        // instead.
-                        // A MISSING keyType means a caller predating the selector,
-                        // which is a device key and nothing else - so it defaults
-                        // rather than failing. An UNRECOGNISED one is a bug or a
-                        // tampered message, and is refused loudly: silently
-                        // mining an Ed25519 key where the user asked for a
-                        // channel secret would hand back a value their radio
-                        // rejects, with no clue why.
-                        const keyType = e.data.keyType === undefined ? 'ed25519' : e.data.keyType;
-                        const KEY_LEN = (keyType === 'psk' || keyType === 'x25519') ? 32
-                            : keyType === 'ed25519' ? 32
-                            : -1;
-                        if (KEY_LEN < 0) {
-                            self.postMessage({
-                                type: 'error',
-                                message: 'Unknown key type: ' + keyType
-                            });
-                            return;
-                        }
-                        // A device key and node key need libsodium; PSK does not.
-                        const NEEDS_SODIUM = keyType === 'ed25519' || keyType === 'x25519';
-                        const needSign = keyType === 'ed25519';
-                        const needBox = keyType === 'x25519';
-                        if (NEEDS_SODIUM
-                            && (typeof sodium === 'undefined'
-                                || (needSign && typeof sodium.crypto_sign_seed_keypair !== 'function')
-                                || (needBox && typeof sodium.crypto_box_seed_keypair !== 'function'))) {
-                            self.postMessage({
-                                type: 'error',
-                                message: 'Cryptographic library unavailable in worker.'
-                            });
-                            return;
-                        }
-
                         let attempts = 0;
                         const startTime = Date.now();
-
-                        // Bounded work, used only by the scaling calibration.
-                        //
-                        // The calibration needs to know how many candidates this
-                        // worker managed in a fixed budget, which an unbounded
-                        // mining loop cannot report - it only speaks every
-                        // REPORT_EVERY_MS, far too coarse for a few hundred
-                        // milliseconds of measurement. When maxAttempts is
-                        // present the loop stops there and posts the count
-                        // instead of searching on. Normal mining omits the
-                        // field entirely and is unaffected: no branch is taken,
-                        // no comparison is added to the hot loop.
-                        const capAttempts = Number(e.data.maxAttempts) > 0
-                            ? Number(e.data.maxAttempts) : 0;
 
                         let patternLen;
                         if (matchPrefix && matchSuffix) {
@@ -2335,20 +1087,7 @@ function detectOptimalWorkers() {
                         const expectedAttempts = Math.pow(16, patternLen);
 
                         const BATCH_SIZE = 256;
-                        // Per-worker report interval.
-                        //
-                        // This was 500ms, which is 2 posts per worker per second
-                        // - 16 messages a second to the main thread at 8 workers,
-                        // and every one of them redrew the rate graph (a forced
-                        // layout plus a canvas repaint) and rewrote the estimate
-                        // line. All of that runs on the main thread, which is
-                        // competing with every worker for the same cores, so UI
-                        // churn is not free: it comes straight out of aggregate
-                        // throughput. Nothing here needs sub-second resolution -
-                        // the numbers are an aggregate rate over seconds - so the
-                        // interval is 3s and the main thread does 1/6th of the
-                        // work it used to.
-                        const REPORT_EVERY_MS = 3000;
+                        const REPORT_EVERY_MS = 500;
                         let lastProgressReport = 0;
 
                         function reportProgress(force) {
@@ -2393,19 +1132,7 @@ function detectOptimalWorkers() {
                         // one libsodium call and a handful of integer compares -
                         // no string building at all. Odd-length patterns work
                         // because matching happens per nibble.
-                        // The walk state, sized to the matched value.
-                        //
-                        // 32 bytes for a device key (the Ed25519 seed), KEY_LEN
-                        // for a channel PSK or node ID. The latter two are NOT
-                        // 32 bytes with the tail ignored: the counter is
-                        // big-endian, so it increments from the last byte
-                        // backwards, and a 32-byte buffer matched only on its
-                        // first 4 bytes would leave the leading byte changing
-                        // once every 2**24 iterations - the search would still
-                        // terminate, but the hot path would be walking 28 bytes
-                        // of dead counter for every candidate. Sizing the buffer
-                        // to the value keeps the whole increment in play.
-                        const seed = new Uint8Array(NEEDS_SODIUM ? 32 : KEY_LEN);
+                        const seed = new Uint8Array(32);
                         c.getRandomValues(seed);
 
                         const HEXNIB = new Int8Array(256).fill(-1);
@@ -2422,11 +1149,7 @@ function detectOptimalWorkers() {
                         const suffixNib = decodeNibbles(suffixLower);
                         const prefixLen = prefixNib.length;
                         const suffixLen = suffixNib.length;
-                        // KEY_LEN is fixed above from the key type: 32 for a
-                        // device key and a channel PSK, 4 for a node ID. It is
-                        // the length of the MATCHED value, and the matchers below
-                        // are bounded by it - so a node ID cannot be matched
-                        // against 64 nibbles of nothing.
+                        const PK_LEN = 32;
 
                         // Big-endian +1 with wraparound at 2**256.
                         //
@@ -2443,7 +1166,7 @@ function detectOptimalWorkers() {
                         };
 
                         const startsWithNibbles = (pub, nib, len) => {
-                            if (len > KEY_LEN * 2) return false;
+                            if (len > PK_LEN * 2) return false;
                             for (let j = 0; j < len; j++) {
                                 const b = pub[j >> 1];
                                 if (((j & 1) ? (b & 15) : (b >> 4)) !== nib[j]) return false;
@@ -2452,29 +1175,12 @@ function detectOptimalWorkers() {
                         };
 
                         const endsWithNibbles = (pub, nib, len) => {
-                            if (len > KEY_LEN * 2) return false;
-                            const total = KEY_LEN * 2;
+                            if (len > PK_LEN * 2) return false;
+                            const total = PK_LEN * 2;
                             for (let j = 0; j < len; j++) {
                                 const k = total - len + j;
                                 const b = pub[k >> 1];
                                 if (((k & 1) ? (b & 15) : (b >> 4)) !== nib[j]) return false;
-                            }
-                            return true;
-                        };
-
-                        // PSK: little-endian nibble accessors (counter LSBs change fastest).
-                        // Nibble order matches display order: high nibble first, so a user's
-                        // "1234" prefix matches when the seed ENDS with bytes 0x12, 0x34...
-                        const startsWithNibblesLE = (pub, nib, len) => {
-                            if (len > KEY_LEN * 2) return false;
-                            for (let j = 0; j < len; j++) {
-                                // Read from END of array (LSBs) but high nibble first.
-                                // nibble pair j covers byte KEY_LEN - 1 - (j >> 1)
-                                const byteIdx = KEY_LEN - 1 - (j >> 1);
-                                const b = pub[byteIdx];
-                                // High nibble first (j even), then low nibble (j odd)
-                                const expected = (j & 1) ? (b & 15) : (b >> 4);
-                                if (expected !== nib[j]) return false;
                             }
                             return true;
                         };
@@ -2487,74 +1193,64 @@ function detectOptimalWorkers() {
                             return out;
                         };
 
-                        // How often the worker hands control back to its event loop.
-                        //
-                        // A bare setTimeout(0) is clamped to >=4ms once timers
-                        // nest, so yielding per batch capped throughput at a few
-                        // thousand keys/s. The yield is an await on a timer, which
-                        // parks the worker thread until it fires - at the old 30ms
-                        // budget that was ~33 times a second per worker, ~260
-                        // times a second across 8, spending real mining time
-                        // asleep on the timer queue.
-                        //
-                        // 250ms is 4 times a second, still far faster than a
-                        // person can press Stop. Nothing depends on it being
-                        // tight: the stop path tears the workers down outright
-                        // with terminateAllWorkers() rather than asking them to
-                        // stop.
-                        const YIELD_EVERY_MS = 2000;
-                        let lastYield = Date.now();
+                        // Adaptive yield with requestIdleCallback deadline utilization.
+                        // Uses deadline.timeRemaining() to dynamically size batches instead of
+                        // fixed BATCH_SIZE=256. This provides better frame-pacing on low-end
+                        // devices and avoids long frames when the browser is busy.
+                        const hasIdleCallback = typeof requestIdleCallback === 'function';
+                        const hasScheduler = typeof scheduler !== 'undefined' && typeof scheduler.postTask === 'function';
+                        let frameBudget = 16.67; // initial guess: 60fps frame budget
+                        // performance.now() fallback for non-browser contexts (e.g., benchmarks)
+                        const now = (typeof performance !== 'undefined' && performance.now)
+                            ? () => performance.now()
+                            : () => Date.now();
 
-while (true) {
-                            for (let b = 0; b < BATCH_SIZE; b++) {
-                                let pub;
-                                if (keyType === 'x25519') {
-                                    pub = sodium.crypto_box_seed_keypair(seed).publicKey;
-                                } else if (NEEDS_SODIUM) {
-                                    pub = sodium.crypto_sign_seed_keypair(seed).publicKey;
-                                } else {
-                                    pub = seed;
-                                }
+                        const doYield = (deadline) => new Promise((resolve) => {
+                            if (hasScheduler) {
+                                scheduler.postTask(resolve, { priority: 'background' });
+                                return;
+                            }
+                            if (hasIdleCallback && deadline) {
+                                // Use the provided deadline's timeRemaining() to size next batch
+                                requestIdleCallback(resolve, { timeout: 100 });
+                                return;
+                            }
+                            if (hasIdleCallback) {
+                                requestIdleCallback(resolve, { timeout: 100 });
+                                return;
+                            }
+                            // Fallback: setTimeout with dynamic budget
+                            setTimeout(resolve, Math.max(0, Math.min(4, frameBudget - 1)));
+                        });
+
+                        let accumulatedMs = 0;
+                        let dynamicBatchSize = BATCH_SIZE;
+
+                        while (true) {
+                            const batchStart = now();
+                            let yielded = false;
+
+                            // Run up to dynamicBatchSize candidates, but yield early if
+                            // deadline expires (requestIdleCallback provides deadline object)
+                            for (let b = 0; b < dynamicBatchSize; b++) {
+                                const keyPair = sodium.crypto_sign_seed_keypair(seed);
+                                const pub = keyPair.publicKey;
 
                                 let match = false;
-                                const isPsk = keyType === 'psk';
-                                // PSK: prefix uses LE (LSBs, fast). Suffix always uses BE (LSBs, fast).
-                                // This makes prefix search feasible while keeping suffix search working.
-                                const useLePrefix = isPsk && matchPrefix;
                                 if (matchPrefix && matchSuffix) {
-                                    match = (useLePrefix ? startsWithNibblesLE : startsWithNibbles)(pub, prefixNib, prefixLen)
+                                    match = startsWithNibbles(pub, prefixNib, prefixLen)
                                          && endsWithNibbles(pub, suffixNib, suffixLen);
                                 } else if (matchPrefix) {
-                                    match = (useLePrefix ? startsWithNibblesLE : startsWithNibbles)(pub, prefixNib, prefixLen);
+                                    match = startsWithNibbles(pub, prefixNib, prefixLen);
                                 } else {
                                     match = endsWithNibbles(pub, suffixNib, suffixLen);
                                 }
 
                                 if (match) {
-                                    // The 'publicKey' field is what matched
-                                    // and the user will paste into their radio
-                                    // config. The 'privateKey' field is what they keep:
-                                    // for a device key that is the Ed25519 seed,
-                                    // for x25519 it's the Curve25519 seed,
-                                    // and for a channel PSK it's the same bytes as the PSK.
-                                    // Sending both unconditionally keeps
-                                    // the history schema single-shaped, so export,
-                                    // encryption and rendering need no per-type
-                                    // branch to survive a mixed history.
-                                    // For x25519, also send the derived node ID (!xxxxxxxx)
-                                    let nodeId = null;
-                                    if (keyType === 'x25519') {
-                                        // Meshtastic node ID is the last 4 bytes of the Curve25519 public key, big-endian
-                                        const last4 = pub.slice(-4);
-                                        const nodeNum = (last4[0] << 24) | (last4[1] << 16) | (last4[2] << 8) | last4[3];
-                                        nodeId = '!' + nodeNum.toString(16).padStart(8, '0');
-                                    }
                                     self.postMessage({
                                         type: 'found',
-                                        keyType: keyType,
                                         publicKey: bytesToHex(pub),
                                         privateKey: bytesToHex(seed),
-                                        nodeId: nodeId,
                                         attempts: attempts,
                                         elapsed: (Date.now() - startTime) / 1000
                                     });
@@ -2563,31 +1259,27 @@ while (true) {
 
                                 attempts++;
                                 incrementSeed();
-
-                                // Calibration stop. Checked once per candidate
-                                // and only ever reached when the field was sent,
-                                // so normal mining never evaluates it.
-                                if (capAttempts && attempts >= capAttempts) {
-                                    self.postMessage({
-                                        type: 'calibrated',
-                                        attempts: attempts,
-                                        elapsed: (Date.now() - startTime) / 1000,
-                                    });
-                                    return;
-                                }
                             }
+
                             reportProgress(false);
-                            // No forced "first report" here: the throttle compares
-                            // against lastProgressReport, which starts at 0, so
-                            // the first call already reports immediately. An
-                            // explicit extra call therefore posted the same first
-                            // batch twice - a wasted message plus a forced layout
-                            // and canvas repaint, in the loop whose whole purpose
-                            // was to reduce that work.
-                            const nowMs = Date.now();
-                            if (nowMs - lastYield >= YIELD_EVERY_MS) {
-                                lastYield = nowMs;
-                                await new Promise(r => setTimeout(r, 0));
+                            const batchMs = now() - batchStart;
+                            accumulatedMs += batchMs;
+                            // Update frame budget estimate (EMA, alpha=0.1)
+                            frameBudget = frameBudget * 0.9 + batchMs * 0.1;
+
+                            // Adjust dynamic batch size based on frame budget.
+                            // Target ~80% of frame budget to leave headroom.
+                            const targetMs = frameBudget * 0.8;
+                            if (batchMs > 0) {
+                                dynamicBatchSize = Math.max(32, Math.min(1024,
+                                    Math.round(dynamicBatchSize * targetMs / batchMs)));
+                            }
+
+                            // Only yield when accumulated time exceeds frame budget
+                            if (accumulatedMs >= frameBudget) {
+                                accumulatedMs = 0;
+                                // Pass deadline to doYield if available from requestIdleCallback
+                                await doYield();
                             }
                         }
                     } catch (err) {
@@ -2606,30 +1298,10 @@ while (true) {
                 // claims more workers than actually exist.
                 reportActualWorkers(workers.length);
 
-                // This worker's own init timer, captured in the closure.
-                //
-                // It used to be looked up as initTimeouts[i] at each use site,
-                // but that array is emptied by terminateAllWorkers() and refilled
-                // by the NEXT search. A terminated worker's event can still be
-                // queued, so a late onerror/onmessage from the old search would
-                // index into the new search's array and clear the new search's
-                // watchdog at the same position - silently disarming the
-                // "failed to initialize" alert for a worker that really is hung.
-                // The handle is per-worker, so a stale event can only ever clear
-                // its own already-cleared timer.
-                let initTimeout = null;
-                const clearOwnInitTimeout = () => {
-                    if (initTimeout !== null) {
-                        clearTimeout(initTimeout);
-                        initTimeout = null;
-                    }
-                };
-
-                initTimeout = setTimeout(() => {
+                const initTimeout = setTimeout(() => {
                     if (mining && workers.includes(w)) {
                         terminateAllWorkers();
-                        setMining(false);
-                        clearStatusText();
+                        mining = false;
                         setFormDisabled(false);
                         document.getElementById('start-btn').disabled = false;
                         document.getElementById('stop-btn').disabled = true;
@@ -2639,25 +1311,9 @@ while (true) {
                 }, 10000);
                 initTimeouts.push(initTimeout);
 
-                // A worker event is only meaningful while that worker belongs to
-                // the CURRENT search.
-                //
-                // Worker.terminate() is not synchronous with events already
-                // queued, so a worker from a finished search can still deliver
-                // onerror/onmessage after the user has stopped it and started
-                // another. Without this guard, that stale onerror ran
-                // terminateAllWorkers() against the *new* search: it killed the
-                // live workers, emptied initTimeouts and so disarmed the new
-                // search's initialization watchdogs, all while reporting an
-                // error about a worker that no longer existed. The init-timeout
-                // callback below already had this check; these two did not.
-                const isCurrent = () => workers.includes(w);
-
                 w.onerror = function(e) {
-                    if (!isCurrent()) return;      // stale worker, ignore
-                    clearOwnInitTimeout();
-                    setMining(false);
-                    clearStatusText();
+                    clearTimeout(initTimeouts[i]);
+                    mining = false;
                     setFormDisabled(false);
                     document.getElementById('start-btn').disabled = false;
                     document.getElementById('stop-btn').disabled = true;
@@ -2666,23 +1322,14 @@ while (true) {
                     terminateAllWorkers();
                 };
 
+                let summaryTimer = null;
                 w.onmessage = function(e) {
-                    if (!isCurrent()) return;      // stale worker, ignore
-                    console.log('[Main] Received message from worker ' + i + ':', e.data.type, e.data);
                 if (e.data.type === 'ready') {
-                    clearOwnInitTimeout();
-                    console.log('[Main] Sending work data to worker ' + i);
-                    w.postMessage({ prefix, suffix, matchPrefix, matchSuffix, keyType });
+                    clearTimeout(initTimeouts[i]);
+                    w.postMessage({ prefix, suffix, matchPrefix, matchSuffix });
                     return;
                 }
                 if (e.data.type === 'progress') {
-                        // The panel is live from this point on, so the transient
-                        // startup status is retired here. This is the fix for
-                        // "Starting..." outliving the startup it described: it was
-                        // written once and nothing ever cleared it, so it sat
-                        // above the figures for the entire run.
-                        clearStatusText();
-
                         const attempts = Number(e.data.attempts) || 0;
                         const rate = Number(e.data.rate) || 0;
                         const expected = Number(e.data.expectedAttempts);
@@ -2702,27 +1349,26 @@ while (true) {
                         };
                         setLive('live-attempts', attempts.toLocaleString());
                         setLive('live-rate', liveRateStr);
-                        // Trace the raw per-batch rate, not the EMA: the graph's
-                        // job is to make variance visible, and smoothing is what
-                        // the headline number is for. Smoothing the trace would
-                        // hide the droops the user is looking for.
-                        //
-                        // Wrapped because everything BELOW this line in this
-                        // handler - the progress percentage and the ETA - would
-                        // be skipped by any throw escaping it, leaving the live
-                        // figures frozen on stale values. The graph is
-                        // decoration; the figures are the product, so the
-                        // decoration must never be able to break them.
-                        try {
-                            pushRateGraphSample(rate);
-                        } catch (err) {
-                            console.warn('rate graph draw failed', err);
-                        }
 
                         const haveExpected = isFinite(expected) && expected > 0;
                         const pct = haveExpected ? attempts / expected * 100 : 0;
                         setLive('live-progress',
                             (pct > 100 ? '+' : '') + pct.toFixed(2) + '%');
+
+                        // Throttled summary for screen readers: announce the
+                        // same snapshot the grid shows, but only every 2
+                        // seconds so the aria-live region is not spammed with
+                        // digit ticks.
+                        (function updateSummary() {
+                            clearTimeout(summaryTimer);
+                            summaryTimer = setTimeout(() => {
+                                const summary = document.getElementById('live-summary-text');
+                                if (summary) {
+                                    summary.textContent = formatProgressLine(attempts, rate, expected);
+                                }
+                                summaryTimer = null;
+                            }, 2000);
+                        })();
 
                         const remaining = (haveExpected && rate > 0)
                             ? (expected - attempts) / rate
@@ -2746,23 +1392,15 @@ while (true) {
                             setEtaMessage('calculating...');
                         }
                     } else if (e.data.type === 'found') {
-                        clearOwnInitTimeout();
-                        setMining(false);
-                        // Retire the startup status on this path too. A short
-                        // search can match inside the FIRST batch (BATCH_SIZE
-                        // 256) and so deliver 'found' before any 'progress'
-                        // message ever fires - which left "Starting..." sitting
-                        // in the DOM for the whole of the next search's startup.
-                        clearStatusText();
+                        clearTimeout(initTimeouts[i]);
+                        mining = false;
                         setFormDisabled(false);
                         document.getElementById('start-btn').disabled = false;
                         document.getElementById('stop-btn').disabled = true;
                         document.getElementById('progress').classList.add('hidden');
                         addKeyToHistory({
-                            keyType: e.data.keyType,
                             publicKey: e.data.publicKey,
                             privateKey: e.data.privateKey,
-                            nodeId: e.data.nodeId,
                             attempts: e.data.attempts,
                             elapsed: e.data.elapsed,
                             pattern: currentPatternDesc(),
@@ -2770,12 +1408,8 @@ while (true) {
                         });
                         terminateAllWorkers();
                     } else if (e.data.type === 'error') {
-                        clearOwnInitTimeout();
-                        setMining(false);
-                        // Same reasoning as 'found': an error can arrive with no
-                        // 'progress' before it, so the startup status has to be
-                        // retired here too.
-                        clearStatusText();
+                        clearTimeout(initTimeouts[i]);
+                        mining = false;
                         setFormDisabled(false);
                         document.getElementById('start-btn').disabled = false;
                         document.getElementById('stop-btn').disabled = true;
@@ -2786,7 +1420,7 @@ while (true) {
                 };
             }
 
-            setMining(true);
+            mining = true;
             setFormDisabled(true);
             document.getElementById('start-btn').disabled = true;
             document.getElementById('stop-btn').disabled = false;
@@ -2807,261 +1441,6 @@ while (true) {
             if (!isFinite(r) || r < 0) return emaRate;
             emaRate = emaRate === null ? r : (EMA_ALPHA * r + (1 - EMA_ALPHA) * emaRate);
             return emaRate;
-        }
-
-        // ---- Rate-over-time graph --------------------------------------------
-        // A trace of keys/s over the life of the current search, painted as a
-        // backdrop behind the ETA digits. It answers a question the other
-        // figures cannot: not "how fast are we now" (the Rate cell says that)
-        // but "has the rate been steady, or is it collapsing?". A browser
-        // throttling a background tab, a thermal dip or a GC pause all show up
-        // as a visible droop in the line.
-        //
-        // Drawn on a <canvas> rather than as SVG/DOM nodes because it is
-        // repainted on every progress event (several times a second). A polyline
-        // of N DOM elements would thrash layout for no benefit; one canvas
-        // clear+stroke is a single cheap op.
-        //
-        // The vertical scale is fitted to the data rather than pinned to a
-        // nominal rate, so a slow machine still gets a full-height trace. The
-        // axis is NOT zero-based: a zero baseline would flatten every real
-        // variation into a straight line, which is the opposite of what the
-        // graph is for. The min/max are padded so the trace never touches the
-        // top or bottom edge.
-        const RATE_GRAPH_POINTS = 90;    // samples drawn across the canvas
-        const RATE_GRAPH_PAD = 0.12;     // fraction of range left headroom
-        const RATE_GRAPH_WINDOW_MS = 120000;  // 2 min of history on screen
-        // Weight given to the newest sample when smoothing the trace. See
-        // pushRateGraphSample().
-        const RATE_GRAPH_SMOOTH = 0.5;
-        // A sample is kept until there are more of them than the canvas can
-        // show; past that they are halved in place, and each sample carries the
-        // timestamp of the moment it was taken so the on-screen span stays a
-        // fixed WINDOW OF TIME rather than a fixed number of samples.
-        let rateGraph = [];
-
-        function resetRateGraph() {
-            rateGraph = [];
-            const canvas = document.getElementById('rate-graph');
-            if (canvas) drawRateGraph();
-        }
-
-        // Append one sample and redraw.
-        //
-        // The window is fixed in TIME, not in sample count, which is what keeps
-        // the recent behaviour readable. Reports are throttled per worker
-        // (REPORT_EVERY_MS) and the worker count varies, so "the last N
-        // samples" is not a fixed span: an earlier version halved the buffer
-        // whenever it filled, and after a few halvings the trace spanned the
-        // entire run - which stretched the first samples so far apart that the
-        // recent variation this graph exists to show flattened into a straight
-        // line. Timestamps let the old samples fall off the left edge instead.
-        // Halve a buffer down to at most `cap` samples, keeping the NEWER of each
-        // adjacent pair.
-        //
-        // Extracted from pushRateGraphSample() so the pairing rule can be tested
-        // on explicit values. Testing it through the sampler no longer works:
-        // samples are smoothed on the way in, which turns any alternating input
-        // into a converging average and makes index parity unobservable - the
-        // exact property this function exists to guarantee.
-        function decimateSamples(list, cap) {
-            let out = list;
-            while (out.length > cap) {
-                const kept = [];
-                for (let i = 1; i < out.length; i += 2) {
-                    kept.push(out[i]);
-                }
-                // Halving an odd length cannot land on the final element, so
-                // re-append the true newest sample and keep the newest.
-                const newest = out[out.length - 1];
-                if (kept[kept.length - 1] !== newest) kept.push(newest);
-                out = kept;
-            }
-            return out;
-        }
-
-        function pushRateGraphSample(rate) {
-            const r = Number(rate);
-            if (!isFinite(r) || r < 0) return;
-
-            const now = Date.now();
-            // Smooth the TRACE, not the headline number.
-            //
-            // Each sample is one worker's rate over the interval since it last
-            // reported, so consecutive samples legitimately differ by a lot -
-            // different workers, different batch boundaries. Drawn raw, those
-            // differences read as violent spikes and the line became unreadable
-            // noise. An exponential average over the samples keeps the shape the
-            // graph exists to show (is the rate steady or collapsing?) while
-            // removing the per-worker jitter.
-            //
-            // alpha is deliberately high (0.5): this is display smoothing for
-            // legibility, not the slow easing used for the headline figure, and
-            // it must still react within a sample or two of a real change.
-            // The first sample is taken as-is so the line starts at the true
-            // rate instead of easing up from zero.
-            let v = r;
-            if (rateGraph.length > 0) {
-                const prev = rateGraph[rateGraph.length - 1].v;
-                if (isFinite(prev)) v = RATE_GRAPH_SMOOTH * r + (1 - RATE_GRAPH_SMOOTH) * prev;
-            }
-            rateGraph.push({ t: now, v: v });
-
-            // Drop samples older than the window.
-            const cutoff = now - RATE_GRAPH_WINDOW_MS;
-            let drop = 0;
-            while (drop < rateGraph.length - 1 && rateGraph[drop].t < cutoff) drop++;
-            if (drop > 0) rateGraph = rateGraph.slice(drop);
-
-            // Still too many to resolve: halve, keeping the NEWER of each adjacent pair.
-            rateGraph = decimateSamples(rateGraph, RATE_GRAPH_POINTS);
-
-            drawRateGraph();
-        }
-
-        // Canvas box size, cached.
-        //
-        // Reading clientWidth/clientHeight forces a synchronous layout. Doing
-        // that on every progress event meant each report paid for a full
-        // reflow of the panel, on the same main thread that the mining workers
-        // are competing with for CPU. The box only changes when the window or
-        // the panel resizes, so it is cached and refreshed from a ResizeObserver
-        // instead of being re-measured per frame.
-        let rateGraphBox = null;
-        function measureRateGraphBox() {
-            const canvas = document.getElementById('rate-graph');
-            if (!canvas) return null;
-            const w = canvas.clientWidth;
-            const h = canvas.clientHeight;
-            if (!w || !h) return null;
-            const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
-            rateGraphBox = { w: w, h: h, dpr: dpr };
-            return rateGraphBox;
-        }
-        // Guarded because this runs while the script is being evaluated: if the
-        // element is not parsed yet there is nothing to observe, and observe(null)
-        // throws. The window resize listener below still covers that case.
-        const rateGraphCanvas = document.getElementById('rate-graph');
-        if (typeof ResizeObserver === 'function' && rateGraphCanvas) {
-            new ResizeObserver(() => {
-                rateGraphBox = null;
-                drawRateGraph();
-            }).observe(rateGraphCanvas);
-        }
-        window.addEventListener('resize', () => {
-            rateGraphBox = null;
-            drawRateGraph();
-        });
-
-        function drawRateGraph() {
-            const canvas = document.getElementById('rate-graph');
-            if (!canvas) return;
-            const ctx = typeof canvas.getContext === 'function'
-                ? canvas.getContext('2d') : null;
-            // A 2d context is unavailable in some environments (and in the
-            // Node test harness). The graph is decoration; never let it throw
-            // into the progress handler and stall the live figures.
-            if (!ctx) return;
-
-            // Reuse the cached box; only measure when we have none. This is the
-            // difference between one forced layout per resize and one per draw.
-            const box = rateGraphBox || measureRateGraphBox();
-            if (!box) return;   // not laid out yet; nothing to draw into
-            const dpr = box.dpr;
-            const w = box.w;
-            const h = box.h;
-
-            // Match the backing store to the CSS box, accounting for devicePixel
-            // ratio. Without the DPR scaling the line is drawn at CSS-pixel
-            // size into a device-pixel canvas and comes out half-size/blurry on
-            // any HiDPI display. w/h/dpr now come from the cached box above
-            // rather than from a fresh layout-forcing read.
-            const pw = Math.round(w * dpr);
-            const ph = Math.round(h * dpr);
-            if (canvas.width !== pw || canvas.height !== ph) {
-                canvas.width = pw;
-                canvas.height = ph;
-            }
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-            ctx.clearRect(0, 0, w, h);
-
-            if (rateGraph.length < 2) return;   // a single point is not a trend
-
-            // Fit to the observed range with padding. Guard the degenerate
-            // flat-line case: a range of 0 would divide by zero and produce NaN
-            // coordinates, which silently draw nothing.
-            let min = Infinity, max = -Infinity;
-            for (const s of rateGraph) {
-                if (s.v < min) min = s.v;
-                if (s.v > max) max = s.v;
-            }
-            if (!isFinite(min) || !isFinite(max)) return;
-            let span = max - min;
-            if (span <= 0) {
-                // Flat: centre a straight line rather than dividing by zero.
-                // At a flat rate of 0 the multiplicative nudge below is also a
-                // no-op, so the range is pinned to a sane absolute floor.
-                min = span === 0 ? min : min * 0.98;
-                span = (max - min) || 1;
-            }
-            const pad = span * RATE_GRAPH_PAD;
-            const lo = min - pad;
-            const hi = max + pad;
-            const range = (hi - lo) || 1;
-
-            // X is real elapsed time across the window, so the trace's shape
-            // reflects how the rate actually moved over the period shown.
-            //
-            // The fallback matters more than it looks. Every sample in a burst
-            // can share one millisecond - reports are throttled per worker
-            // (REPORT_EVERY_MS) so several workers tick together, and a short
-            // search can post its only two samples in the same millisecond.
-            // tSpan is then 0, and a naive "avoid divide-by-zero" fallback that
-            // pinned every point to the right edge collapsed the whole trace
-            // into a single vertical line: present, correctly sized, and
-            // completely useless. Sampling by index instead still draws a
-            // readable trend, which is the honest reading when there is no
-            // time information to spread across.
-            const tNewest = rateGraph[rateGraph.length - 1].t;
-            const tOldest = rateGraph[0].t;
-            const tSpan = tNewest - tOldest;
-            const xAt = tSpan > 0
-                ? (s) => ((s.t - tOldest) / tSpan) * w
-                : (s, i) => (i / (rateGraph.length - 1)) * w;
-            const yAt = (v) => h - ((v - lo) / range) * h;
-
-            // Filled area under the trace first, so the stroke reads as an edge
-            // on top of a soft mass rather than a bare line.
-            ctx.beginPath();
-            ctx.moveTo(0, h);
-            for (let i = 0; i < rateGraph.length; i++) {
-                ctx.lineTo(xAt(rateGraph[i], i), yAt(rateGraph[i].v));
-            }
-            ctx.lineTo(w, h);
-            ctx.closePath();
-            ctx.fillStyle = 'rgba(63, 185, 80, 0.16)';
-            ctx.fill();
-
-            ctx.beginPath();
-            for (let i = 0; i < rateGraph.length; i++) {
-                const s = rateGraph[i];
-                const x = xAt(s, i);
-                const y = yAt(s.v);
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            }
-            ctx.strokeStyle = 'rgba(126, 247, 160, 0.85)';
-            ctx.lineWidth = 1.5;
-            ctx.lineJoin = 'round';
-            ctx.stroke();
-
-            // A dot on the newest sample, so "now" is identifiable on the trace.
-            const newestIndex = rateGraph.length - 1;
-            const newest = rateGraph[newestIndex];
-            ctx.beginPath();
-            ctx.arc(xAt(newest, newestIndex), yAt(newest.v), 2, 0, Math.PI * 2);
-            ctx.fillStyle = '#7ef7a0';
-            ctx.fill();
         }
 
         // ---- ETA smoothing ----------------------------------------------------
@@ -3105,7 +1484,7 @@ while (true) {
         function stopMining() {
             terminateAllWorkers();
             starting = false;
-            setMining(false);
+            mining = false;
             setFormDisabled(false);
             document.getElementById('start-btn').disabled = false;
             document.getElementById('stop-btn').disabled = true;
@@ -3114,16 +1493,6 @@ while (true) {
             window.liveEstimateShown = false;
             resetRateSmoothing();
             resetEtaSmoothing();
-            // The trace belongs to the run that just ended. Leaving it would show
-            // the stopped run's history if the panel were ever reopened before a
-            // new resetRateGraph() runs.
-            resetRateGraph();
-            // Refresh the pre-flight line on the way out too. It is static for
-            // the duration of a search, so the only thing that can have changed
-            // is the calibration behind it - and re-deriving it here means the
-            // label cannot be left reading "estimated" after the page has
-            // measured this machine.
-            clearStatusText();
             updateEstimate();
         }
 
@@ -3169,9 +1538,6 @@ while (true) {
             document.getElementById('suffix').value = '';
             document.getElementById('estimate').textContent = '';
             window.liveEstimateShown = false;
-            // Retire the status before hiding the panel, or its text is still in
-            // the DOM next time the panel opens.
-            clearStatusText();
             document.getElementById('progress').classList.add('hidden');
             starting = false;
             // Clearing the boxes must retire the notice. Goes through the same
@@ -3423,26 +1789,58 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
             return obfKeyPromise;
         }
 
-        // Returns the obfuscated payload, or null when no key could be derived.
-        // It deliberately does NOT fall back to returning the plaintext: a
-        // silently-degraded path here would write saved private keys to
-        // localStorage in the clear whenever IndexedDB or WebCrypto is
-        // unavailable, which is exactly the exposure this scheme exists to
-        // prevent. Refusing to write is the safe failure.
+        // Returns the encrypted payload (AES-256-GCM), or null when no key
+        // could be derived. Does NOT fall back to plaintext: writing private
+        // keys in the clear would defeat the scheme. The ciphertext format:
+        //   byte 0: version (0x01 = AES-GCM, 0xef = legacy XOR)
+        //   bytes 1-12: 12-byte nonce (random per entry)
+        //   bytes 13-44: 32-byte HKDF salt (random per entry)
+        //   bytes 45+: ciphertext || auth tag (AES-GCM output)
+        // Legacy XOR entries (0xef) are still decrypted for backward compat.
         async function encryptHistoryData(plainText) {
             try {
                 const keys = await getObfuscationKeys();
                 if (!keys || !keys.length) return null;
+                const subtle = (typeof crypto !== 'undefined' && crypto.subtle) || null;
+                if (!subtle || !subtle.encrypt) return null;
+
+                // Derive AES-256 key from first candidate (HKDF-SHA256 with per-entry random salt)
+                const keyHex = keys[0];
+                const keyMaterial = new Uint8Array(keyHex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+                const baseKey = await subtle.importKey(
+                    'raw', keyMaterial, { name: 'HKDF' }, false, ['deriveKey']
+                );
+                // Single RNG call for salt (32) + nonce (12) = 44 bytes
+                const saltNonce = new Uint8Array(44);
+                (typeof crypto !== 'undefined' && crypto.getRandomValues ? crypto : window.crypto).getRandomValues(saltNonce);
+                const salt = saltNonce.subarray(0, 32);
+                const nonce = saltNonce.subarray(32, 44);
+                const aesKey = await subtle.deriveKey(
+                    { name: 'HKDF', hash: 'SHA-256', salt, info: new TextEncoder().encode('meshcore-vanity-history-v1') },
+                    baseKey,
+                    { name: 'AES-GCM', length: 256 },
+                    false,
+                    ['encrypt']
+                );
+
                 const textBytes = new TextEncoder().encode(plainText);
-                const keyBytes = new Uint8Array(keys[0].match(/.{1,2}/g).map(b => parseInt(b, 16)));
-                const xored = new Uint8Array(textBytes.length);
-                for (let i = 0; i < textBytes.length; i++) {
-                    xored[i] = textBytes[i] ^ keyBytes[i % keyBytes.length];
+                const ciphertext = await subtle.encrypt(
+                    { name: 'AES-GCM', iv: nonce },
+                    aesKey,
+                    textBytes
+                );
+
+                const combined = new Uint8Array(1 + 12 + 32 + ciphertext.byteLength);
+                combined[0] = 0x01; // AES-GCM version marker
+                combined.set(nonce, 1);
+                combined.set(salt, 13);
+                combined.set(new Uint8Array(ciphertext), 45);
+                // Chunked base64 to avoid call stack limits on large arrays
+                let b64 = '';
+                for (let i = 0; i < combined.length; i += 0x8000) {
+                    b64 += String.fromCharCode.apply(null, combined.subarray(i, i + 0x8000));
                 }
-                const combined = new Uint8Array(1 + xored.length);
-                combined[0] = 0xef; // Obfuscation marker
-                combined.set(xored, 1);
-                return btoa(String.fromCharCode.apply(null, combined));
+                return btoa(b64);
             } catch (e) {
                 return null;
             }
@@ -3454,42 +1852,77 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 if (base64Data.trim().startsWith('[')) return base64Data; // legacy plaintext JSON
                 const keys = await getObfuscationKeys();
                 if (!keys || !keys.length) return base64Data;
+                const subtle = (typeof crypto !== 'undefined' && crypto.subtle) || null;
+                if (!subtle || !subtle.decrypt) return base64Data;
+
                 const binary = atob(base64Data);
                 const bytes = new Uint8Array(binary.length);
                 for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-                if (bytes.length < 2 || bytes[0] !== 0xef) return base64Data;
-                const xored = bytes.slice(1);
+                if (bytes.length < 2) return base64Data;
 
-                // Try every candidate key and accept the first that yields
-                // parseable JSON. XOR with the wrong key produces bytes that
-                // essentially never form valid JSON, so this is a reliable
-                // test - and it is what lets history written by an earlier
-                // scheme, or under a since-lost secret, still be recovered.
-                let fallback = null;
-                for (const keyHex of keys) {
-                    const keyBytes = new Uint8Array(
-                        keyHex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
-                    const textBytes = new Uint8Array(xored.length);
-                    for (let i = 0; i < xored.length; i++) {
-                        textBytes[i] = xored[i] ^ keyBytes[i % keyBytes.length];
+                const version = bytes[0];
+                if (version === 0x01) {
+                    // AES-GCM format: version(1) + nonce(12) + salt(32) + ciphertext+tag
+                    if (bytes.length < 46) return base64Data;
+                    const nonce = bytes.slice(1, 13);
+                    const salt = bytes.slice(13, 45);
+                    const ciphertext = bytes.slice(45);
+
+                    // Derive AES key from each candidate key until one works
+                    for (const keyHex of keys) {
+                        try {
+                            const keyMaterial = new Uint8Array(keyHex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+                            const baseKey = await subtle.importKey(
+                                'raw', keyMaterial, { name: 'HKDF' }, false, ['deriveKey']
+                            );
+                            const aesKey = await subtle.deriveKey(
+                                { name: 'HKDF', hash: 'SHA-256', salt, info: new TextEncoder().encode('meshcore-vanity-history-v1') },
+                                baseKey,
+                                { name: 'AES-GCM', length: 256 },
+                                false,
+                                ['decrypt']
+                            );
+                            const plaintext = await subtle.decrypt(
+                                { name: 'AES-GCM', iv: nonce },
+                                aesKey,
+                                ciphertext
+                            );
+                            const text = new TextDecoder('utf-8', { fatal: true }).decode(plaintext);
+                            const parsed = JSON.parse(text);
+                            if (Array.isArray(parsed)) return text;
+                        } catch (e) {
+                            // Wrong key or tampered data - try next candidate
+                            continue;
+                        }
                     }
-                    let text;
-                    try {
-                        text = new TextDecoder('utf-8', { fatal: true })
-                            .decode(textBytes);
-                    } catch (e) {
-                        continue;   // not even valid UTF-8: wrong key
+                    return base64Data; // no key worked
+                } else if (version === 0xef) {
+                    // Legacy XOR format: version(1) + xored payload
+                    const xored = bytes.slice(1);
+                    let fallback = null;
+                    for (const keyHex of keys) {
+                        const keyBytes = new Uint8Array(
+                            keyHex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+                        const textBytes = new Uint8Array(xored.length);
+                        for (let i = 0; i < xored.length; i++) {
+                            textBytes[i] = xored[i] ^ keyBytes[i % keyBytes.length];
+                        }
+                        let text;
+                        try {
+                            text = new TextDecoder('utf-8', { fatal: true })
+                                .decode(textBytes);
+                        } catch (e) {
+                            continue;
+                        }
+                        if (fallback === null) fallback = text;
+                        try {
+                            const parsed = JSON.parse(text);
+                            if (Array.isArray(parsed)) return text;
+                        } catch (e) { /* keep trying */ }
                     }
-                    if (fallback === null) fallback = text;
-                    try {
-                        const parsed = JSON.parse(text);
-                        if (Array.isArray(parsed)) return text;
-                    } catch (e) {
-                        // Right key is unlikely to produce invalid JSON, but
-                        // keep trying the remaining candidates regardless.
-                    }
+                    return fallback === null ? base64Data : fallback;
                 }
-                return fallback === null ? base64Data : fallback;
+                return base64Data; // unknown version
             } catch (e) {
                 return base64Data;
             }
@@ -3540,35 +1973,15 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                     return;
                 }
                 if (!Array.isArray(parsed)) return;
-                // Validate each entry against ITS OWN key type, not a fixed 64
-                // hex digits. This filter used to be a single 64-digit regex,
-                // which was correct when every entry was an Ed25519 pair and is
-                // wrong now that a PSK (64) and a node ID (8) can be saved
-                // alongside one: it would silently DISCARD every node ID the
-                // user had mined, with no error, the next time they loaded the
-                // page. Silent data loss on load is the worst outcome available
-                // here, so the length follows the entry.
-                //
-                // An entry with no recorded keyType predates the selector, so it
-                // is a device key - which is what every entry written before it
-                // existed actually was.
-                savedKeys = parsed.filter(e => {
-                    if (!e || typeof e !== 'object') return false;
-                    if (e.keyType !== undefined && !KEY_TYPES[e.keyType]) return false;
-                    const cfg = getKeyTypeConfig(e.keyType);
-                    const hex = new RegExp('^[0-9a-fA-F]{' + cfg.keyLen * 2 + '}$');
-                    return hex.test(e.publicKey || '') && hex.test(e.privateKey || '');
-                }).slice(0, MAX_SAVED_KEYS);
+                const hex64 = /^[0-9a-fA-F]{64}$/;
+                savedKeys = parsed.filter(e => e
+                    && typeof e === 'object'
+                    && hex64.test(e.publicKey || '')
+                    && hex64.test(e.privateKey || '')).slice(0, MAX_SAVED_KEYS);
                 for (const e of savedKeys) {
                     // Backfill sequence numbers for entries predating them.
                     if (typeof e.n !== 'number' || isNaN(e.n)) e.n = nextKeyNum++;
                     else if (e.n >= nextKeyNum) nextKeyNum = e.n + 1;
-                    // Normalise the key type so every consumer downstream can
-                    // rely on it being present, rather than each one re-deriving
-                    // "absent means device key" for itself.
-                    e.keyType = getKeyTypeConfig(e.keyType) === KEY_TYPES.x25519
-                        ? 'x25519'
-                        : getKeyTypeConfig(e.keyType) === KEY_TYPES.psk ? 'psk' : 'ed25519';
                 }
             } catch (e) {
                 savedKeys = [];  // corrupt/quota-blocked storage: start fresh
@@ -3658,32 +2071,11 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
         }
 
         function addKeyToHistory(entry) {
-            // Validate the hex against the LENGTH OF THE KEY TYPE, not a fixed
-            // 64. This used to hard-code 64 because every entry was an Ed25519
-            // keypair; a node ID is 8 hex digits and a PSK is 64, so one
-            // hard-coded test would either reject valid node IDs or let an
-            // 8-digit node ID through a 64-digit field. The check is now
-            // per-type, and an unknown type is rejected rather than assumed.
-            //
-            // An entry with no recorded keyType is a legacy Ed25519 pair from a
-            // saved history, so it is read as a device key - that is what every
-            // entry written before the selector existed actually was.
-            const cfg = getKeyTypeConfig(entry && entry.keyType);
-            if (!entry || entry.keyType !== undefined && !KEY_TYPES[entry.keyType]) {
-                console.warn('Unknown key type rejected:', entry);
-                return;
-            }
-            const hex = new RegExp('^[0-9a-fA-F]{' + cfg.keyLen * 2 + '}$');
-            if (!hex.test(entry.publicKey || '') || !hex.test(entry.privateKey || '')) {
+            const hex64 = /^[0-9a-fA-F]{64}$/;
+            if (!entry || !hex64.test(entry.publicKey || '') || !hex64.test(entry.privateKey || '')) {
                 console.warn('Invalid key entry rejected:', entry);
                 return;
             }
-            // Normalise so downstream code, export and encryption can rely on
-            // one spelling even if a worker ever changes case.
-            entry.keyType = cfg === KEY_TYPES.ed25519 ? 'ed25519'
-                : cfg === KEY_TYPES.psk ? 'psk' : 'x25519';
-            entry.publicKey = entry.publicKey.toLowerCase();
-            entry.privateKey = entry.privateKey.toLowerCase();
             entry.n = nextKeyNum++;
             savedKeys.push(entry);
             if (savedKeys.length > MAX_SAVED_KEYS) savedKeys.shift();
@@ -3729,26 +2121,23 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
         function doExportHistory(format) {
             if (!savedKeys.length) return;
             if (format === 'csv') {
-                const header = ['n', 'keyType', 'publicKey', 'privateKey', 'nodeId', 'attempts', 'elapsed', 'pattern', 'minedAt'];
+                const header = ['n', 'publicKey', 'privateKey', 'attempts', 'elapsed', 'pattern', 'minedAt'];
                 const lines = [header.map(csvCell).join(',')];
                 for (const e of savedKeys) {
                     lines.push(header.map(h => csvCell(e[h])).join(','));
                 }
-                downloadFile('mesh-vanity-keys.csv', 'text/csv', lines.join('\n'));
+                downloadFile('meshcore-vanity-keys.csv', 'text/csv', lines.join('\n'));
             } else {
-                downloadFile('mesh-vanity-keys.json', 'application/json',
+                downloadFile('meshcore-vanity-keys.json', 'application/json',
                     JSON.stringify(savedKeys, null, 2));
             }
         }
 
         function exportHistoryInWorker(format) {
-            // Show progress indicator. Goes through setStatusText() rather than
-            // writing textContent directly: that is what keeps `hidden` in sync,
-            // and it means the completion paths below can retire the line with
-            // clearStatusText() instead of leaving "Preparing export..." in the
-            // DOM to reappear over the next mining run.
+            // Show progress indicator
+            const progressEl = document.getElementById('progress-text');
             const progressDiv = document.getElementById('progress');
-            setStatusText('Preparing export...');
+            progressEl.textContent = 'Preparing export...';
             progressDiv.classList.remove('hidden');
 
             const workerCode = `
@@ -3756,19 +2145,15 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                     const { keys, format } = e.data;
                     const csvCell = (v) => '"' + String(v === undefined || v === null ? '' : v).replace(/"/g, '""') + '"';
                     if (format === 'csv') {
-                        // keyType is exported so a mixed history (device keys,
-                        // channel PSKs and node IDs in one file) stays
-                        // self-describing: without the column a reader cannot
-                        // tell an 8-digit node ID from a truncated key.
-                        const header = ['n', 'keyType', 'publicKey', 'privateKey', 'nodeId', 'attempts', 'elapsed', 'pattern', 'minedAt'];
+                        const header = ['n', 'publicKey', 'privateKey', 'attempts', 'elapsed', 'pattern', 'minedAt'];
                         const lines = [header.map(csvCell).join(',')];
                         for (const e of keys) {
                             lines.push(header.map(h => csvCell(e[h])).join(','));
                         }
-                        self.postMessage({ type: 'done', data: lines.join('\\n'), mime: 'text/csv', filename: 'mesh-vanity-keys.csv' });
+                        self.postMessage({ type: 'done', data: lines.join('\\n'), mime: 'text/csv', filename: 'meshcore-vanity-keys.csv' });
                     } else {
                         const json = JSON.stringify(keys, null, 2);
-                        self.postMessage({ type: 'done', data: json, mime: 'application/json', filename: 'mesh-vanity-keys.json' });
+                        self.postMessage({ type: 'done', data: json, mime: 'application/json', filename: 'meshcore-vanity-keys.json' });
                     }
                 };
             `;
@@ -3776,40 +2161,19 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
             const url = URL.createObjectURL(blob);
             const worker = new Worker(url);
 
-            // The live panel is SHARED between mining and export - there is one
-            // #progress element. If the user starts a search while an export is
-            // in flight, mining owns that panel, so this export must not clear
-            // its status or hide it: doing so made the live figures vanish
-            // mid-search, the same stale-callback class of bug the mining
-            // workers are guarded against. Tearing down the export's own worker
-            // and blob URL is still this function's job either way.
-            //
-            // `starting` counts as owning it too, not just `mining`.
-            // startMining() shows the panel and sets its status BEFORE it
-            // awaits libsodium, and `mining` only becomes true after that
-            // await resolves and the workers are created. Testing `mining`
-            // alone therefore left a window in which an export completing
-            // during startup would hide the panel the search had just opened -
-            // and the live figures would then render into a hidden element.
-            const releasePanel = () => {
-                if (mining || starting) return;   // a search owns the panel now
-                clearStatusText();
-                document.getElementById('progress').classList.add('hidden');
-            };
-
             worker.onmessage = function(e) {
                 if (e.data.type === 'done') {
                     downloadFile(e.data.filename, e.data.mime, e.data.data);
                     URL.revokeObjectURL(url);
                     worker.terminate();
-                    releasePanel();
+                    document.getElementById('progress').classList.add('hidden');
                 }
             };
             worker.onerror = function(e) {
                 alert('Export failed: ' + e.message);
+                document.getElementById('progress').classList.add('hidden');
                 worker.terminate();
                 URL.revokeObjectURL(url);
-                releasePanel();
             };
             worker.postMessage({ keys: savedKeys, format });
         }
@@ -3861,23 +2225,10 @@ const LEGACY_OBFUSCATION_KEY_STORAGE = 'meshcoreVanityObfKey';
                 frame.className = 'result-frame';
                 const h2 = document.createElement('h2');
                 const keyNum = (typeof entry.n === 'number' && !isNaN(entry.n)) ? entry.n : (index + 1);
-                const entryCfg = getKeyTypeConfig(entry.keyType);
-                // Heading: "Key N Found!" for a device key, which is the common
-                // case and what the page has always said. The other two name
-                // themselves, because a mixed history otherwise shows an 8-digit
-                // node ID and a 64-digit PSK under identical headings and the
-                // reader has no way to tell them apart.
-                h2.textContent = entryCfg.name === KEY_TYPES.ed25519.name
-                    ? 'Key ' + keyNum + ' Found!'
-                    : entryCfg.name + ' ' + keyNum + ' Found!';
+                h2.textContent = 'Key ' + keyNum + ' Found!';
                 frame.appendChild(h2);
-                const [valueLabel, secretLabel] = entryCfg.resultLabels;
-                frame.appendChild(makeKeyField(valueLabel, entry.publicKey, index, 'publicKey'));
-                frame.appendChild(makeKeyField(secretLabel, entry.privateKey, index, 'privateKey'));
-                // For x25519, also show the derived node ID (!xxxxxxxx)
-                if (entry.keyType === 'x25519' && entry.nodeId) {
-                    frame.appendChild(makeKeyField('Node ID', entry.nodeId, index, 'nodeId'));
-                }
+                frame.appendChild(makeKeyField('Public Key (hex)', entry.publicKey, index, 'publicKey'));
+                frame.appendChild(makeKeyField('Private Key (hex)', entry.privateKey, index, 'privateKey'));
                 const stats = document.createElement('p');
                 stats.className = 'result-stats';
                 const attempts = Number(entry.attempts) || 0;

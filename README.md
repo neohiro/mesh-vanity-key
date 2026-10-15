@@ -1,299 +1,42 @@
-# mesh-vanity-key
+# meshcore-vanity-key
 
-A fast vanity key generator for mesh networks: MeshCore device keys,
-Meshtastic channel PSKs and `!node` IDs, and any other encoded public key you
-need to match against a pattern.
+A fast, MeshCore-compatible Ed25519 vanity public-key generator. Ships in two forms:
 
-**[Try it in your browser →](https://neohiro.github.io/mesh-vanity-key/)**
-No install, no build step, works offline once loaded.
+- **`meshcore_vanity.py`** — a Python CLI with bech32/base58/base64 support and parallel multiprocessing.
+- **`index.html`** — a zero-install browser app (PWA) that mines with Web Workers + libsodium WASM.
 
-Ships in two forms:
-
-- **[Browser app](https://neohiro.github.io/mesh-vanity-key/)** — a
-  zero-install PWA that mines with Web Workers + libsodium WASM.
-- **Python CLI** — bech32/base58/base64 output and parallel multiprocessing.
-
-```bash
-./run.sh abcd          # Linux/macOS  — installs PyNaCl on first run
-run.bat abcd           # Windows
-```
-
-That is the whole install. Anything after the pattern goes straight through to
-the CLI, so `./run.sh mc1q --encoding bech32 --workers 8` works too. See
-[Running it](#running-it) for the flags.
-
-Inspired by and credited to [MeshCore](https://meshcore.io/) — a decentralized
-mesh networking project. This tool generates Ed25519 keypairs whose encoded
-public keys match a user-defined pattern, suitable for use with MeshCore
-devices and related tooling.
+Inspired by and credited to [MeshCore](https://meshcore.io/) — a decentralized mesh networking project. This tool generates Ed25519 keypairs whose encoded public keys match a user-defined pattern, suitable for use with MeshCore devices and related tooling.
 
 ---
 
 ## What It Does
 
-Generates cryptographic keypairs until the encoded public key matches a target
-pattern (prefix, suffix, or both). The search is optimized with a scalar-walk
-algorithm that avoids repeated hashing, making it significantly faster than
-naive approaches.
-
-### Key types (browser app only)
-
-The three-way selector picks **which value is being mined**. These are three
-different kinds of value, not three hashes over one key — only the first derives
-anything:
-
-| Key type | Value mined | Width | Derivation | Relative cost |
-|---|---|---|---|---|
-| **Device Key** | MeshCore / Meshtastic Ed25519 public key | 32 bytes (64 hex) | seed → Ed25519 public key | baseline |
-| **Channel PSK** | Meshtastic 256-bit channel pre-shared key | 32 bytes (64 hex) | none — the candidate *is* the secret | ~400× faster |
-| **Node ID** | Meshtastic 32-bit node ID (`!xxxxxxxx`) | 4 bytes (8 hex) | none — the candidate *is* the ID | ~400× faster |
-
-The distinction is load-bearing rather than cosmetic:
-
-- **A channel PSK is not a digest.** MeshCore and Meshtastic treat it as an
-  opaque 256-bit shared secret, so there is nothing to hash — searching it means
-  walking a counter and comparing nibbles. An implementation that "SHA-256'd a
-  seed" would return a value neither tool accepts.
-- **A node ID is 32 bits, not 64 hex digits.** Its whole space is 2³², so the
-  pattern limit tightens to 8 hex digits and the counter is sized to 4 bytes. A
-  32-byte counter matched only on its leading 4 bytes would advance that leading
-  byte once every 2²⁴ iterations.
-- **The 00/FF reserved-prefix notice applies only to a Device Key.** It is a
-  MeshCore rule about device keys; in a PSK or a node ID those bytes are
-  ordinary.
-
-Because only the Device Key derives anything, the pre-flight estimate is scaled
-by a per-type throughput factor. Without it the same pattern would be quoted
-with the same time estimate for all three types — wrong by orders of magnitude
-for the two fast ones. The factor is deliberately conservative (below measured),
-because understating the rate only makes a search look slower than it is.
-
-> The Python CLI is unchanged and remains Ed25519-only: it derives keypairs, so
-> it has no PSK or node-ID mode to offer. The selector is browser-only.
-
-
-## Vanity & Functional Keypair Mining
-
-<p align="center">
-  <img alt="mining" src="https://img.shields.io/badge/mining-Ed25519%20prefix%20%2B%20suffix-7c4dff">
-  <img alt="meshtastic" src="https://img.shields.io/badge/Meshtastic-PSK%20%2B%20node%20ID-00b0d9">
-  <img alt="offline" src="https://img.shields.io/badge/mining-100%25%20in--browser-2ea043">
-</p>
-
-A node's identity is bytes out of a random number generator, and nothing about
-them is designed. `a3f1…c902` is as arbitrary as a Wi-Fi MAC address, and it has
-to be read off a QR code, dictated over a radio, or pasted into a phone by someone
-who cannot see the screen. Mining is the one case where brute force is the right
-answer: you pay for the search once, and every later contact with the node is
-cheaper. **[mesh-vanity-key](https://neohiro.github.io/mesh-vanity-key/)**
-is what this repository is, running entirely in the browser — Web Workers plus
-libsodium WASM, no network round-trip, no telemetry, and it still works offline
-once the page is loaded.
-
-### Vanity and functional are two different goals
-
-| | Vanity | Functional |
-|---|---|---|
-| **Why** | the identity reads well and is memorable | the identity is *checkable* by a human under bad conditions |
-| **Typical target** | `mc1qneohiro…`, `!a1b2c3…` | a prefix **and** a suffix, so a half-transcribed key fails loudly |
-| **Cost** | `16ⁿ` attempts for `n` hex characters — 4 is instant, 6 is minutes | that, squared: each constrained end multiplies rather than adds |
-| **Classic mistake** | asking for 9+ characters. That is a lottery ticket, not a mnemonic | mining a *reserved* prefix and then wondering why the client refuses the key |
-
-Same code path, same flags. The distinction only matters when deciding what to ask
-for — and in both cases the pattern is matched against the **encoded public key**,
-never the private one, which never leaves your machine.
-
-### Meshtastic prefix and suffix mining
-
-Meshtastic has two unrelated things people both call "the key", and they are mined
-by two unrelated means. Conflating them is the usual first mistake.
-
-**Channel PSK — symmetric, minable directly.** A channel is a name plus a
-pre-shared key written `base64:…`. `AQ==` is the single byte `0x01` and is the
-well-known default on every device — not a secret. `Ag==`–`Cg==` are the
-`simple1`–`simple9` shorthands. A private channel is 16 bytes (AES-128) or 32 bytes
-(AES-256). A PSK is raw key material rather than a signing key, so there is no
-keypair to derive — the bytes *are* the key, which makes a vanity PSK a genuinely
-**functional** target rather than a decoration. `--encoding base64` mines exactly
-this form:
-
-```bash
-./run.sh NHI --encoding base64              # channel key starting "NHI…"
-./run.sh NHI --encoding base64 --suffix 0   # …and ending "…0"
-./run.sh --encoding base64 --suffix qw      # suffix only
-```
-
-Memorable here means **transcribable**. A group reads a PSK out over an FM handheld
-before anybody has a phone paired, and a key with recognisable ends survives that
-round trip when a bare 24-character base64 blob does not. Note that base64's last
-character is constrained (see
-[Suffixes and base64 padding](#suffixes-and-base64-padding)), so a suffix must end
-in one of `048AEIMQUYcgkosw`.
-
-**Node key and `!` user ID — a different curve, and one more derivation.** A
-Meshtastic node's key is **Curve25519**, not Ed25519, and the `!` + hex ID the
-firmware advertises is a *further* derivation from that node key — since firmware
-2.8, from the public-key identity rather than from a hardware MAC address, which is
-what lets a node keep its identity across a factory reset. Two separate things
-therefore have to line up:
-
-```
-   seed ─▶ Curve25519 node key ─▶ firmware derivation ─▶ !a1b2c3d4
-            ▲ the keypair                              ▲ what you read out of the UI
-              that matters
-```
-
-The trap worth naming is the curve. `--encoding hex` chooses how a key is
-*printed*; it does not choose which key it is. On the default Ed25519 derivation
-you get a valid MeshCore device key and **not** a Meshtastic node key, and the
-node will simply refuse the import — which reads like a firmware bug and is not
-one. Meshtastic node-key mining is a different algorithm, not a different
-encoding.
-
-Which leaves the `!` ID itself, and three things worth knowing before spending an
-afternoon on it:
-
-- It is fixed width, so there is no short form to ask for. `!a1b2c3d4` is four
-  bytes of derivation and nothing truncates it away.
-- An ID pattern is **not** a key pattern. Constraining `!a1b2c3d4` constrains a
-  derivation *of* the key, not the key, so the search is no cheaper than mining
-  the key and usually dearer.
-- Node keys are TOFU-bound: the first public key a node hears for a given node
-  number is the one it keeps. Change a key after it has been seen and peers treat
-  you as a stranger who replaced somebody.
-
-### One caveat, stated plainly
-
-Every device in this family generates its own key on first boot, and **nothing
-here changes the identity a shipped firmware hands you**. Mining is for a node you
-are deliberately provisioning: a fresh key imported over USB, a companion client,
-or a factory-reset device whose identity you are re-establishing anyway. If a node
-already has an identity, mine a *new* one and swap it in deliberately. Never
-overwrite a key that peers already hold.
-
-## Vanity & Functional Keypair Mining
-
-<p align="center">
-  <img alt="mining" src="https://img.shields.io/badge/mining-Ed25519%20prefix%20%2B%20suffix-7c4dff">
-  <img alt="meshtastic" src="https://img.shields.io/badge/Meshtastic-PSK%20%2B%20node%20ID-00b0d9">
-  <img alt="offline" src="https://img.shields.io/badge/mining-100%25%20in--browser-2ea043">
-</p>
-
-A node's identity is bytes out of a random number generator, and nothing about
-them is designed. `a3f1…c902` is as arbitrary as a Wi-Fi MAC address, and it has
-to be read off a QR code, dictated over a radio, or pasted into a phone by someone
-who cannot see the screen. Mining is the one case where brute force is the right
-answer: you pay for the search once, and every later contact with the node is
-cheaper. **[meshcore-vanity-key](https://neohiro.github.io/meshcore-vanity-key/)**
-is what this repository is, running entirely in the browser — Web Workers plus
-libsodium WASM, no network round-trip, no telemetry, and it still works offline
-once the page is loaded.
-
-### Vanity and functional are two different goals
-
-| | Vanity | Functional |
-|---|---|---|
-| **Why** | the identity reads well and is memorable | the identity is *checkable* by a human under bad conditions |
-| **Typical target** | `mc1qneohiro…`, `!a1b2c3…` | a prefix **and** a suffix, so a half-transcribed key fails loudly |
-| **Cost** | `16ⁿ` attempts for `n` hex characters — 4 is instant, 6 is minutes | that, squared: each constrained end multiplies rather than adds |
-| **Classic mistake** | asking for 9+ characters. That is a lottery ticket, not a mnemonic | mining a *reserved* prefix and then wondering why the client refuses the key |
-
-Same code path, same flags. The distinction only matters when deciding what to ask
-for — and in both cases the pattern is matched against the **encoded public key**,
-never the private one, which never leaves your machine.
-
-### Meshtastic prefix and suffix mining
-
-Meshtastic has two unrelated things people both call "the key", and they are mined
-by two unrelated means. Conflating them is the usual first mistake.
-
-**Channel PSK — symmetric, minable directly.** A channel is a name plus a
-pre-shared key written `base64:…`. `AQ==` is the single byte `0x01` and is the
-well-known default on every device — not a secret. `Ag==`–`Cg==` are the
-`simple1`–`simple9` shorthands. A private channel is 16 bytes (AES-128) or 32 bytes
-(AES-256). A PSK is raw key material rather than a signing key, so there is no
-keypair to derive — the bytes *are* the key, which makes a vanity PSK a genuinely
-**functional** target rather than a decoration. `--encoding base64` mines exactly
-this form:
-
-```bash
-./run.sh NHI --encoding base64              # channel key starting "NHI…"
-./run.sh NHI --encoding base64 --suffix 0   # …and ending "…0"
-./run.sh --encoding base64 --suffix qw      # suffix only
-```
-
-Memorable here means **transcribable**. A group reads a PSK out over an FM handheld
-before anybody has a phone paired, and a key with recognisable ends survives that
-round trip when a bare 24-character base64 blob does not. Note that base64's last
-character is constrained (see
-[Suffixes and base64 padding](#suffixes-and-base64-padding)), so a suffix must end
-in one of `048AEIMQUYcgkosw`.
-
-**Node / user ID — asymmetric, derived, not the key.** A node advertises `!` + hex,
-and since firmware 2.5 that ID is derived from the node's public-key identity
-rather than from a hardware MAC address — which is exactly what lets a node keep
-its identity across a factory reset. So mining an `!` ID mines a *consequence* of
-the key, through firmware's own derivation:
-
-```
-   seed ─▶ Ed25519 keypair ─▶ public key ─▶ firmware derivation ─▶ !a1b2c3d4
-            ▲ minable here                                   ▲ this is what you read
-```
-
-The middle step belongs to the firmware, so the honest workflow is: mine a
-**public-key** prefix or suffix, import it, read the `!` ID the node derives, and
-iterate. That is why this section says prefix and/or suffix on the *key*. Three
-consequences are worth knowing before spending an afternoon on it:
-
-- The ID is a fixed width, so there is no short form to ask for. `!a1b2c3d4` is
-  four bytes of derivation and nothing truncates it away.
-- An ID prefix is **not** a key prefix. Constraining `!a1b2c3d4` means constraining
-  a derivation of the key, not the key itself — so the search is no cheaper than
-  mining the key and usually dearer.
-- Public keys are TOFU-bound: the first key a node hears for a given node number is
-  the one it keeps. Change a key after it has been seen and peers treat you as a
-  stranger who replaced somebody.
-
-### One caveat, stated plainly
-
-Every device in this family generates its own key on first boot, and **nothing
-here changes the identity a shipped firmware hands you**. Mining is for a node you
-are deliberately provisioning: a fresh key imported over USB, a companion client,
-or a factory-reset device whose identity you are re-establishing anyway. If a node
-already has an identity, mine a *new* one and swap it in deliberately. Never
-overwrite a key that peers already hold.
+Generates Ed25519 cryptographic keypairs until the encoded public key matches a target pattern (prefix, suffix, or both). The search is optimized with a scalar-walk algorithm that avoids repeated hashing, making it significantly faster than naive approaches.
 
 ## Browser Version
 
-**Live: [neohiro.github.io/mesh-vanity-key](https://neohiro.github.io/mesh-vanity-key/)**
-
-The app is a single self-contained PWA (`index.html`) — no build step, and no
-dependencies beyond the checked-in `libsodium.js`. To run your own copy it must
-be **served over HTTP(S)**, not opened as a `file://` URL, because browsers
-refuse to create blob Web Workers from `file://`.
+`index.html` is a self-contained PWA — no build step, no dependencies beyond the
+checked-in `libsodium.js`. It needs to be **served over HTTP(S)**, not opened as a
+`file://` URL, because browsers refuse to create blob Web Workers from `file://`.
 
 ```bash
 python -m http.server 8000
 # then open http://localhost:8000/
 ```
 
-Deploy it to any static host (GitHub Pages, Netlify, Cloudflare Pages). The
-service worker precaches the app shell and serves stale-while-revalidate, so
-the app works offline and picks up new deploys on the next load.
-
-Mobile-friendly: the estimate line breaks between facts rather than mid-number,
-Chrome's Android font boosting is disabled, and the container respects the notch
-inset.
+Deploy it to any static host (GitHub Pages, Netlify, Cloudflare Pages). The service
+worker precaches the app shell and serves stale-while-revalidate, so the app works
+offline and picks up new deploys on the next load.
 
 Browser-specific behaviour, for comparison with the CLI below:
 
 | | Browser app | Python CLI |
 |---|---|---|
 | Pattern matching | hex only | hex, base64, base64url, base58, bech32 |
-| Parallelism | auto-detected Web Workers (every logical core, capped at 32) | `--workers N` processes (CPU count for long searches, capped at 64) |
+| Parallelism | auto-detected Web Workers (`hardwareConcurrency - 1`, capped at 16) | `--workers N` processes |
 | Key history | kept in `localStorage`, exportable as JSON/CSV | none |
 | Installable | yes (PWA with maskable icons) | n/a |
-| Private key | shown per result, stored in history | printed to stderr by default; `--no-output-private` suppresses |
+| Private key | shown per result, stored in history | only with `--output-private` |
 | History display | newest first, scroll stays at the top | n/a |
 
 > **Security:** the browser app encrypts saved keys in `localStorage` using
@@ -351,51 +94,7 @@ one. Set `MESHCORE_VANITY_STRICT_RESERVED=1` to make the CLI reject them again.
 ### The live panel
 
 Six figures are shown while mining: attempts, rate, progress, workers actually
-running beside the core count, and ETA. A keys/s trace is drawn behind the ETA row.
-
-**Workers and cores are shown as one `WORKERS | CORES` figure** (`8 | 8`), not as
-two separate rows. The point of showing cores at all is the comparison between
-them, and across two rows the reader has to join them mentally — which is exactly
-the comparison they exist to support. Workers is the count *actually* running, so
-a shortfall against the core count is visible rather than mysterious.
-
-**The ETA carries a real day figure** (`4d 19h 05m 30s`), not unbounded total
-hours. It previously rendered hours as a running total, so a five-day estimate read
-`116h 25m`, and the ` (~4.5 days)` hint beside it was withheld entirely past ~10
-days — so the longest searches, the ones where "how many days is this?" matters
-most, were the only ones with no day unit anywhere on screen.
-
-**The rate graph answers a different question from the rate figure.** The rate
-cell says how fast the search is *now*; the trace says whether that has been
-*steady*. A tab throttled in the background, a thermal dip or a GC pause all
-show as a visible droop, which a single headline number cannot reveal.
-
-It is deliberately drawn as a **backdrop on the ETA row** rather than as a
-separate chart block, so it costs no vertical space and cannot push the figures
-around:
-
-- absolutely positioned with `pointer-events: none`, so it never intercepts a
-  click aimed at the digits sitting above it, and never enters layout;
-- the digits carry a matching dark `text-shadow` so the line crossing a glyph
-  cannot make the figure harder to read;
-- the x-axis is **real elapsed time over a 2-minute window**, not sample index.
-  Reports are throttled per worker and the worker count varies, so a fixed
-  sample *count* would not be a fixed span - and the window has to be fixed in
-  time or the recent detail (the part anyone looks at) flattens into a straight
-  line;
-- it plots the **raw** per-batch rate, not the EMA. Smoothing is what the
-  headline figure is for; smoothing the trace would hide the variation it exists
-  to reveal;
-- the y-scale is padded and deliberately **not** zero-based, because a zero
-  baseline flattens exactly the variation the graph is for;
-- `aria-hidden`, since the numbers it shows are already announced by the live
-  region, and it no-ops without a 2d context so it can never throw into the
-  progress handler and stall the figures behind it.
-
-It is deliberately **not** suppressed under `prefers-reduced-motion`, unlike the
-starfield: that is decoration, this is a data readout. It only changes when the
-miner reports a measurement, never animates on a timer, and hiding it would
-remove information rather than remove motion.
+running, cores, and ETA.
 
 **The ETA is split into fixed digit slots.** Rendered as one string it reflowed
 every time a field changed digit count — `9h 5m 3s` becoming `9h 5m 13s` moved
@@ -404,20 +103,16 @@ into separate elements, each reserving its width:
 
 | Slot | Reserved | Why |
 |---|---|---|
-| days | `5ch` | carries the magnitude, so it is the field that grows |
-| hours | `2ch` | the hours *within* the day, so 0–23 and never wider |
+| days | `8ch` | the `(~5 days)` estimate leads, so the hours never shift under it |
+| hours | `20ch` | a multi-week run reaches 4-5 figures; reserve the widest case so the layout is identical from the first minute to the last |
 | minutes | `2ch` | always two digits, zero-padded |
 | seconds | `2ch` | as above |
 
-Hours used to be an unbounded total, reserved at `20ch`, which meant a five-day
-estimate rendered as `116h 25m` and the slot carried a wide dead gap beside every
-figure. Days now carry the magnitude (`4d 19h 05m 30s`), so hours never exceeds
-two digits and the reservation shrank to match.
-
 The panel also sets `font-variant-numeric: tabular-nums`, which is what actually
 stops a digit changing width — the reserved `min-width`s then hold the columns.
-All three slots stay fixed on screens under 420px, since proportional space would
-reintroduce reflow. Minutes and seconds are always padded to two digits, so
+On screens under 420px the hour slot drops to `10ch`: still far more than a
+three-week ETA needs (~500h), and still fixed rather than proportional, which is
+the part that matters. Minutes and seconds are always padded to two digits, so
 `05m` is exactly as wide as `15m`.
 
 **The ETA is also smoothed over time.** It is the most eye-catching number on the
@@ -438,74 +133,19 @@ keys/second **regardless of how fast the crypto was**:
 
 - **Yielding per batch.** Browsers clamp nested `setTimeout(0)` to ≥4 ms. Yielding
   after every batch of candidates therefore throttled each worker to ~4,000
-  candidates/s. The worker now yields on a wall-clock budget instead — 2000 ms,
-  which reduces yield overhead while keeping the UI responsive.
+  candidates/s. The worker now yields on a 30 ms wall-clock budget instead.
 - **Rebuilding hex strings per candidate.** Converting the candidate and public
   key to hex and running `startsWith`/`endsWith` costs more than the keygen. The
   walk state is now a 32-byte array incremented in place, and the pattern is
   pre-decoded to nibbles compared directly against the raw public-key bytes — no
   allocation and no string building in the hot loop.
 
-#### Main-thread overhead
-
-The workers and the UI share the same cores, so UI work is subtracted directly
-from mining throughput. Everything the main thread was doing per report has been
-cut, because at 500 ms per report and one report per worker it was paying a full
-layout plus a canvas repaint several times a second:
-
-| Was | Now | Why |
-|---|---|---|
-| Report every 500 ms per worker | every 3 s | 16 main-thread wake-ups a second at 8 workers, for figures that are an aggregate rate over seconds. The first report is already immediate — the throttle compares against a counter starting at 0 — so no special case is needed. |
-| `canvas.clientWidth`/`clientHeight` read inside every draw | measured once, cached, refreshed by a `ResizeObserver` | Reading them forces a synchronous layout, so each report paid for a full reflow of the panel. |
-| Graph trace drawn from raw per-worker samples | exponential average (`α = 0.5`) in `pushRateGraphSample` | Consecutive samples come from different workers over different windows, so raw values differ by a lot and the line read as spikes rather than a trend. The headline rate figure is unchanged — this is display smoothing only. |
-| 48 calibration samples at load | 256, yielding every 32 rather than every 8 | 48 was short enough to be dominated by noise, and yielding every 8 spent most of the loop asleep on clamped timers. |
-
-A regression guard asserts the report interval and yield budget stay coarse, that
-`drawRateGraph` never re-measures the canvas, and that the ETA keeps a real day
-figure.
-
-The CLI benefits from the same lesson in the one place it applied: its progress
-`--progress-interval` counts *attempts* (100,000 by default, roughly a second at
-typical rates) rather than wall-clock, so a slow machine reports less often
-instead of more.
-
 Regression guards:
 
 | Command | Checks |
 |---|---|
 | `node tools/verify_worker_math.mjs` | the byte-walk is arithmetically identical to the previous BigInt/hex implementation, including 2²⁵⁶ carry and wraparound |
-| `node tools/bench_worker.mjs <worker.js>` | wrapper overhead with a stubbed (free) keygen; must stay far above the keygen cost. Runs three trials and reports the best, so JIT warm-up or a descheduled shared vCPU cannot fail an otherwise healthy run — a real regression drops every trial and still fails hard |
-| `node tools/bench_worker_scaling.mjs` | aggregate throughput vs worker count, using a synthetic ALU+table workload. Reports higher scaling than is real - its workload is ILP-friendly - so prefer the keygen probe below |
-| `node tools/bench_keygen_scaling.mjs` | aggregate keys/s vs thread count using the **real** `crypto_sign_seed_keypair` from the shipped wasm. The trustworthy of the two scaling probes — see "Worker scaling" |
-| `node tools/check_keygen_baseline.mjs <report>` | compares a keygen-scaling run against `tools/keygen_baseline.json`; fails only on a large **drop**. Runs nightly via the `keygen-scaling` workflow |
-
-#### Where a candidate's time actually goes (CLI)
-
-Measured on the development host, best-of-N, so the split is not noise:
-
-| Component | Per candidate | Share |
-|---|---|---|
-| `crypto_sign_seed_keypair` (whole primitive) | ~36.7 µs | — |
-| — of which Ed25519 scalar multiplication | ~32.4 µs | ~88% |
-| — of which SHA-512 over the seed | ~0.9 µs | ~2.5% |
-| Hex encode + pattern compare | ~0.2 µs | ~1% |
-| Scalar-walk bookkeeping | ~0.3 µs | ~1% |
-
-The scalar multiplication is irreducible without changing the algorithm, and the
-algorithm is already the right one — see "Scalar-Walk Optimization". Two
-consequences worth stating plainly:
-
-- **Switching to `crypto_scalarmult_base` to skip SHA-512 would buy ~2.5%**, and
-  needs a re-clamp per candidate since incrementing a clamped scalar breaks the
-  clamping. Not worth the correctness risk.
-- **The remaining wrapper is ~1–2%.** Micro-optimising the encode/compare path
-  cannot move keys/s meaningfully; the browser needs its nibble comparison
-  because JS overhead is a far larger share there, but Python does not.
-
-The one genuinely contended resource is the shared progress counter, which every
-worker locks once per 16 candidates. Measured at 8 workers it costs ~0.6 µs per
-batch against ~620 µs of keygen — **~0.1%** — so `--workers` is the only real
-throughput lever, and it is already there.
+| `node tools/bench_worker.mjs <worker.js>` | wrapper overhead with a stubbed (free) keygen; must stay far above the keygen cost |
 
 > **Careful:** never write `if (++bytes[i] !== 0)`. Incrementing a `Uint8Array`
 > element returns the *unclamped* value (`256`, not `0`), so the carry test never
@@ -540,100 +180,55 @@ Two caveats, stated plainly rather than buried:
 
 ### Worker scaling: 2 → 8 threads
 
-**Browser estimator constant: 2.9× @ 8 threads** (measured with the shipped
-browser worker including wrapper overhead — byte walk, nibble match, 500 ms
-reporting, 30 ms yield). This is the constant used by the browser estimator.
+Calibration measures **one** worker on **one** core, but the search then runs
+`navigator.hardwareConcurrency` workers concurrently. Multiplying the
+single-worker rate by the worker count overstates the result, because the
+workers do not each get a core to themselves. This was measured rather than
+assumed:
 
-**Node `bench_keygen_scaling.mjs` measurement: 4.08× @ 8 threads** (shipped
-`libsodium.wasm` `crypto_sign_seed_keypair` across N OS threads, no event loop,
-no UI thread, no `postMessage`). This is a proxy measurement; the browser
-estimator uses the 2.9× constant.
+- Reference host: **4 physical cores / 8 logical (Intel i5-1155G7)**.
+- Shipped miner (libsodium.wasm + 32-byte walk, nibble match, 500 ms reporting, 30 ms yield)
+  was run at 1–8 concurrent workers, measuring aggregate throughput via delta-over-window.
+- Aggregate throughput **saturated at ≈2.9x the single-worker rate at 8 threads**,
+  not the 8x that linear scaling predicts.
 
-Reference host: **4 physical cores / 8 logical (Intel i5-1155G7)**.
+Two effects explain the shortfall:
+  1. **Per-candidate JS wrapper work** (32-byte walk, nibble match, postMessage,
+     500 ms reporting, 30 ms yield) that scales with wall-clock time rather than
+     raw compute. This is the dominant limiter.
+  2. Thermal/SMT behaviour on this particular CPU (the bare Ed25519 loop scales
+     considerably further — ~3.3x at 8 threads — confirming the wrapper is the
+     bottleneck, not the crypto).
 
-| Workers | Browser estimator (power-law, 2.9× anchor) | Node bench_keygen_scaling.mjs |
+| Workers | Aggregate speedup | Basis |
 |---|---|---|
-| 1 | 1.00x | 1.00x |
-| 2 | 1.58x | 1.97x |
-| 3 | 1.88x | 2.65x |
-| 4 | 2.28x | 3.42x |
-| 6 | 2.79x | 3.79x |
-| **8** | **2.88x** | **4.08x** |
-| 16, 32 | clamped to 2.88x | clamped to 4.08x |
+| 1 | 1.00x | baseline |
+| 2 | 1.58x | fitted |
+| 3 | 2.04x | fitted |
+| 4 | 2.28x | fitted |
+| 6 | 2.79x | fitted |
+| **8** | **2.88x** | **measured** |
 
-The browser estimator uses a power-law fit anchored at the measured 2.9×
-(8 threads): `scale(n) = n ** (log(2.9) / log(8)) ≈ n^0.372`. The Node
-measurement is a proxy (no event loop, no wrapper overhead) and is provided
-for reference.
+Only the 8-thread end point was measured directly; the intermediate points come
+from a power-law fit anchored to that measurement:
 
-> **To re-measure:** run `tools/measure_scaling.py` in a browser for the
-> browser estimator constant, or `node tools/bench_keygen_scaling.mjs` for
-> the Node proxy. Update the constant, the page's `MEASUREMENT BASIS` comment,
-> and this table together.
+    scale(n) = n ** (log(2.88) / log(8))     # exponent ≈ 0.372
 
-Measured with `tools/bench_keygen_scaling.mjs` (Node proxy):
+The curve is concave and capped at the measured ceiling, so it cannot predict
+more speedup than was actually observed. The browser estimate now folds this
+factor in and prints the multiplier inline instead of hedging:
 
-    1 thread     23,934 keys/s   1.00x
-    2 threads    47,157 keys/s   1.97x
-    4 threads    81,885 keys/s   3.42x
-    8 threads    97,555 keys/s   4.08x   (19% better than 4)
+    workers share cores, improvement is only ~2.9x at 8 threads; scale derived from 2.88x at 8 threads
 
-**The browser estimator uses a power-law fit anchored at 2.9× @ 8 threads.**
-This is conservative vs the Node proxy (4.08×) because the browser worker
-includes wrapper overhead (byte walk, nibble match, postMessage, yield).
-`n ** (log(2.3) / log(8))` — one anchor, everything else a fit. Measuring the
-real primitive showed scaling is near-linear to 2 threads and then flattens
-sharply, which a single-anchor law cannot represent: it predicted 1.32x at 2
-threads against 1.97x measured, and **1.74x at 4 against 3.42x measured**, so
-every 4-core laptop was told it would run at half its real speed. The measured
-points are now recorded directly and interpolated log-linearly between them,
-which reproduces the curve's shape.
+**To re-measure on different hardware**, update `WORKER_SCALE_MEASURED` and
+`WORKER_SCALE_EXPONENT` in `index.html` together; nothing else needs to change.
+`tools/measure_scaling.py` measures the shipped miner's worker-scaling curve
+with delta-over-window methodology.
 
-Above 8 threads the curve **clamps** rather than extrapolating: extra threads
-cannot beat what was observed on 4 physical cores, and `detectOptimalWorkers`
-caps at 32, so a 32-thread machine would otherwise be told it is 7x faster than
-anything ever measured.
-
-**Honest caveat:** these are Node OS threads, not browser Web Workers — no event
-loop, no UI thread, no `postMessage` per report. The browser may well be slower;
-an earlier browser-only measurement put 8 threads at 2.3x, below every number
-here. That is why the browser measures its own curve instead of trusting the
-table — see below.
-
-### The grey estimate is a static pre-flight projection
-
-The grey line above the panel is computed **once**, before any work starts, and
-does not change for the duration of a search. It shows the expected attempts,
-the estimated time, the worker count and the projected keys/s, and it is labelled
-`estimated` or `calibrated` so it is clear which kind of number it is.
-
-It used to be rewritten on every progress report so it could flip from
-`estimated` to `measured` once the workers had reported twice. That put a moving
-number in grey directly above the green live-logs panel, which already showed
-the live rate, progress and a live ETA computed from each worker's own reported
-rate — two figures changing under the user at once, with the projection
-masquerading as part of the live read-out. The live panel is for live figures;
-the grey line is what you should be deciding on before you press Start.
-
-What makes a fixed pre-flight figure defensible is that it is no longer imported
-from other hardware: `ratePerWorker()` is measured on this CPU at load, and
-`workerScale()` comes from the per-machine calibration described above. So the
-grey line is a projection from two local measurements, not a table someone else
-produced.
-
-The provenance of the factor (which host it was measured on, and the fit) is
-documented here and in `WORKER_SCALE_MEASURED` in `index.html` rather than
-printed on every page load — the inline clause was long enough to wrap the
-estimate line on a narrow screen.
-
-**To re-measure on different hardware**, replace `WORKER_SCALE_POINTS` in the
-browser app with fresh `tools/bench_keygen_scaling.mjs` output, update this
-table, and nothing else needs to change — the interpolation and clamping read
-straight from the table.
-
-> The multiplier is **hardware-specific** — 2.3x encodes *this* host's 2:1 SMT
-> ratio. A machine with 8 physical cores would scale very differently and must be
-> re-measured rather than reusing 2.3x.
+> The multiplier is **hardware-specific** — 2.88x encodes *this* host's
+> 4 physical / 8 logical topology and the wrapper overhead. A machine with
+> different core counts or thermal behaviour must be re-measured rather than
+> reusing 2.88x.
 
 ## Privacy and third-party requests
 
@@ -653,58 +248,21 @@ The service worker caches only same-origin files. The counter is never cached.
 
 ## Quick Start
 
-### One command, straight from the browser
+### Prerequisites
 
-Nothing to download, clone or install first. This fetches the tool, runs it, and
-throws the environment away afterwards:
-
-```bash
-uv run --from git+https://github.com/neohiro/mesh-vanity-key \
-  meshcore-vanity abcd --encoding hex
-```
-
-`uv` is a single self-contained binary ([install](https://docs.astral.sh/uv/)).
-Substitute `pipx run --spec git+https://github.com/neohiro/mesh-vanity-key
-meshcore-vanity` if you prefer pipx; the arguments after the entry point are
-identical.
-
-```bash
-# A different prefix AND a different suffix, in one search
-uv run --from git+https://github.com/neohiro/mesh-vanity-key \
-  meshcore-vanity ab --suffix Yc
-
-# A MeshCore bech32 address
-uv run --from git+https://github.com/neohiro/mesh-vanity-key \
-  meshcore-vanity mc1q --encoding bech32
-```
-
-### Locally, from a clone
-
-If you have the repository, `./run.sh` creates a local `.venv` on first use,
-installs PyNaCl into it, and passes everything after the pattern straight
-through:
-
-```bash
-./run.sh abcd          # Linux / macOS
-run.bat abcd           # Windows
-```
-
-| | |
-|---|---|
-| Need to install anything? | No. PyNaCl is fetched into `.venv` on first run. |
-| Uninstall | `rm -rf .venv` |
-| Already have PyNaCl? | It is still used from the venv; set `MESH_VANITY_NO_VENV=1` to use the ambient interpreter instead. |
-| See every flag | `./run.sh abcd --help` |
-
-> If `run.sh` is not executable, call it through the interpreter:
-> `python3 run.py abcd`.
-
-### Calling the CLI directly
-
-If you already have the dependencies:
+- Python 3.10+
+- `PyNaCl` package
 
 ```bash
 pip install -r requirements.txt
+```
+
+### Single-Command Usage
+
+Run these **from the repository root** (the directory containing
+`meshcore_vanity.py`):
+
+```bash
 python meshcore_vanity.py <prefix> [options]
 ```
 
@@ -721,19 +279,11 @@ python meshcore_vanity.py <prefix> [options]
 > This prints the version and the absolute path of the file that was actually
 > loaded.
 
-The encoded public key is printed to **stdout**, so you can pipe the result
-directly:
+The encoded public key is printed to **stdout**. Progress and statistics go to **stderr**, so you can pipe the result directly:
 
 ```bash
-./run.sh ab --encoding hex > mykey.txt
+python meshcore_vanity.py ab --encoding hex > mykey.txt
 ```
-
-> **The private key is printed to stderr by default**, on three lines
-> (`PRIVATE_KEY_BASE64`, `MESHCORE_PRIV_HEX`, `set prv.key`). Re-running a
-> search to recover it costs minutes to days of CPU, which is why it is not
-> behind a flag any more. If you are piping output somewhere a secret should
-> not land — a CI log, a shared terminal, a dashboard — add
-> `--no-output-private`.
 
 ### Budget estimator
 
@@ -742,7 +292,7 @@ measured keygen rate, and an ETA — and asks for confirmation on interactive
 terminals:
 
 ```
-Estimate: 65,536 expected attempts (~35,062 keys/s (single-worker measurement x 1.7 for 4 workers)) | ETA ~2s
+Estimate: 65,536 expected attempts (~35,062 keys/s (single-worker measurement x 1.7 for 4 workers; scale derived from 2.9x at 8 threads)) | ETA ~2s
 Continue? [y/N]:
 ```
 
@@ -771,17 +321,7 @@ python meshcore_vanity.py mc1neoh --encoding bech32
 
 Finds a bech32-encoded key starting with `mc1neoh`.
 
-### Separate prefix and suffix
-
-```bash
-python meshcore_vanity.py ab --suffix Yc                     # base64
-python meshcore_vanity.py mc1q --encoding bech32 --suffix qs   # bech32
-```
-
-Finds a key that starts with `ab` **and** ends with `Yc`, checked in the same
-search — as the browser does with its two input boxes.
-
-### Suffix instead of prefix
+### Suffix matching
 
 ```bash
 python meshcore_vanity.py abc --encoding hex --suffix
@@ -789,7 +329,7 @@ python meshcore_vanity.py abc --encoding hex --suffix
 
 Finds a key whose hex encoding ends with `abc`.
 
-### Both ends, one pattern
+### Both prefix and suffix
 
 ```bash
 python meshcore_vanity.py 0101 --encoding hex --both
@@ -813,79 +353,34 @@ python meshcore_vanity.py ab --encoding hex --workers 4
 
 Uses 4 parallel processes to speed up the search.
 
-### The private key is printed by default
-
-Every successful search prints the private key to **stderr**, in three
-copy-pasteable forms:
-
-- Base64-encoded raw private key (`PRIVATE_KEY_BASE64=`)
-- MeshCore expanded private key, hex uppercase (`MESHCORE_PRIV_HEX=`)
-- A ready-to-use `set prv.key` command
-
-This is the default because the alternative is bad: if the key is not printed,
-the only way to recover it is to run the search again, which costs anywhere
-from seconds to days of CPU. The key is on stderr rather than stdout so that
-piping stdout somewhere does not silently write your private key into that
-destination — only the public key goes to stdout.
-
-To suppress it, pass `--no-output-private`:
+### Output private key (use with caution)
 
 ```bash
-python meshcore_vanity.py ab --encoding hex --no-output-private
+python meshcore_vanity.py ab --encoding hex --output-private
 ```
 
-Worth using when stderr goes somewhere a secret should not end up — CI logs, a
-shared terminal, or a piped dashboard. Note that a shell history, a CI log, or
-a scrollback buffer will all capture the default output, so treat any terminal
-you search in as one that now holds a private key.
+Prints the private key in multiple formats to stderr:
+- Base64-encoded raw private key
+- MeshCore expanded private key (hex, uppercase)
+- Ready-to-use `set prv.key` command
 
 ## Command-Line Options
 
 | Option | Default | Description |
 |---|---|---|
-| `pattern` (positional) | — | The text to match. Matched against the **start** of the encoded key by default; `--suffix` and `--both` change where it is matched. |
+| `prefix` (positional) | — | Target pattern to match |
 | `--encoding` | `base64` | Key encoding: `hex`, `base64`, `base64url`, `base58`, `bech32` |
 | `--hrp` | `mc` | Human-readable part for bech32 encoding |
-| `--case-sensitive` | off | Force case-sensitive matching. Implied for `base64`/`base64url`/`base58`, whose alphabets are case-sensitive. |
-| `--suffix [PATTERN]` | off | **With no value:** match the positional pattern against the **end** of the key instead of the start. **With a value:** require that value at the end *in addition to* the positional prefix — two independent patterns in one search. |
-| `--both` | off | Require the positional pattern at **both** ends, using that same pattern for each. |
-| `--max-attempts` | unlimited | Stop after N attempts. An exact bound: the budget is split across workers by largest remainder, so the attempts actually performed sum to exactly N — including when N is smaller than the worker count |
-| `--progress-interval` | 100000 | Progress report frequency, in attempts |
-| `--no-output-private` | off | Suppress the private key, which is printed to stderr by default |
+| `--case-sensitive` | off | Match prefix case-sensitively |
+| `--suffix` | off | Match suffix instead of prefix |
+| `--both` | off | Match both prefix and suffix |
+| `--max-attempts` | unlimited | Stop after N attempts |
+| `--progress-interval` | 100000 | Progress report frequency |
+| `--output-private` | off | Also output private key to stderr |
 | `--seed` | random | 64 hex chars (32 bytes) for deterministic search |
 | `--workers` | all CPU cores (max 256) | Number of parallel processes (forced to 1 for searches expected to finish in under a second) |
 | `-f`, `--force` | off | Skip the pre-search estimate confirmation |
 | `--version` | | Print version and the loaded file path, then exit |
-
-### Matching one end, or both
-
-The pattern always comes from the positional argument. To constrain **both** ends
-with *different* text, give the suffix to `--suffix`:
-
-| Goal | Command | Matches |
-|---|---|---|
-| Start only (default) | `run.sh abcd` | keys **starting with** `abcd` |
-| End only | `run.sh 7c --suffix` | keys **ending with** `7c` |
-| Both ends, different text | `run.sh ab --suffix Yc` | keys **starting with** `ab` **and ending with** `Yc` |
-| Both ends, same text | `run.sh abcd --both` | keys **starting and ending with** `abcd` |
-| End only, no prefix | `run.sh --suffix Yc` | keys **ending with** `Yc` |
-
-Those examples use the default `base64` encoding, whose final character is
-constrained — see [Suffixes and base64 padding](#suffixes-and-base64-padding).
-Suffix patterns there must end in one of `048AEIMQUYcgkosw`, so `cd` and `7f`
-are rejected. With `--encoding hex` every digit is reachable and any suffix
-works.
-
-This mirrors the browser, which has always taken an independent prefix and
-suffix box and checked both in the same pass.
-
-Each constrained end multiplies the search space rather than adding to it, so
-`--both abcd` (and `--suffix`-with-`ab`) costs roughly 65k² attempts. Keep the
-patterns short unless you have hours. `--both` cannot be combined with a separate
-suffix pattern or with a bare `--suffix`, since they contradict each other.
-
-If the two patterns are long enough to overlap in the key, the search can never
-succeed, so it is rejected up front rather than left spinning.
 
 ## Supported Encodings
 
@@ -901,25 +396,11 @@ succeed, so it is rejected up front rather than left spinning.
 
 ### Scalar-Walk Optimization
 
-Candidates come from a 256-bit counter taken from the seed once and incremented
-in place, rather than from a fresh random draw per attempt:
+Instead of hashing a seed + counter for every attempt (expensive), the tool:
 
-1. Derive an initial 256-bit counter from the seed via SHA-256 (once)
-2. For each attempt, increment it and pass it as the seed to libsodium
-3. A given `--seed` therefore reproduces a search exactly
-
-**This is not a hashing optimisation, and the distinction matters.** libsodium
-derives each candidate with SHA-512 over that counter inside
-`crypto_sign_seed_keypair`, so the hash is paid per attempt either way —
-measured at ~0.9 µs of a ~36.7 µs candidate. What the walk avoids is a CSPRNG
-draw (a syscall) and, more importantly, it makes a run reproducible. Its real
-contribution to throughput is small; the practical way to go faster is
-`--workers`.
-
-Walking the counter is also mathematically sound for mining. Consecutive scalars
-give public keys related by a fixed curve point, which is public knowledge and
-reveals nothing about the discrete log; every candidate still requires a full
-scalar multiplication, and there is no exploitable structure in the sequence.
+1. Derives an initial 256-bit scalar from the seed via SHA-256 (once)
+2. For each attempt, increments the scalar by 1 and uses it directly as the Ed25519 private key seed
+3. This avoids the SHA-256 per attempt, yielding significant speedup
 
 ### Parallel Search
 
@@ -927,151 +408,24 @@ With `--workers N`, the tool spawns N processes, each searching a disjoint subse
 
 ### Reserved Prefixes
 
-Hex prefixes `00` and `ff` are reserved for MeshCore framework devices. They are
-**mined with a warning, not rejected** — the browser and the CLI behave the same
-way, because some people deliberately want one:
-
-```
-UserWarning: prefix '00' starts with a prefix reserved for MeshCore framework
-devices (00 and FF are not available for consumer nodes). It will still be
-mined, but the key may not work with standard MeshCore clients.
-```
-
-Set `MESHCORE_VANITY_STRICT_RESERVED=1` to turn the warning back into a hard
-rejection if you would rather fail than hand someone a key their client refuses.
-
-### Case sensitivity
-
-`hex` and `bech32` are matched case-insensitively. `base64`, `base64url` and
-`base58` are **case-sensitive alphabets and are always matched exactly** — a key
-beginning `AB` is a different key from one beginning `ab`, and returning the
-wrong case would mean the tool hands you a key that does not match the pattern
-you asked for.
-
-### Suffixes and base64 padding
-
-A 32-byte key is 44 base64 characters, the last of which is the `=` pad. Suffix
-matching compares against the end of the **key data**, not the padding, so
-`--suffix Yc` matches keys whose last two *data* characters are `Yc`.
-
-There is a second base64 quirk worth knowing, because it makes a suffix
-*impossible* rather than merely rare. 256 bits do not divide evenly into 6-bit
-base64 characters: the 43rd data character carries only 4 significant bits, so
-its low two bits are always zero and only 16 of the 64 symbols can appear there.
-A suffix whose last character is one of the other 48 can never match, so it is
-rejected immediately instead of searching forever:
-
-```console
-$ meshcore-vanity ab --suffix b
-Error: this suffix pattern can never match a base64 key: a 32-byte key's
-base64 form is 43 data characters, and the last one carries only 4 significant
-bits, so it can only be one of 048AEIMQUYcgkosw. 'b' is not among them
-(the full pattern was 'b')
-```
-
-Only the final character is constrained — earlier characters of the pattern sit
-at positions where all 64 symbols are reachable.
-
-### Suffixes and the bech32 checksum
-
-`bech32` has the same kind of constraint, in a different place. A 32-byte key is
-61 characters: `hrp` + `1` + 52 data characters + a 6-character checksum. The 52
-five-bit groups hold 260 bits for 256 bits of key, so 4 padding bits land in the
-**last data character**, leaving it one significant bit — only `q` or `s` can
-occur there.
-
-That character sits 7 from the end, so a bech32 suffix only faces the constraint
-at length 7 or more; shorter suffixes land in the checksum, which is uniform.
-
-```console
-$ meshcore-vanity mc1q --encoding bech32 --suffix ccccccc
-Error: this suffix pattern can never match a bech32 key: a 32-byte key encodes to
-52 data characters carrying 256 bits, so the last one holds only 4 significant
-bits and can only be qs - but this pattern needs 'c' there (position 0 of 7,
-7 characters from the end).
-```
-
-It also makes such a search **16x cheaper** than the character count suggests,
-which the pre-flight estimate accounts for: a 7-character bech32 suffix costs
-`2 × 32⁶`, not `32⁷`.
-
-### Encodings that are deliberately not validated
-
-`hex` and `base58` have no impossible-pattern rule, and none is invented for
-them. base58's encoder prepends `1` for each leading zero byte, and its
-leading-digit distribution does make some two- and three-character prefixes
-**rare** — but an exhaustive check over all of them, by interval arithmetic
-against the reachable value range, showed every one is still reachable. Only the
-highest-probability ones were merely absent from a 300,000-key sample. Refusing
-them would reject valid targets, which is the worse failure; a pattern that is
-merely rare still gets found, and one that is genuinely impossible now ends in a
-visible `exceeded max_attempts` rather than running forever.
+Hex prefixes `00` and `ff` are reserved for MeshCore framework devices and are rejected by default.
 
 ## Limitations
 
 - **Search time grows exponentially with prefix length.** A 2-char hex prefix takes ~1 second; a 6-char prefix may take hours. Use `--workers` to parallelize.
-- **No GPU acceleration, and that is not an oversight.** This is CPU-only in both
-  the CLI and the browser, and there is no GPU implementation of Ed25519
-  keygen to integrate. The reason is the shape of the work, not maturity:
-
-  - **It is serial.** One candidate is `SHA-512(seed)` → a clamped 255-bit
-    scalar → one scalar multiplication `[a]B`. That multiplication is a chain
-    of ~150 *dependent* field multiplications; each needs the previous one's
-    result, so there is no instruction-level parallelism to fill.
-  - **It is latency-bound, not throughput-bound.** Each step is a 128-bit
-    product followed by a reduction mod 2²⁵⁵−19 (a long carry chain of shifts
-    and adds), and the point additions consume a 32-entry precomputed table —
-    so memory latency sits directly on the critical path.
-  - **A GPU wins on work that is wide, independent and dense.** This is the
-    opposite on all three counts.
-
-  Batching many independent candidates *would* suit a GPU in principle, but at
-  ~25k keys/s per CPU core it would take thousands of in-flight candidates,
-  each with its own table, before utilisation approached full — more memory than
-  a CPU keeps in L1, at which point you are bandwidth-bound. That is why no
-  CUDA, WebGPU or WebGL implementation exists to port.
-
-  **What actually helps** is more cores (`--workers`), more machines, and the
-  browser app, which uses every logical core automatically.
+- **No GPU acceleration.** This is CPU-only. For very long prefixes, consider a GPU-based tool.
 - **Bech32 prefix must be compatible with HRP.** Every bech32 key starts with `<hrp>1`. A prefix like `ne` with `--hrp mc` will be rejected because keys always start with `mc1`.
-- **The private key is printed to stderr by default.** Use
-  `--no-output-private` to suppress it where output is captured somewhere a
-  secret should not land (CI logs, a shared terminal, a piped dashboard).
+- **Private key is only shown with `--output-private`.** Without this flag, only the public key is printed. This is a safety measure.
 - **Not a MeshCore node.** This tool only generates keys. You still need MeshCore firmware or software to use them.
 - **Deterministic mode requires a seed.** Without `--seed`, each run produces different results.
 - **Browser app is hex-only.** It has no bech32/base58/base64 output; use the CLI for those encodings.
 - **Browser app must be served over HTTP(S).** Blob Web Workers are blocked on `file://` URLs.
-- **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency` with no reserve (capped at 32), which can over- or under-estimate on constrained or shared hardware. The UI stays responsive anyway because the hot loop yields to the event loop every 2000 ms.
-- **Browser key history is obfuscated, not encrypted.** The XOR key is derived from an IndexedDB secret plus the origin, so a copied `localStorage` blob cannot be decoded elsewhere. Script on the origin can read IndexedDB, so this is not XSS protection. Clearing site data deletes the secret and orphans the history. History is never written in plaintext: if no key can be derived, saving is refused instead.
+- **Browser worker count is a heuristic.** It uses `navigator.hardwareConcurrency - 1` (capped at 16), which can over- or under-estimate on constrained or shared hardware.
+- **Browser key history is AES-256-GCM encrypted** with per-entry nonce. The key is derived via HKDF-SHA256 from an IndexedDB secret plus origin. Legacy XOR-obfuscated entries are still decrypted. Script on the origin can read IndexedDB, so this is not XSS protection. Clearing site data deletes the secret and orphans the history. History is never written in plaintext: if no key can be derived, saving is refused instead.
 - **Progress is not capped at 100%.** Expected attempts are the mean of a geometric distribution, so ~37% of searches legitimately run past it. The CLI and browser show the overshoot as `+105.00%` plus how far past the mean the search has run. Once past the mean there is no meaningful "time remaining", so the ETA is replaced by the overshoot instead of being dropped or shown negative.
 - **The hot loop is already at the maths limit.** The cost of a candidate is the Ed25519 scalar multiplication, not our code. Measured per core: **Python/native libsodium ~25,000–32,000 keys/s**, **browser libsodium.wasm ~13,500 keys/s** (`python tools/bench_mining.py`, `bun tools/bench_real_browser.mjs`). Our wrapper adds per-candidate overhead measured at ~10M keys/s equivalent — roughly three orders of magnitude cheaper than the derivation it wraps — so optimising it further cannot help. OpenSSL (via `cryptography`) was measured as a separate backend and is ~20% *slower* than libsodium, so switching implementations is not a win either. The only throughput lever is core count.
-- **Browser workers use every logical core**, capped at 32. This previously reserved one core for the UI, which cost 25% throughput on a 4-core machine for no benefit: the hot loop already yields to the event loop every 2000 ms, far more often than the browser needs to repaint, so the UI stays responsive anyway. Measured with the real keygen primitive, SMT siblings still add ~19% over four threads (see "Worker scaling"), so saturating every logical core is the right call and there is no throughput left on that axis.
-
-  **This is now measured rather than assumed.** `navigator.hardwareConcurrency`
-  counts *logical* threads, and there is no browser API for physical cores — so a
-  4-core/8-thread machine is indistinguishable from a real 8-core one without
-  measuring. That matters here, because SMT siblings contend rather than
-  complement: Ed25519 keygen is a chain of dependent 128-bit multiplications with
-  long carry reductions, so the second thread on a physical core fights the first
-  for the same ALU and carry resources. On such a machine one worker per logical
-  thread is simply the wrong count, and it also starves the main thread.
-
-  So the first search on a machine measures its own curve — a handful of
-  candidates per worker per round, over a hard 1.5 s budget — and caches it
-  against the machine fingerprint. Later sessions use the measurement for both
-  the worker count and the estimate, instead of the imported table. A step that
-  adds less than 10% is not worth taking: those threads cost main-thread time
-  (every worker report is a message, a forced layout and a canvas repaint) and
-  buy almost nothing.
-
-  Every failure path falls back to the imported table, which is exactly what
-  runs today, so this can never stop a search from starting; a failed attempt is
-  remembered and not retried. A corrupt or stale cache is rejected rather than
-  trusted. To discard a measurement, clear this site's storage.
-
-  The imported `WORKER_SCALE_POINTS` table remains the fallback and is still
-  used on any machine whose calibration has not completed.
-- **The CLI raises its worker count to the CPU count for long searches**, capped at 64, and refuses more than 256. It stays at 1 when the search is expected to finish in under a second (`_PARALLEL_MIN_SECONDS = 1.0`), because creating a `spawn` pool costs ~0.3s and made short prefixes dramatically slower. Pass `--workers N` to override either way.
+- **Browser workers default to `hardwareConcurrency - 1`** (capped at 16), leaving one core for the UI. The hot loop uses adaptive yielding: it runs multiple batches before yielding, tracking frame budget to stay responsive without fixed timers. This avoids the Promise overhead of yielding every batch (which cost ~85% throughput with a free stub keygen).
+- **The CLI uses every core by default.** `--workers` defaults to all CPUs, but stays serial when the search is expected to finish in under a second, because creating a `spawn` pool costs a few tenths of a second and made short prefixes dramatically slower. Pass `--workers N` to override.
 - **Browser prefix + suffix are limited to 64 hex digits combined.** A key is exactly 64 hex digits, so longer patterns would overlap and could never match; the app refuses to start such a search.
 
 ## Output
@@ -1082,7 +436,7 @@ The encoded public key (the match). Pipe this to a file or another tool.
 
 ### stderr
 
-Progress messages, statistics, and the private key in multiple formats (stderr; suppress with `--no-output-private`).
+Progress messages, statistics, and (with `--output-private`) the private key in multiple formats.
 
 Example:
 
@@ -1094,16 +448,10 @@ Found in 123,456 attempts (2.75s, 44,893 keys/s)
 
 ## Security Notes
 
-- **Never share your private key.** The CLI prints it to **stderr by default**,
-  and so does the browser app. If you are capturing stderr — a CI log, a shared
-  terminal, a piped dashboard — pass `--no-output-private` to keep it out, or
-  redirect stderr to a file you control:
-  `./run.sh abcd 2> secret.log`.
+- **Never share your private key.** The `--output-private` flag prints it to stderr. Redirect stderr separately if you need to capture only the public key.
 - **Use a strong seed for deterministic mode.** A predictable seed means predictable keys.
 - **Verify the generated key** before using it in production.
-- **Clear the browser history when done.** `Clear All Keys` in the
-  [browser app](https://neohiro.github.io/mesh-vanity-key/) wipes
-  `localStorage`, but exported JSON/CSV files still contain private keys.
+- **Clear the browser history when done.** `Clear All Keys` in the browser app wipes `localStorage`, but exported JSON/CSV files still contain private keys.
 
 ## License
 

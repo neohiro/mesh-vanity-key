@@ -55,7 +55,10 @@ def extract(repo_root: Path) -> dict[str, str]:
         if pat in html:
             raise SystemExit(f"FAIL: banned pattern {pat!r} found in index.html")
 
-    if "await new Promise" not in worker_js:
+    # Worker must yield to the event loop so progress can be reported.
+    # Accept either the old `await new Promise(r => setTimeout(r, 0))`
+    # or the new adaptive `doYield()` using requestIdleCallback/scheduler.postTask.
+    if "await new Promise" not in worker_js and "doYield" not in worker_js:
         raise SystemExit("FAIL: worker lost its event-loop yield (progress stalls)")
 
     # A stray backtick inside the worker template literal silently terminates the
