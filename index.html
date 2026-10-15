@@ -238,7 +238,7 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            padding: 8px 12px;
+            padding: 9px 12px 7px 12px;
             font-size: 13px;
             font-weight: 600;
             color: #8b949e;
@@ -1259,13 +1259,24 @@
         // is recoverable; silently deleting their input to fit would be the
         // opposite. Switching back to a wider type restores the full cap.
         function applyKeyTypeLimits() {
-            const cfg = getKeyTypeConfig(getSelectedKeyType());
+            const keyType = getSelectedKeyType();
+            const cfg = getKeyTypeConfig(keyType);
+            const prefixInput = document.getElementById('prefix');
+
+            if (keyType === 'psk') {
+                prefixInput.disabled = true;
+                prefixInput.value = '';
+                prefixInput.placeholder = 'Disabled for Channel PSK (suffix only)';
+                prefixInput.classList.remove('error');
+                const errEl = document.getElementById('prefix-error');
+                if (errEl) errEl.style.display = 'none';
+            } else {
+                prefixInput.disabled = false;
+                prefixInput.placeholder = 'e.g., ab';
+            }
+
             for (const id of ['prefix', 'suffix']) {
                 const el = document.getElementById(id);
-                // maxlength is the widest type, never less: lowering it would
-                // block the user from typing a pattern they are about to be
-                // told is impossible, and raising it would let them exceed the
-                // CLI's cap unnoticed. The validator is the single gate.
                 el.maxLength = Math.max(PUBLIC_KEY_HEX_LENGTH, cfg.maxPatternLen);
             }
             const hint = document.getElementById('hashtype-hint');
@@ -1280,7 +1291,7 @@
             const prefixInput = document.getElementById('prefix');
             const suffixInput = document.getElementById('suffix');
 
-            const badPrefix = invalidHexChars(prefixInput.value);
+            const badPrefix = prefixInput.disabled ? [] : invalidHexChars(prefixInput.value);
             const badSuffix = invalidHexChars(suffixInput.value);
 
             if (badPrefix.length || badSuffix.length) {
