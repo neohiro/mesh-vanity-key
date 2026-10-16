@@ -940,7 +940,8 @@ def generate_vanity_key(
         if both:
             suffix_cmp, suffix_len = prefix_cmp, prefix_len
         else:
-            assert suffix_pattern is not None
+            if suffix_pattern is None:
+                raise ValueError("suffix_pattern must not be None in suffix mode")
             suffix_cmp = (
                 suffix_pattern.lower() if case_insensitive else suffix_pattern
             )
@@ -953,7 +954,8 @@ def generate_vanity_key(
         # In --both mode the pattern is repeated at the end, so the same pattern
         # is what has to be reachable there, not an empty string.
         pat = prefix if both else suffix_pattern
-        assert pat is not None
+        if pat is None:
+            raise ValueError("suffix validation pattern must not be None")
         _validate_suffix_reachable(
             encoding, pat, "suffix"
         )
