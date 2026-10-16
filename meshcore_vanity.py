@@ -807,7 +807,7 @@ def _base64_final_chars() -> frozenset[str]:
 
 
 def _validate_suffix_reachable(
-    encoding: Encoding, suffix: str, label: str
+    encoding: Encoding, suffix: str | None, label: str
 ) -> None:
     """Refuse a suffix that provably cannot occur, per encoding.
 
